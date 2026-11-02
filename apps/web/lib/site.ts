@@ -22,4 +22,6 @@ export const LIMITS: [string, string][] = [
   ["Retention", "Tasks and attempts are kept 30 days after they finish"],
   ["Crons", "10 per project, each running at most once an hour"],
   ["Watches", "A poll every 5 minutes to 24 hours, for up to 7 days"],
+  ["Captured responses", "First 16 KiB and 4 headers, kept 7 days after the task finishes"],
+  ["Inbox", "10,000 events per project; unread kept 30 days, acked 7 days"],
 ];

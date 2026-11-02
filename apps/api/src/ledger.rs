@@ -9,16 +9,19 @@
 
 use crate::db::{Db, DbError, Param};
 use runlater_core::limits::{
-    CREDIT_VALIDITY_MS, DEFAULT_MAX_ATTEMPTS, MAX_CREDIT_ATTEMPTS, MAX_CRONS, MAX_RETAINED_TASKS,
-    MAX_RETAINED_TASKS_PAID, RETENTION_MS, TRIAL_ATTEMPTS, TRIAL_DURATION_MS, WATCH_EXCERPT_BYTES,
+    CAPTURED_HEADERS, CAPTURE_BODY_BYTES, CAPTURE_RETENTION_MS, CREDIT_VALIDITY_MS,
+    DEFAULT_MAX_ATTEMPTS, INBOX_ACKED_RETENTION_MS, INBOX_DEFAULT_PAGE, INBOX_MAX_PAGE,
+    MAX_CREDIT_ATTEMPTS, MAX_CRONS, MAX_INBOX_EVENTS, MAX_RETAINED_TASKS, MAX_RETAINED_TASKS_PAID,
+    RETENTION_MS, TRIAL_ATTEMPTS, TRIAL_DURATION_MS, WATCH_EXCERPT_BYTES,
 };
 use runlater_core::{
-    judge, next_poll, valid_lane, Attempt, CancelError, ClaimError, CronRequest, CronRequestError,
-    Method, Outcome, Poll, PollBody, RedriveError, Schedule, ScheduleRequest, Status, Task, Until,
-    ValidationError, Watch, WatchRequest, WatchRequestError,
+    judge, next_poll, valid_lane, Attempt, Callback, CancelError, ClaimError, CronRequest,
+    CronRequestError, Method, Outcome, Poll, PollBody, RedriveError, Schedule, ScheduleRequest,
+    Status, Task, Until, ValidationError, Watch, WatchRequest, WatchRequestError, INBOX,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 /// A published task that has not been claimed after this long is published again.
 pub const REPUBLISH_MS: i64 = 60_000;
@@ -127,7 +130,27 @@ const MIGRATIONS: &[&[&str]] = &[
             attempts INTEGER NOT NULL,
             created_ms INTEGER NOT NULL
         )"],
+    // 6: response capture and the inbox. The project row holds the inbox's counters: the last
+    // seq handed out (seqs are never reused, even after events are removed), the read cursor,
+    // and how many unread events were removed since the cursor last moved.
+    &[
+        "ALTER TABLE tasks ADD COLUMN capture INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE tasks ADD COLUMN response TEXT",
+        "ALTER TABLE tasks ADD COLUMN inbox_seq INTEGER",
+        "ALTER TABLE project ADD COLUMN inbox_last_seq INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE project ADD COLUMN inbox_acked_seq INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE project ADD COLUMN inbox_dropped INTEGER NOT NULL DEFAULT 0",
+        "CREATE TABLE IF NOT EXISTS inbox (
+            seq INTEGER PRIMARY KEY,
+            at_ms INTEGER NOT NULL,
+            event TEXT NOT NULL
+        )",
+    ],
 ];
+
+/// SQL condition, over `tasks`: the task will queue a callback task when it finishes.
+/// Inbox reports are not tasks, so they need no attempt or row of their own.
+const OWES_CALLBACK: &str = "(callback_url IS NOT NULL AND callback_url != 'inbox')";
 
 /// SQL condition, over `tasks t`: the task may run now as far as its lane is concerned.
 /// A lane runs one task at a time. A task that has started (delivering, or retrying after a
@@ -227,6 +250,9 @@ pub struct ProjectView {
     pub paid: bool,
     /// Receivers verify `RunLater-Signature` with this.
     pub signing_secret: String,
+    /// Inbox events not yet acked; `read_inbox` returns them.
+    #[serde(default)]
+    pub inbox_unread: i64,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -259,6 +285,12 @@ pub struct TaskView {
     pub callback_task_id: Option<String>,
     /// Set on a callback task: the task it reports on.
     pub callback_for: Option<String>,
+    /// With `callback_url: "inbox"`: the inbox event for the most recent time it finished.
+    pub inbox_seq: Option<i64>,
+    /// Whether the destination's response is kept (see `response`).
+    pub capture: bool,
+    /// With `capture`: the last response the destination sent.
+    pub response: Option<CapturedResponse>,
     /// Tasks in the same lane run one at a time.
     pub lane: Option<String>,
     /// Set on a cron's runs: the cron's name.
@@ -289,6 +321,47 @@ pub struct WatchView {
     /// The last poll's response status, and up to 16 KiB of its body.
     pub last_status: Option<u16>,
     pub last_body: Option<String>,
+}
+
+/// The last response to a task with `capture`, as stored in `tasks.response`. Comes from the
+/// destination, so it is untrusted data.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CapturedResponse {
+    /// The attempt that got this response.
+    pub attempt: u32,
+    pub status: u16,
+    /// Only [`CAPTURED_HEADERS`], lowercased.
+    pub headers: BTreeMap<String, String>,
+    /// Up to 16 KiB, as UTF-8 (invalid bytes replaced). Null in lists.
+    pub body: Option<String>,
+    /// The full length, when the destination sent `Content-Length`.
+    pub body_bytes: Option<u64>,
+    /// Whether `body` is shorter than what the destination sent.
+    pub truncated: bool,
+}
+
+/// A response the consumer read for a watch's poll or a task's capture.
+#[derive(Clone, Copy, Debug)]
+pub struct ResponseRead<'a> {
+    pub body: PollBody<'a>,
+    /// Response headers the consumer kept: [`CAPTURED_HEADERS`] and `content-length`.
+    pub headers: &'a [(String, String)],
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct InboxPage {
+    /// Oldest first: `{seq, at_ms, event, ...}` with the same payload a callback or alert sends.
+    pub events: Vec<serde_json::Value>,
+    pub acked_seq: i64,
+    pub unread: i64,
+    /// Unread events removed (by age, or because the inbox was full) since the cursor last moved.
+    pub dropped: i64,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct InboxCursor {
+    pub acked_seq: i64,
+    pub unread: i64,
 }
 
 /// A watch's progress as stored in `tasks.watch_state`.
@@ -328,6 +401,10 @@ pub struct Delivery {
     /// A watch's poll: the consumer reads the response body and reports it with the outcome.
     #[serde(default)]
     pub read_body: bool,
+    /// A task with `capture`: the consumer reads the start of the body and a few headers, but
+    /// never lets a failed read change the outcome.
+    #[serde(default)]
+    pub capture: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -349,6 +426,10 @@ struct ProjectRow {
     attempts_used: i64,
     signing_secret: String,
     paid: i64,
+    inbox_last_seq: i64,
+    inbox_acked_seq: i64,
+    inbox_dropped: i64,
+    inbox_unread: i64,
 }
 
 impl ProjectRow {
@@ -362,6 +443,7 @@ impl ProjectRow {
             attempts_used: self.attempts_used,
             paid: self.paid != 0,
             signing_secret: self.signing_secret,
+            inbox_unread: self.inbox_unread,
         }
     }
 
@@ -407,6 +489,9 @@ struct TaskRow {
     watch: Option<String>,
     watch_errors: u32,
     watch_state: Option<String>,
+    capture: i64,
+    response: Option<String>,
+    inbox_seq: Option<i64>,
     created_ms: i64,
     updated_ms: i64,
 }
@@ -485,6 +570,19 @@ impl TaskRow {
         }))
     }
 
+    /// `full` includes the body; lists leave it out to stay small.
+    fn response(&self, full: bool) -> Result<Option<CapturedResponse>, DbError> {
+        let Some(stored) = &self.response else {
+            return Ok(None);
+        };
+        let mut response: CapturedResponse =
+            serde_json::from_str(stored).map_err(|e| DbError(e.to_string()))?;
+        if !full {
+            response.body = None;
+        }
+        Ok(Some(response))
+    }
+
     fn view(&self, attempts: Option<Vec<AttemptView>>) -> Result<TaskView, DbError> {
         let task = self.task()?;
         Ok(TaskView {
@@ -503,6 +601,9 @@ impl TaskRow {
             callback_url: self.callback_url.clone(),
             callback_task_id: self.callback_task_id.clone(),
             callback_for: self.callback_for.clone(),
+            inbox_seq: self.inbox_seq,
+            capture: self.capture != 0,
+            response: self.response(attempts.is_some())?,
             lane: self.lane.clone(),
             cron: self.cron.clone(),
             alert_for: self.alert_for.clone(),
@@ -518,7 +619,8 @@ impl TaskRow {
 const TASK_COLUMNS: &str = "seq, id, status, due_ms, max_attempts, run_attempts, \
     total_attempts, generation, fence, lease_until_ms, cancel_requested, terminal_ms, \
     method, url, headers, body, run_at_ms, idempotency_key, callback_url, callback_task_id, \
-    callback_for, lane, cron, alert_for, watch, watch_errors, watch_state, created_ms, updated_ms";
+    callback_for, lane, cron, alert_for, watch, watch_errors, watch_state, capture, response, \
+    inbox_seq, created_ms, updated_ms";
 
 /// A row to insert into `tasks`.
 struct NewTask<'s> {
@@ -533,6 +635,7 @@ struct NewTask<'s> {
     fingerprint: &'s str,
     callback_url: Option<&'s str>,
     callback_for: Option<&'s str>,
+    capture: bool,
     lane: Option<&'s str>,
     cron: Option<&'s str>,
     alert_for: Option<&'s str>,
@@ -694,7 +797,9 @@ impl<'a, D: Db> Ledger<'a, D> {
             .db
             .query(
                 "SELECT id, created_ms, expires_ms, attempt_budget, attempts_used, signing_secret, \
-                 EXISTS (SELECT 1 FROM payments) AS paid FROM project LIMIT 1",
+                 EXISTS (SELECT 1 FROM payments) AS paid, inbox_last_seq, inbox_acked_seq, \
+                 inbox_dropped, (SELECT COUNT(*) FROM inbox WHERE seq > p.inbox_acked_seq) \
+                 AS inbox_unread FROM project p LIMIT 1",
                 vec![],
             )?
             .pop())
@@ -822,11 +927,13 @@ impl<'a, D: Db> Ledger<'a, D> {
             ));
         }
         let counts: Vec<Counts> = self.db.query(
-            "SELECT COUNT(*) + COALESCE(SUM(status IN ('scheduled', 'retrying', 'delivering') \
-             AND callback_url IS NOT NULL), 0) AS total, \
-             COALESCE(SUM(CASE WHEN status IN ('scheduled', 'retrying', 'delivering') \
-             THEN 1 + (callback_url IS NOT NULL) ELSE 0 END), 0) AS waiting \
-             FROM tasks",
+            &format!(
+                "SELECT COUNT(*) + COALESCE(SUM(status IN ('scheduled', 'retrying', 'delivering') \
+                 AND {OWES_CALLBACK}), 0) AS total, \
+                 COALESCE(SUM(CASE WHEN status IN ('scheduled', 'retrying', 'delivering') \
+                 THEN 1 + {OWES_CALLBACK} ELSE 0 END), 0) AS waiting \
+                 FROM tasks"
+            ),
             vec![],
         )?;
         let (total, waiting) = counts.first().map_or((0, 0), |c| (c.total, c.waiting));
@@ -871,7 +978,7 @@ impl<'a, D: Db> Ledger<'a, D> {
             return Ok((existing, false));
         }
 
-        let needs = 1 + i64::from(spec.callback.is_some());
+        let needs = 1 + i64::from(matches!(spec.callback, Some(Callback::Url(_))));
         self.admit(&project, needs, needs, now)?;
         if spec.run_at_ms >= project.expires_ms {
             return Err(ApiError {
@@ -893,6 +1000,7 @@ impl<'a, D: Db> Ledger<'a, D> {
                 fingerprint: &spec.fingerprint,
                 callback_url: spec.callback.as_ref().map(|c| c.as_str()),
                 callback_for: None,
+                capture: spec.capture,
                 lane: spec.lane.as_deref(),
                 cron: None,
                 alert_for: None,
@@ -925,7 +1033,7 @@ impl<'a, D: Db> Ledger<'a, D> {
                 ..ApiError::bad_request("deadline is after this project's trial ends")
             });
         }
-        let needs = 1 + i64::from(request.callback.is_some());
+        let needs = 1 + i64::from(matches!(request.callback, Some(Callback::Url(_))));
         self.admit(&project, needs, needs, now)?;
         let watch = serde_json::to_string(&spec.watch).map_err(|e| DbError(e.to_string()))?;
         self.insert(
@@ -941,6 +1049,7 @@ impl<'a, D: Db> Ledger<'a, D> {
                 fingerprint: &request.fingerprint,
                 callback_url: request.callback.as_ref().map(|c| c.as_str()),
                 callback_for: None,
+                capture: false,
                 lane: None,
                 cron: None,
                 alert_for: None,
@@ -1013,7 +1122,7 @@ impl<'a, D: Db> Ledger<'a, D> {
                 ),
             ));
         }
-        let callbacks = i64::from(row.callback_url.is_some());
+        let callbacks = i64::from(row.callback_url.as_deref().is_some_and(|u| u != INBOX));
         self.admit(&project, callbacks, 1 + callbacks, now)?;
         self.save_row(&row, &task, now)?;
         self.task(task_id)
@@ -1204,7 +1313,8 @@ impl<'a, D: Db> Ledger<'a, D> {
             headers: row.headers()?,
             body: row.body.clone(),
             signing_secret: project.signing_secret,
-            read_body: row.watch.is_some(),
+            read_body: row.watch.is_some() || row.capture != 0,
+            capture: row.capture != 0,
         })))
     }
 
@@ -1220,13 +1330,14 @@ impl<'a, D: Db> Ledger<'a, D> {
         self.finish_response(task_id, fence, outcome, None, now, jitter)
     }
 
-    /// [`Self::finish`], with the response body when the consumer read it (a watch's poll).
+    /// [`Self::finish`], with the response when the consumer read it (a watch's poll, or a
+    /// task with `capture`).
     pub fn finish_response(
         &self,
         task_id: &str,
         fence: u64,
         outcome: Outcome,
-        body: Option<PollBody<'_>>,
+        read: Option<ResponseRead<'_>>,
         now: i64,
         jitter: f64,
     ) -> Result<Option<Status>, DbError> {
@@ -1234,15 +1345,57 @@ impl<'a, D: Db> Ledger<'a, D> {
             return Ok(None);
         };
         if row.watch.is_some() {
-            return self.finish_poll(&row, fence, outcome, body, now);
+            return self.finish_poll(&row, fence, outcome, read.map(|r| r.body), now);
         }
         let mut task = row.task()?;
         let Ok(status) = task.finish(fence, outcome, now, jitter) else {
             return Ok(None);
         };
         self.record_outcome(task_id, fence, &outcome, now)?;
+        // Before save_row, so a callback or inbox event for this finish carries the response.
+        if let (true, Outcome::Http { status, .. }, Some(read)) = (row.capture != 0, &outcome, read)
+        {
+            self.store_response(task_id, fence, *status, read)?;
+        }
         self.save_row(&row, &task, now)?;
         Ok(Some(status))
+    }
+
+    /// Keeps a response for `capture`, replacing the one from an earlier attempt.
+    fn store_response(
+        &self,
+        task_id: &str,
+        attempt: u64,
+        status: u16,
+        read: ResponseRead<'_>,
+    ) -> Result<(), DbError> {
+        let mut headers = BTreeMap::new();
+        let mut body_bytes = None;
+        for (name, value) in read.headers {
+            let name = name.to_ascii_lowercase();
+            if name == "content-length" {
+                body_bytes = value.trim().parse().ok();
+            } else if CAPTURED_HEADERS.contains(&name.as_str()) {
+                headers.insert(name, value.clone());
+            }
+        }
+        let body = excerpt(read.body.text, CAPTURE_BODY_BYTES);
+        let truncated = read.body.truncated
+            || body.len() < read.body.text.len()
+            || body_bytes.is_some_and(|n| n > body.len() as u64);
+        let response = CapturedResponse {
+            attempt: attempt as u32,
+            status,
+            headers,
+            body: Some(body),
+            body_bytes,
+            truncated,
+        };
+        let response = serde_json::to_string(&response).map_err(|e| DbError(e.to_string()))?;
+        self.db.exec(
+            "UPDATE tasks SET response = ? WHERE id = ?",
+            vec![response.into(), task_id.into()],
+        )
     }
 
     /// Settles attempts whose consumer vanished. Returns how many were recovered.
@@ -1269,8 +1422,15 @@ impl<'a, D: Db> Ledger<'a, D> {
         Ok(rows.len())
     }
 
-    /// Deletes tasks whose retention period has passed. Returns how many.
+    /// Deletes tasks whose retention period has passed, captured responses a week after
+    /// their task finished, and old inbox events. Returns how many tasks.
     pub fn purge(&self, now: i64) -> Result<usize, DbError> {
+        self.db.exec(
+            "UPDATE tasks SET response = NULL WHERE response IS NOT NULL \
+             AND terminal_ms IS NOT NULL AND terminal_ms <= ?",
+            vec![(now - CAPTURE_RETENTION_MS).into()],
+        )?;
+        self.purge_inbox(now)?;
         let cutoff = now - RETENTION_MS;
         let expired: Vec<IdRow> = self.db.query(
             "SELECT id FROM tasks WHERE terminal_ms IS NOT NULL AND terminal_ms <= ?",
@@ -1304,7 +1464,20 @@ impl<'a, D: Db> Ledger<'a, D> {
             ),
             vec![],
         )?;
-        Ok(rows.first().and_then(|w| w.t))
+        // A second query: Durable Object SQLite allows at most five terms in a compound SELECT.
+        let deletions: Vec<Wake> = self.db.query(
+            &format!(
+                "SELECT MIN(t) AS t FROM ( \
+                 SELECT terminal_ms + {CAPTURE_RETENTION_MS} AS t FROM tasks \
+                   WHERE response IS NOT NULL AND terminal_ms IS NOT NULL \
+                 UNION ALL SELECT MIN(at_ms) + {INBOX_ACKED_RETENTION_MS} FROM inbox \
+                   WHERE seq <= (SELECT inbox_acked_seq FROM project) \
+                 UNION ALL SELECT MIN(at_ms) + {RETENTION_MS} FROM inbox \
+                   WHERE seq > (SELECT inbox_acked_seq FROM project))"
+            ),
+            vec![],
+        )?;
+        Ok(rows.iter().chain(&deletions).filter_map(|w| w.t).min())
     }
 
     // -- crons ----------------------------------------------------------------------------
@@ -1455,6 +1628,7 @@ impl<'a, D: Db> Ledger<'a, D> {
                     fingerprint: "cron",
                     callback_url: None,
                     callback_for: None,
+                    capture: false,
                     lane: None,
                     cron: Some(&cron.name),
                     alert_for: None,
@@ -1569,6 +1743,10 @@ impl<'a, D: Db> Ledger<'a, D> {
             "task_id": task_id,
             "cron": cron.view()?,
         });
+        if url == INBOX {
+            let seq = self.next_inbox_seq()?;
+            return self.add_to_inbox(seq, &report, now);
+        }
         self.insert(
             NewTask {
                 id: &derived_id(&format!(
@@ -1585,6 +1763,7 @@ impl<'a, D: Db> Ledger<'a, D> {
                 fingerprint: "alert",
                 callback_url: None,
                 callback_for: None,
+                capture: false,
                 lane: None,
                 cron: None,
                 alert_for: Some(name),
@@ -1655,6 +1834,171 @@ impl<'a, D: Db> Ledger<'a, D> {
         )
     }
 
+    // -- inbox ----------------------------------------------------------------------------
+
+    /// Unread events, or those after `after`, oldest first. With `ack`, also acks up to the
+    /// last one returned. `dropped` is reported as it was before that ack.
+    pub fn read_inbox(
+        &self,
+        after: Option<i64>,
+        limit: Option<usize>,
+        ack: bool,
+    ) -> Result<InboxPage, ApiError> {
+        let project = self.project_row()?.ok_or_else(no_project)?;
+        if after.is_some_and(|a| a < 0) {
+            return Err(ApiError {
+                field: Some("after"),
+                ..ApiError::bad_request("after must not be negative")
+            });
+        }
+        let limit = limit.unwrap_or(INBOX_DEFAULT_PAGE).clamp(1, INBOX_MAX_PAGE);
+        let rows: Vec<InboxRow> = self.db.query(
+            "SELECT seq, at_ms, event FROM inbox WHERE seq > ? ORDER BY seq LIMIT ?",
+            vec![
+                after.unwrap_or(project.inbox_acked_seq).into(),
+                (limit as i64).into(),
+            ],
+        )?;
+        let events = rows
+            .iter()
+            .map(InboxRow::event)
+            .collect::<Result<Vec<_>, _>>()?;
+        let cursor = match rows.last() {
+            Some(last) if ack => self.move_cursor(&project, last.seq)?,
+            _ => InboxCursor {
+                acked_seq: project.inbox_acked_seq,
+                unread: project.inbox_unread,
+            },
+        };
+        Ok(InboxPage {
+            events,
+            acked_seq: cursor.acked_seq,
+            unread: cursor.unread,
+            dropped: project.inbox_dropped,
+        })
+    }
+
+    /// Marks every event up to `up_to` read. The cursor only moves forward, so a session
+    /// acking late never undoes a newer one's ack.
+    pub fn ack_inbox(&self, up_to: i64) -> Result<InboxCursor, ApiError> {
+        let project = self.project_row()?.ok_or_else(no_project)?;
+        if up_to < 0 {
+            return Err(ApiError {
+                field: Some("up_to"),
+                ..ApiError::bad_request("up_to must not be negative")
+            });
+        }
+        if up_to > project.inbox_last_seq {
+            return Err(ApiError {
+                field: Some("up_to"),
+                ..ApiError::new(
+                    400,
+                    "ack_beyond_inbox",
+                    format!(
+                        "up_to is past the newest event ({}); ack only events you have read",
+                        project.inbox_last_seq
+                    ),
+                )
+            });
+        }
+        Ok(self.move_cursor(&project, up_to)?)
+    }
+
+    fn move_cursor(&self, project: &ProjectRow, up_to: i64) -> Result<InboxCursor, DbError> {
+        if up_to > project.inbox_acked_seq {
+            self.db.exec(
+                "UPDATE project SET inbox_acked_seq = ?, inbox_dropped = 0",
+                vec![up_to.into()],
+            )?;
+        }
+        let acked_seq = up_to.max(project.inbox_acked_seq);
+        let unread: Vec<Counts> = self.db.query(
+            "SELECT COUNT(*) AS total, 0 AS waiting FROM inbox WHERE seq > ?",
+            vec![acked_seq.into()],
+        )?;
+        Ok(InboxCursor {
+            acked_seq,
+            unread: unread.first().map_or(0, |c| c.total),
+        })
+    }
+
+    /// Hands out the next event number. Separate from [`Self::add_to_inbox`] so a task can
+    /// name its own event inside the report it carries.
+    fn next_inbox_seq(&self) -> Result<i64, DbError> {
+        self.db.exec(
+            "UPDATE project SET inbox_last_seq = inbox_last_seq + 1",
+            vec![],
+        )?;
+        let rows: Vec<SeqRow> = self
+            .db
+            .query("SELECT inbox_last_seq AS seq FROM project", vec![])?;
+        rows.first()
+            .map(|r| r.seq)
+            .ok_or_else(|| DbError("no project for the inbox".into()))
+    }
+
+    /// Adds an event. A full inbox makes room by removing its oldest acked event, or if every
+    /// event is unread, its oldest one, counted in `dropped`.
+    fn add_to_inbox(&self, seq: i64, event: &serde_json::Value, now: i64) -> Result<(), DbError> {
+        self.db.exec(
+            "INSERT INTO inbox (seq, at_ms, event) VALUES (?, ?, ?)",
+            vec![seq.into(), now.into(), event.to_string().into()],
+        )?;
+        let held: Vec<Counts> = self
+            .db
+            .query("SELECT COUNT(*) AS total, 0 AS waiting FROM inbox", vec![])?;
+        if held.first().map_or(0, |c| c.total) <= MAX_INBOX_EVENTS {
+            return Ok(());
+        }
+        let oldest: Vec<OldestRow> = self.db.query(
+            "SELECT seq, seq > (SELECT inbox_acked_seq FROM project) AS unread FROM inbox \
+             ORDER BY unread, seq LIMIT 1",
+            vec![],
+        )?;
+        if let Some(oldest) = oldest.first() {
+            self.db
+                .exec("DELETE FROM inbox WHERE seq = ?", vec![oldest.seq.into()])?;
+            if oldest.unread != 0 {
+                self.db.exec(
+                    "UPDATE project SET inbox_dropped = inbox_dropped + 1",
+                    vec![],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Acked events go a week after they arrived; unread ones after the task retention
+    /// period, counted in `dropped`.
+    fn purge_inbox(&self, now: i64) -> Result<(), DbError> {
+        let Some(project) = self.project_row()? else {
+            return Ok(());
+        };
+        self.db.exec(
+            "DELETE FROM inbox WHERE seq <= ? AND at_ms <= ?",
+            vec![
+                project.inbox_acked_seq.into(),
+                (now - INBOX_ACKED_RETENTION_MS).into(),
+            ],
+        )?;
+        let stale: Vec<Counts> = self.db.query(
+            "SELECT COUNT(*) AS total, 0 AS waiting FROM inbox WHERE seq > ? AND at_ms <= ?",
+            vec![project.inbox_acked_seq.into(), (now - RETENTION_MS).into()],
+        )?;
+        let stale = stale.first().map_or(0, |c| c.total);
+        if stale > 0 {
+            self.db.exec(
+                "DELETE FROM inbox WHERE seq > ? AND at_ms <= ?",
+                vec![project.inbox_acked_seq.into(), (now - RETENTION_MS).into()],
+            )?;
+            self.db.exec(
+                "UPDATE project SET inbox_dropped = inbox_dropped + ?",
+                vec![stale.into()],
+            )?;
+        }
+        Ok(())
+    }
+
     // -- helpers --------------------------------------------------------------------------
 
     fn lane_clear(&self, task_id: &str) -> Result<bool, DbError> {
@@ -1680,8 +2024,9 @@ impl<'a, D: Db> Ledger<'a, D> {
                 "{verb} INTO tasks (id, status, due_ms, max_attempts, run_attempts, \
              total_attempts, generation, fence, lease_until_ms, cancel_requested, terminal_ms, \
              published_ms, method, url, headers, body, run_at_ms, idempotency_key, fingerprint, \
-             callback_url, callback_for, lane, cron, alert_for, watch, created_ms, updated_ms) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+             callback_url, callback_for, capture, lane, cron, alert_for, watch, created_ms, \
+             updated_ms) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             ),
             vec![
                 (*id).into(),
@@ -1704,6 +2049,7 @@ impl<'a, D: Db> Ledger<'a, D> {
                 new.fingerprint.into(),
                 new.callback_url.into(),
                 new.callback_for.into(),
+                new.capture.into(),
                 new.lane.into(),
                 new.cron.into(),
                 new.alert_for.into(),
@@ -1738,10 +2084,25 @@ impl<'a, D: Db> Ledger<'a, D> {
                 vec![names.into(), row.id.as_str().into()],
             )?;
         }
-        match &row.callback_url {
+        match row.callback_url.as_deref() {
+            Some(INBOX) => self.report_to_inbox(&row.id, now),
             Some(url) => self.queue_callback(&row.id, url, task.generation, now),
             None => Ok(()),
         }
+    }
+
+    /// The inbox's version of a callback: the same report, as an event, in this transaction.
+    fn report_to_inbox(&self, task_id: &str, now: i64) -> Result<(), DbError> {
+        let seq = self.next_inbox_seq()?;
+        self.db.exec(
+            "UPDATE tasks SET inbox_seq = ? WHERE id = ?",
+            vec![seq.into(), task_id.into()],
+        )?;
+        let row = self
+            .task_row(task_id)?
+            .ok_or_else(|| DbError(format!("task {task_id} vanished")))?;
+        let report = serde_json::json!({ "event": "task.finished", "task": self.full_view(&row)? });
+        self.add_to_inbox(seq, &report, now)
     }
 
     /// A callback is an ordinary task: signed, retried and visible through get_task. Admission
@@ -1775,6 +2136,7 @@ impl<'a, D: Db> Ledger<'a, D> {
                 fingerprint: "callback",
                 callback_url: None,
                 callback_for: Some(task_id),
+                capture: false,
                 lane: None,
                 cron: None,
                 alert_for: None,
@@ -1874,6 +2236,36 @@ struct DueRow {
 #[derive(Deserialize)]
 struct IdRow {
     id: String,
+}
+
+#[derive(Deserialize)]
+struct SeqRow {
+    seq: i64,
+}
+
+#[derive(Deserialize)]
+struct OldestRow {
+    seq: i64,
+    unread: i64,
+}
+
+#[derive(Deserialize)]
+struct InboxRow {
+    seq: i64,
+    at_ms: i64,
+    event: String,
+}
+
+impl InboxRow {
+    fn event(&self) -> Result<serde_json::Value, DbError> {
+        let mut event: serde_json::Value =
+            serde_json::from_str(&self.event).map_err(|e| DbError(e.to_string()))?;
+        if let Some(fields) = event.as_object_mut() {
+            fields.insert("seq".into(), self.seq.into());
+            fields.insert("at_ms".into(), self.at_ms.into());
+        }
+        Ok(event)
+    }
 }
 
 #[derive(Deserialize)]
@@ -3140,11 +3532,14 @@ mod tests {
             .expect("poll is due");
         let a = deliver(l, &d, now);
         assert!(a.read_body, "polls read the response");
-        let body = body.map(|text| PollBody {
-            text,
-            truncated: false,
+        let read = body.map(|text| ResponseRead {
+            body: PollBody {
+                text,
+                truncated: false,
+            },
+            headers: &[],
         });
-        l.finish_response(id, a.fence, outcome, body, now, 0.0)
+        l.finish_response(id, a.fence, outcome, read, now, 0.0)
             .unwrap()
             .expect("current poll")
     }
@@ -3409,5 +3804,440 @@ mod tests {
             |r| r.get(0),
         )
         .unwrap()
+    }
+
+    // -- capture and the inbox -------------------------------------------------------------
+
+    fn captured(extra: serde_json::Value) -> ScheduleRequest {
+        let mut r = serde_json::json!({ "url": "https://a.example.com/", "capture": true });
+        r.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(r).unwrap()
+    }
+
+    /// Delivers `id` now and finishes it with this response.
+    fn answer(
+        l: &Ledger<'_, Memory>,
+        id: &str,
+        status: u16,
+        body: &str,
+        headers: &[(&str, &str)],
+        now: i64,
+    ) -> Option<Status> {
+        let d = l
+            .publish_due(P, now)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.task_id == id)
+            .expect("task is due");
+        let a = deliver(l, &d, now);
+        let headers: Vec<(String, String)> = headers
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let read = ResponseRead {
+            body: PollBody {
+                text: body,
+                truncated: false,
+            },
+            headers: &headers,
+        };
+        l.finish_response(id, a.fence, http(status), Some(read), now, 0.0)
+            .unwrap()
+    }
+
+    #[test]
+    fn capture_keeps_the_last_response() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.schedule(captured(serde_json::json!({})), "t1", T0)
+            .unwrap();
+        let d = &l.publish_due(P, T0).unwrap()[0];
+        let a = deliver(&l, d, T0);
+        assert!(a.read_body && a.capture);
+
+        let busy = [("Retry-After", "5"), ("X-Secret", "s3cr3t")];
+        answer_fenced(&l, "t1", a.fence, 503, r#"{"error":"busy"}"#, &busy, T0);
+        let r = l.task("t1").unwrap().response.expect("captured");
+        assert_eq!((r.attempt, r.status), (1, 503));
+        assert_eq!(r.body.as_deref(), Some(r#"{"error":"busy"}"#));
+        assert_eq!(
+            r.headers.into_iter().collect::<Vec<_>>(),
+            [("retry-after".to_string(), "5".to_string())],
+            "only the allowlisted headers"
+        );
+
+        // The next attempt replaces it; a long body is cut to 16 KiB.
+        let big = "x".repeat(CAPTURE_BODY_BYTES + 10);
+        let retry = l.task("t1").unwrap().next_attempt_ms.unwrap();
+        let length = big.len().to_string();
+        answer(
+            &l,
+            "t1",
+            200,
+            &big,
+            &[("Content-Type", "text/plain"), ("Content-Length", &length)],
+            retry,
+        );
+        let t = l.task("t1").unwrap();
+        assert_eq!(t.status, Status::Succeeded);
+        let r = t.response.unwrap();
+        assert_eq!((r.attempt, r.status, r.truncated), (2, 200, true));
+        assert_eq!(r.body.unwrap().len(), CAPTURE_BODY_BYTES);
+        assert_eq!(r.body_bytes, Some(big.len() as u64));
+        assert_eq!(r.headers["content-type"], "text/plain");
+
+        let listed = l.list(None, None, None, None).unwrap().tasks.remove(0);
+        assert!(listed.capture);
+        let r = listed.response.unwrap();
+        assert_eq!((r.status, r.body), (200, None), "lists leave out the body");
+    }
+
+    fn answer_fenced(
+        l: &Ledger<'_, Memory>,
+        id: &str,
+        fence: u64,
+        status: u16,
+        body: &str,
+        headers: &[(&str, &str)],
+        now: i64,
+    ) {
+        let headers: Vec<(String, String)> = headers
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let read = ResponseRead {
+            body: PollBody {
+                text: body,
+                truncated: false,
+            },
+            headers: &headers,
+        };
+        l.finish_response(id, fence, http(status), Some(read), now, 0.0)
+            .unwrap()
+            .expect("current attempt");
+    }
+
+    #[test]
+    fn without_capture_no_response_is_kept() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.schedule(req("https://a.example.com/"), "t1", T0).unwrap();
+        let d = &l.publish_due(P, T0).unwrap()[0];
+        assert!(!deliver(&l, d, T0).read_body);
+        answer_fenced(&l, "t1", 1, 200, "ok", &[], T0);
+        let t = l.task("t1").unwrap();
+        assert!(!t.capture);
+        assert_eq!(t.response, None);
+    }
+
+    #[test]
+    fn captured_responses_go_a_week_after_the_task_finishes() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.schedule(captured(serde_json::json!({})), "t1", T0)
+            .unwrap();
+        answer(&l, "t1", 200, "token=abc", &[], T0);
+        assert_eq!(l.next_wake().unwrap(), Some(T0 + CAPTURE_RETENTION_MS));
+        l.purge(T0 + CAPTURE_RETENTION_MS - 1).unwrap();
+        assert!(l.task("t1").unwrap().response.is_some());
+        l.purge(T0 + CAPTURE_RETENTION_MS).unwrap();
+        let t = l.task("t1").unwrap();
+        assert_eq!((t.capture, t.response), (true, None));
+        assert_eq!(l.next_wake().unwrap(), Some(T0 + RETENTION_MS));
+    }
+
+    #[test]
+    fn a_failed_capture_keeps_its_response_through_a_redrive() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.schedule(captured(serde_json::json!({ "max_attempts": 1 })), "t1", T0)
+            .unwrap();
+        answer(&l, "t1", 422, r#"{"error":"email taken"}"#, &[], T0);
+        assert_eq!(l.task("t1").unwrap().status, Status::Failed);
+        let t = l.redrive("t1", T0 + 10).unwrap();
+        assert_eq!(t.response.unwrap().status, 422);
+    }
+
+    fn inbox(l: &Ledger<'_, Memory>) -> InboxPage {
+        l.read_inbox(None, None, false).unwrap()
+    }
+
+    #[test]
+    fn a_finished_task_reports_to_the_inbox() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let (t, _) = l
+            .schedule(
+                captured(serde_json::json!({ "callback_url": "inbox" })),
+                "t1",
+                T0,
+            )
+            .unwrap();
+        assert_eq!(
+            (t.callback_url.as_deref(), t.inbox_seq),
+            (Some("inbox"), None)
+        );
+        assert_eq!(inbox(&l).events, Vec::<serde_json::Value>::new());
+
+        answer(
+            &l,
+            "t1",
+            200,
+            r#"{"status":"failed","step":"migrate"}"#,
+            &[],
+            T0 + 5,
+        );
+        let t = l.task("t1").unwrap();
+        assert_eq!(
+            (t.callback_task_id, t.inbox_seq),
+            (None, Some(1)),
+            "no callback task"
+        );
+        assert_eq!(l.project().unwrap().inbox_unread, 1);
+        assert_eq!(l.project().unwrap().attempts_used, 1);
+
+        let page = inbox(&l);
+        assert_eq!((page.acked_seq, page.unread, page.dropped), (0, 1, 0));
+        let e = &page.events[0];
+        assert_eq!(
+            (e["seq"].as_i64(), e["at_ms"].as_i64()),
+            (Some(1), Some(T0 + 5))
+        );
+        assert_eq!(e["event"], "task.finished");
+        assert_eq!(e["task"]["id"], "t1");
+        assert_eq!(e["task"]["inbox_seq"], 1);
+        assert_eq!(e["task"]["response"]["status"], 200);
+        assert_eq!(
+            e["task"]["response"]["body"],
+            r#"{"status":"failed","step":"migrate"}"#
+        );
+        assert_eq!(e["task"]["attempts"][0]["http_status"], 200);
+
+        // Reading does not move the cursor; acking does.
+        assert_eq!(inbox(&l).events.len(), 1);
+        assert_eq!(
+            l.ack_inbox(1).unwrap(),
+            InboxCursor {
+                acked_seq: 1,
+                unread: 0
+            }
+        );
+        assert_eq!(inbox(&l).events.len(), 0);
+        assert_eq!(l.project().unwrap().inbox_unread, 0);
+        // Acked events can still be replayed for a while.
+        assert_eq!(l.read_inbox(Some(0), None, false).unwrap().events.len(), 1);
+    }
+
+    #[test]
+    fn every_finish_adds_an_event() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let to_inbox = |extra: serde_json::Value| {
+            let mut r =
+                serde_json::json!({ "url": "https://a.example.com/", "callback_url": "inbox" });
+            r.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<ScheduleRequest>(r).unwrap()
+        };
+        l.schedule(to_inbox(serde_json::json!({ "delay": "1h" })), "c", T0)
+            .unwrap();
+        l.cancel("c", T0).unwrap();
+        l.cancel("c", T0 + 1).unwrap();
+        l.schedule(to_inbox(serde_json::json!({ "max_attempts": 1 })), "f", T0)
+            .unwrap();
+        answer(&l, "f", 500, "", &[], T0);
+        l.redrive("f", T0 + 10).unwrap();
+        answer(&l, "f", 500, "", &[], T0 + 10);
+
+        let events = inbox(&l).events;
+        let seen: Vec<_> = events
+            .iter()
+            .map(|e| {
+                (
+                    e["seq"].as_i64().unwrap(),
+                    e["task"]["id"].as_str().unwrap(),
+                    e["task"]["status"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [(1, "c", "canceled"), (2, "f", "failed"), (3, "f", "failed")]
+        );
+        assert_eq!(l.task("f").unwrap().inbox_seq, Some(3));
+    }
+
+    #[test]
+    fn inbox_reports_cost_no_attempt_and_survive_the_budget() {
+        let db = Memory::new();
+        let l = setup(&db);
+        db.0.execute("UPDATE project SET attempt_budget = 2", [])
+            .unwrap();
+        let to_inbox = || ScheduleRequest {
+            callback_url: Some(INBOX.into()),
+            ..req("https://a.example.com/")
+        };
+        // A URL callback would reserve a second attempt; the inbox does not.
+        l.schedule(to_inbox(), "t1", T0).unwrap();
+        l.schedule(to_inbox(), "t2", T0).unwrap();
+        assert_eq!(
+            l.schedule(to_inbox(), "t3", T0).unwrap_err().code,
+            "budget_exhausted"
+        );
+
+        // Abandoned for lack of budget still reports.
+        db.0.execute("UPDATE project SET attempts_used = 2", [])
+            .unwrap();
+        let d = l.publish_due(P, T0).unwrap().remove(0);
+        assert_eq!(
+            l.claim(&d.task_id, d.generation, T0).unwrap(),
+            Claimed::Skip("budget_exhausted")
+        );
+        let e = &inbox(&l).events[0];
+        assert_eq!(e["task"]["id"], d.task_id.as_str());
+        assert_eq!(e["task"]["status"], "failed");
+    }
+
+    #[test]
+    fn the_inbox_cursor_only_moves_forward() {
+        let db = Memory::new();
+        let l = setup(&db);
+        for i in 0..5 {
+            let seq = l.next_inbox_seq().unwrap();
+            l.add_to_inbox(seq, &serde_json::json!({ "event": "test", "i": i }), T0)
+                .unwrap();
+        }
+        let e = l.ack_inbox(6).unwrap_err();
+        assert_eq!(
+            (e.status, e.code, e.field),
+            (400, "ack_beyond_inbox", Some("up_to"))
+        );
+        assert_eq!(l.ack_inbox(-1).unwrap_err().field, Some("up_to"));
+        assert_eq!(l.ack_inbox(3).unwrap().acked_seq, 3);
+        assert_eq!(
+            l.ack_inbox(1).unwrap(),
+            InboxCursor {
+                acked_seq: 3,
+                unread: 2
+            },
+            "a late ack changes nothing"
+        );
+
+        // read with ack: acks up to the last event returned, no further.
+        let page = l.read_inbox(None, Some(1), true).unwrap();
+        assert_eq!(page.events[0]["seq"], 4);
+        assert_eq!((page.acked_seq, page.unread), (4, 1));
+        let page = l.read_inbox(None, Some(500), true).unwrap();
+        assert_eq!((page.events.len(), page.acked_seq, page.unread), (1, 5, 0));
+        let page = l.read_inbox(None, None, true).unwrap();
+        assert_eq!(
+            (page.events.len(), page.acked_seq),
+            (0, 5),
+            "nothing left to ack"
+        );
+        assert_eq!(
+            l.read_inbox(Some(-1), None, false).unwrap_err().field,
+            Some("after")
+        );
+        assert_eq!(
+            l.read_inbox(Some(0), Some(0), false).unwrap().events.len(),
+            1,
+            "limit clamps to 1"
+        );
+    }
+
+    #[test]
+    fn a_full_inbox_drops_acked_events_first_and_says_so() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let add = |n: i64| {
+            for _ in 0..n {
+                let seq = l.next_inbox_seq().unwrap();
+                l.add_to_inbox(seq, &serde_json::json!({ "event": "test" }), T0)
+                    .unwrap();
+            }
+        };
+        add(MAX_INBOX_EVENTS);
+        l.ack_inbox(2).unwrap();
+        add(2);
+        let first = l.read_inbox(Some(0), Some(1), false).unwrap();
+        assert_eq!(
+            (first.events[0]["seq"].as_i64(), first.dropped),
+            (Some(3), 0)
+        );
+
+        add(1);
+        let page = l.read_inbox(None, Some(1), false).unwrap();
+        assert_eq!((page.events[0]["seq"].as_i64(), page.dropped), (Some(4), 1));
+        assert_eq!(page.unread, MAX_INBOX_EVENTS);
+        // Moving the cursor resets the count, but the reply that moved it still shows it.
+        assert_eq!(l.read_inbox(None, Some(1), true).unwrap().dropped, 1);
+        assert_eq!(inbox(&l).dropped, 0);
+    }
+
+    #[test]
+    fn old_inbox_events_are_purged() {
+        let db = Memory::new();
+        let l = setup(&db);
+        for at in [T0, T0 + 1] {
+            let seq = l.next_inbox_seq().unwrap();
+            l.add_to_inbox(seq, &serde_json::json!({ "event": "test" }), at)
+                .unwrap();
+        }
+        l.ack_inbox(1).unwrap();
+        assert_eq!(l.next_wake().unwrap(), Some(T0 + INBOX_ACKED_RETENTION_MS));
+        l.purge(T0 + INBOX_ACKED_RETENTION_MS).unwrap();
+        let page = l.read_inbox(Some(0), None, false).unwrap();
+        assert_eq!(page.events.len(), 1, "the acked event is gone");
+        assert_eq!(l.next_wake().unwrap(), Some(T0 + 1 + RETENTION_MS));
+        l.purge(T0 + 1 + RETENTION_MS).unwrap();
+        let page = inbox(&l);
+        assert_eq!((page.events.len(), page.unread, page.dropped), (0, 0, 1));
+        assert_eq!(l.next_wake().unwrap(), None);
+    }
+
+    #[test]
+    fn a_cron_can_alert_to_the_inbox() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let cron = CronRequest {
+            alert_url: Some(INBOX.into()),
+            ..daily("backup")
+        };
+        assert_eq!(
+            l.put_cron(cron, T0).unwrap().0.alert_url.as_deref(),
+            Some("inbox")
+        );
+        l.fire_crons(SIX).unwrap();
+        let run = run_cron_task(&l, "backup", 500, SIX);
+        assert_eq!(
+            alerts(&db, "backup"),
+            Vec::<serde_json::Value>::new(),
+            "no alert task"
+        );
+        let e = &inbox(&l).events[0];
+        assert_eq!(e["event"], "cron.failing");
+        assert_eq!(e["reason"], "run_failed");
+        assert_eq!(e["task_id"], run.as_str());
+        assert_eq!(e["cron"]["name"], "backup");
+    }
+
+    #[test]
+    fn a_watch_can_report_to_the_inbox() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.watch(
+            watching(serde_json::json!({ "callback_url": "inbox" })),
+            "w1",
+            T0,
+        )
+        .unwrap();
+        poll(&l, "w1", http(200), Some(r#"{"status":"succeeded"}"#), T0);
+        let e = &inbox(&l).events[0];
+        assert_eq!(e["task"]["watch"]["reason"], "matched");
+        assert_eq!(l.task("w1").unwrap().callback_task_id, None);
     }
 }

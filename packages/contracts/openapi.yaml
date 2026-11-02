@@ -194,6 +194,54 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Cron" }
         default: { $ref: "#/components/responses/Error" }
+  /v1/inbox/read:
+    post:
+      operationId: readInbox
+      description: >
+        Events after `after` (default: the acked cursor), oldest first. Reading does not move
+        the cursor unless `ack` is true, which acks up to the last event returned. `dropped`
+        is reported as it was before that ack. Scope: read.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                after: { type: integer, minimum: 0 }
+                limit: { type: integer, minimum: 1, maximum: 50, default: 10 }
+                ack: { type: boolean, default: false }
+      responses:
+        "200":
+          description: A page of inbox events.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InboxPage" }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/inbox/ack:
+    post:
+      operationId: ackInbox
+      description: >
+        Moves the cursor forward to up_to; an older up_to changes nothing. 400 ack_beyond_inbox
+        when up_to is past the newest event. Scope: read (it moves only the reader's cursor).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [up_to]
+              properties:
+                up_to: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: The cursor after the ack.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InboxCursor" }
+        default: { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     assertion:
@@ -234,7 +282,7 @@ components:
           schema: { $ref: "#/components/schemas/Cron" }
     Error:
       description: >
-        400 invalid_request, 401 unauthorized, 402 budget_exhausted, 403 forbidden or
+        400 invalid_request / ack_beyond_inbox, 401 unauthorized, 402 budget_exhausted, 403 forbidden or
         trial_expired, 404 not_found / project_not_found / task_not_found / cron_not_found,
         409 idempotency_conflict / task_finished / task_not_failed / watch_not_redrivable,
         429 task_limit (1,000 tasks held, finished ones included until purged) / cron_limit,
@@ -265,7 +313,7 @@ components:
         every: { type: string, pattern: "^[0-9]{1,7}[smhd]$", description: "Between polls: 5m to 24h." }
         until: { $ref: "#/components/schemas/Until" }
         deadline: { type: string, pattern: "^[0-9]{1,7}[smhd]$", description: "At least one interval, at most 7d, and before the trial ends." }
-        callback_url: { type: string, maxLength: 2048 }
+        callback_url: { type: string, maxLength: 2048, description: 'https:// URL, or "inbox".' }
         idempotency_key: { type: string, pattern: "^[A-Za-z0-9_-]{1,128}$" }
     Until:
       type: object
@@ -311,7 +359,7 @@ components:
           maxLength: 2048
           description: >
             Gets a signed POST {"event": "cron.failing" | "cron.recovered", "reason", "task_id", "cron": <Cron>}
-            when the cron starts failing and when it recovers.
+            when the cron starts failing and when it recovers. "inbox" adds that payload to the inbox instead.
     Cron:
       type: object
       description: Header values and the body are never returned.
@@ -344,7 +392,7 @@ components:
       enum: [GET, POST, PUT, PATCH, DELETE]
     Project:
       type: object
-      required: [id, created_ms, expires_ms, attempt_budget, attempts_used, attempts_remaining, paid, signing_secret]
+      required: [id, created_ms, expires_ms, attempt_budget, attempts_used, attempts_remaining, paid, signing_secret, inbox_unread]
       properties:
         id: { type: string }
         created_ms: { type: integer }
@@ -354,6 +402,7 @@ components:
         attempts_remaining: { type: integer }
         paid: { type: boolean, description: Whether attempts have ever been bought for this project. }
         signing_secret: { type: string, description: Verifies RunLater-Signature on deliveries. }
+        inbox_unread: { type: integer, description: Inbox events after the acked cursor. }
     ScheduleRequest:
       type: object
       additionalProperties: false
@@ -373,7 +422,12 @@ components:
           maxLength: 2048
           description: >
             https:// to a public DNS name. When the task succeeds, fails or is canceled, a callback task POSTs
-            {"event": "task.finished", "task": <Task with attempts>} here, signed like any delivery.
+            {"event": "task.finished", "task": <Task with attempts>} here, signed like any delivery. Or "inbox":
+            the same payload becomes an inbox event, in the same transaction, using no attempt or task slot.
+        capture:
+          type: boolean
+          default: false
+          description: Keep the destination's last response as the task's `response`.
         idempotency_key: { type: string, pattern: "^[A-Za-z0-9_-]{1,128}$" }
         max_attempts: { type: integer, minimum: 1, maximum: 5, default: 5 }
         lane:
@@ -395,7 +449,7 @@ components:
         http_status: { type: [integer, "null"] }
     Task:
       type: object
-      required: [id, status, method, url, header_names, body_bytes, run_at_ms, next_attempt_ms, max_attempts, attempt_count, idempotency_key, callback_url, callback_task_id, callback_for, lane, cron, alert_for, watch, created_ms, updated_ms, finished_ms]
+      required: [id, status, method, url, header_names, body_bytes, run_at_ms, next_attempt_ms, max_attempts, attempt_count, idempotency_key, callback_url, callback_task_id, callback_for, inbox_seq, capture, response, lane, cron, alert_for, watch, created_ms, updated_ms, finished_ms]
       description: Header values and the body are never returned; they may hold credentials.
       properties:
         id: { type: string }
@@ -412,6 +466,11 @@ components:
         callback_url: { type: [string, "null"] }
         callback_task_id: { type: [string, "null"], description: The callback task for the most recent time this task finished. }
         callback_for: { type: [string, "null"], description: "Set on callback tasks: the task being reported on." }
+        inbox_seq: { type: [integer, "null"], description: 'With callback_url "inbox": the event for the most recent time it finished.' }
+        capture: { type: boolean }
+        response:
+          oneOf: [{ $ref: "#/components/schemas/CapturedResponse" }, { type: "null" }]
+          description: With capture, the last response; null until one arrives and once deleted, 7 days after the task finishes.
         lane: { type: [string, "null"] }
         cron: { type: [string, "null"], description: Set on a cron's runs. }
         alert_for: { type: [string, "null"], description: Set on cron alerts. }
@@ -425,3 +484,42 @@ components:
           type: array
           items: { $ref: "#/components/schemas/Attempt" }
           description: Present on getTask and on mutations; omitted in lists.
+    CapturedResponse:
+      type: object
+      description: From the destination, so untrusted.
+      required: [attempt, status, headers, body, body_bytes, truncated]
+      properties:
+        attempt: { type: integer, description: The attempt that got this response. }
+        status: { type: integer }
+        headers:
+          type: object
+          additionalProperties: { type: string }
+          description: Only content-type, location, etag and retry-after, lowercased.
+        body: { type: [string, "null"], description: "First 16 KiB as UTF-8, invalid bytes replaced. Null in lists." }
+        body_bytes: { type: [integer, "null"], description: Content-Length, when sent. }
+        truncated: { type: boolean }
+    InboxPage:
+      type: object
+      required: [events, acked_seq, unread, dropped]
+      properties:
+        events:
+          type: array
+          items:
+            type: object
+            required: [seq, at_ms, event]
+            description: >
+              The payload a callback or alert would POST, plus seq and at_ms: task.finished
+              {task}, or cron.failing / cron.recovered {reason, task_id, cron}.
+            properties:
+              seq: { type: integer }
+              at_ms: { type: integer }
+              event: { type: string, enum: [task.finished, cron.failing, cron.recovered] }
+        acked_seq: { type: integer }
+        unread: { type: integer }
+        dropped: { type: integer, description: Unread events removed (by age or a full inbox) since the cursor last moved. }
+    InboxCursor:
+      type: object
+      required: [acked_seq, unread]
+      properties:
+        acked_seq: { type: integer }
+        unread: { type: integer }

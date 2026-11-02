@@ -129,5 +129,11 @@ describe("stated limits", () => {
     );
     expect(constant("RETENTION_MS")).toBe("30 * DAY_MS");
     expect(constant("MAX_SCHEDULE_AHEAD_MS")).toBe("7 * DAY_MS");
+    expect(constant("CAPTURE_BODY_BYTES")).toBe("16 * 1024");
+    expect(constant("CAPTURE_RETENTION_MS")).toBe("7 * DAY_MS");
+    expect(stated["Captured responses"]).toBe("First 16 KiB and 4 headers, kept 7 days after the task finishes");
+    expect(constant("MAX_INBOX_EVENTS")).toBe("10_000");
+    expect(constant("INBOX_ACKED_RETENTION_MS")).toBe("7 * DAY_MS");
+    expect(stated["Inbox"]).toBe("10,000 events per project; unread kept 30 days, acked 7 days");
   });
 });

@@ -23,8 +23,8 @@ function assertion(project, scope = "project schedule read cancel") {
   return `${payload}.${sig}`;
 }
 
-/** Requests the Worker sent out, and scripted replies per path: a status, or { status, body }
- * (default 200). */
+/** Requests the Worker sent out, and scripted replies per path: a status, or
+ * { status, body, headers } (default 200). */
 const received = [];
 const replies = new Map();
 
@@ -52,8 +52,8 @@ before(async () => {
       });
       const script = replies.get(url.pathname) ?? [];
       const reply = script.length ? script.shift() : 200;
-      const { status, body } = typeof reply === "number" ? { status: reply, body: `status ${reply}` } : reply;
-      return new Response(body, { status });
+      const { status, body, headers } = typeof reply === "number" ? { status: reply, body: `status ${reply}` } : reply;
+      return new Response(body, { status, headers });
     },
   }));
   await mf.ready;
@@ -235,6 +235,31 @@ describe("api", () => {
     assert.equal(report.task.id, json.id);
     assert.equal(report.task.status, "failed");
     assert.deepEqual(report.task.attempts.map((a) => a.http_status), [404]);
+  });
+
+  test("captures the response and reports to the inbox", async () => {
+    replies.set("/job", [{ status: 200, body: JSON.stringify({ status: "failed", step: "migrate" }), headers: { "Content-Type": "application/json", "Set-Cookie": "s=1" } }]);
+    const before = (await api("GET", "/v1/projects/self")).json.inbox_unread;
+    const res = await api("POST", "/v1/tasks", {
+      body: { url: "https://receiver.example.com/job", method: "GET", capture: true, callback_url: "inbox" },
+    });
+    assert.equal(res.status, 201);
+    const task = await settled("proj_a", res.json.id, ["succeeded", "failed"]);
+    assert.equal(task.status, "succeeded");
+    assert.equal(task.callback_task_id, null);
+    assert.equal(task.response.status, 200);
+    assert.equal(JSON.parse(task.response.body).step, "migrate");
+    assert.deepEqual(task.response.headers, { "content-type": "application/json" });
+
+    assert.equal((await api("GET", "/v1/projects/self")).json.inbox_unread, before + 1);
+    const page = (await api("POST", "/v1/inbox/read", { body: { ack: true }, scope: "read" })).json;
+    const event = page.events.find((e) => e.task?.id === task.id);
+    assert.equal(event.event, "task.finished");
+    assert.equal(event.seq, task.inbox_seq);
+    assert.equal(event.task.response.status, 200);
+    assert.equal(page.unread, 0);
+    const beyond = await api("POST", "/v1/inbox/ack", { body: { up_to: page.acked_seq + 1 }, scope: "read" });
+    assert.equal(beyond.json.error.code, "ack_beyond_inbox");
   });
 
   test("runs a lane one task at a time, in order", async () => {

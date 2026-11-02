@@ -29,7 +29,7 @@ const RECEIVER_HOST = "receiver.example.com";
 const receiverToken = randomBytes(16).toString("hex");
 const CAPABILITIES = [
   "create_project", "get_project", "get_payment_link", "schedule_http", "get_task", "list_tasks", "cancel_task", "redrive_task",
-  "create_cron", "get_cron", "list_crons", "delete_cron", "watch_http",
+  "create_cron", "get_cron", "list_crons", "delete_cron", "watch_http", "read_inbox", "ack_inbox",
 ];
 
 // Gateway → API assertion keys, fresh per run.
@@ -575,6 +575,37 @@ describe("hosted MCP at /mcp", () => {
     assert.equal(peek.isError, true);
     assert.equal(value(peek).error.code, "task_not_found");
     await other.close();
+  });
+
+  test("a client with no public URL reads the result from its inbox in a later session", async () => {
+    const { access_token } = await connect("Session Agent");
+    const first = await mcpClient(access_token);
+    value(await first.callTool({ name: "create_project", arguments: {} }));
+    const task = value(
+      await first.callTool({
+        name: "schedule_http",
+        arguments: { url: "https://dest.example.com/deploys/123", method: "GET", capture: true, callback_url: "inbox" },
+      }),
+    );
+    await first.close();
+
+    // Next session: the project says something is waiting, and read_inbox has it.
+    const next = await mcpClient(access_token);
+    await until(async () => value(await next.callTool({ name: "get_project", arguments: {} })).inbox_unread === 1);
+    const page = value(await next.callTool({ name: "read_inbox", arguments: { ack: true } }));
+    assert.equal(page.events.length, 1);
+    const [event] = page.events;
+    assert.equal(event.event, "task.finished");
+    assert.equal(event.task.id, task.id);
+    assert.equal(event.task.status, "succeeded");
+    assert.equal(event.task.response.status, 200);
+    assert.equal(page.unread, 0);
+    assert.equal(value(await next.callTool({ name: "read_inbox", arguments: {} })).events.length, 0);
+
+    const beyond = await next.callTool({ name: "ack_inbox", arguments: { up_to: event.seq + 1 } });
+    assert.equal(beyond.isError, true);
+    assert.equal(value(beyond).error.code, "ack_beyond_inbox");
+    await next.close();
   });
 
   test("a person buys attempts through the payment link; Stripe's webhook adds them once", async () => {

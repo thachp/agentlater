@@ -29,6 +29,23 @@ pub const MAX_WATCH_RESPONSE_BYTES: usize = 64 * 1024;
 /// How much of the last polled response is kept and reported.
 pub const WATCH_EXCERPT_BYTES: usize = 16 * 1024;
 
+/// How much of a task's response `capture` keeps, and which response headers.
+pub const CAPTURE_BODY_BYTES: usize = 16 * 1024;
+pub const CAPTURED_HEADERS: [&str; 4] = ["content-type", "location", "etag", "retry-after"];
+/// A captured response is deleted this long after its task finishes. Responses can hold
+/// credentials, so they go well before the task does.
+pub const CAPTURE_RETENTION_MS: i64 = 7 * DAY_MS;
+
+/// Events a project's inbox holds. When full, the oldest acked event goes first.
+pub const MAX_INBOX_EVENTS: i64 = 10_000;
+/// Unread events are kept as long as finished tasks; acked ones this long after they arrive,
+/// so recent history can be replayed.
+pub const INBOX_ACKED_RETENTION_MS: i64 = 7 * DAY_MS;
+pub const INBOX_DEFAULT_PAGE: usize = 10;
+/// Kept small: every event read lands in the agent's context, and one with a captured
+/// response can be ~20 KiB.
+pub const INBOX_MAX_PAGE: usize = 50;
+
 pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
 pub const MAX_ATTEMPTS: u32 = 5;
 pub const ATTEMPT_TIMEOUT_MS: i64 = 10 * SECOND_MS;

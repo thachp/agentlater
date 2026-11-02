@@ -80,7 +80,11 @@ pub(crate) mod sqlite {
 
     impl Memory {
         pub fn new() -> Self {
-            Self(rusqlite::Connection::open_in_memory().unwrap())
+            let db = rusqlite::Connection::open_in_memory().unwrap();
+            // Durable Object SQLite refuses compound SELECTs with more terms than this.
+            db.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_COMPOUND_SELECT, 5)
+                .unwrap();
+            Self(db)
         }
     }
 

@@ -76,7 +76,8 @@ export function llmsTxt(env: { PUBLIC_URL: string }): string {
 
 - Hosted MCP server: ${env.PUBLIC_URL}/mcp (Streamable HTTP, OAuth with a one-click consent page, no account).
 - Agent Auth: discovery at ${env.PUBLIC_URL}/.well-known/agent-configuration.
-- Capabilities: create_project, schedule_http, get_task, list_tasks, cancel_task, redrive_task, create_cron, watch_http, get_payment_link and more. Reference: ${SITE}/docs/capabilities
+- Capabilities: create_project, schedule_http, get_task, list_tasks, cancel_task, redrive_task, create_cron, watch_http, read_inbox, ack_inbox, get_payment_link and more. Reference: ${SITE}/docs/capabilities
+- No public URL? schedule_http with callback_url "inbox" and capture: true, then read_inbox in your next session: the result, including what the destination answered, waits there.
 - Pricing: a free trial of 100 delivery attempts over 7 days, then ${attempts} attempts for ${price}, valid 12 months. get_payment_link returns a card checkout link for a person and an MPP link (POST, 402) an agent can pay itself.
 - Docs: ${SITE}/docs
 `;
