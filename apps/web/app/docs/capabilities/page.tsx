@@ -30,13 +30,14 @@ const ERRORS: [string, number, string][] = [
   ["invalid_request", 400, "An argument is wrong; field names it."],
   ["project_not_found", 404, "Call create_project first."],
   ["task_not_found", 404, "No such task in this project."],
-  ["budget_exhausted", 402, "Not enough delivery attempts left in the trial."],
-  ["trial_expired", 403, "The trial has ended."],
+  ["budget_exhausted", 402, "Not enough delivery attempts left; get_payment_link buys more."],
+  ["trial_expired", 403, "The trial or bought attempts have expired; get_payment_link buys more."],
+  ["billing_unavailable", 503, "Buying attempts is not available right now."],
   ["host_revoked", 403, "This agent's identity was revoked."],
   ["idempotency_conflict", 409, "The idempotency_key was used for a different request."],
   ["task_finished", 409, "Can't cancel: the task already succeeded or failed."],
   ["task_not_failed", 409, "Only failed tasks can be redriven."],
-  ["task_limit", 429, "The project holds 1,000 tasks; finished ones are purged after 30 days."],
+  ["task_limit", 429, "The project holds 1,000 tasks (20,000 once paid); finished ones are purged after 30 days."],
 ];
 
 export default function Capabilities() {

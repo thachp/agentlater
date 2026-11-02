@@ -2,6 +2,8 @@
 // (apps/gateway) and the docs render them (apps/web), so both read this one definition.
 // Through the Agent Auth MCP bridge the description and input schema are what an agent reads.
 
+import { ATTEMPT_PACK } from "./billing";
+
 export interface CapabilityDefinition {
   name: string;
   description: string;
@@ -31,6 +33,15 @@ export const capabilities: CapabilityDefinition[] = [
   {
     name: "get_project",
     description: "Show this agent's project: trial expiry, delivery attempts used and remaining, and the signing secret.",
+    input: noArgs,
+  },
+  {
+    name: "get_payment_link",
+    description:
+      `Get a link a person can open to buy more delivery attempts for this project: ${ATTEMPT_PACK.attempts.toLocaleString("en-US")} ` +
+      `attempts for $${(ATTEMPT_PACK.priceCents / 100).toFixed(2)}. Attempts left over carry over, and the whole balance stays valid ` +
+      "for 12 months from the purchase. Payment is by card on runlater.io through Stripe; the attempts are added a few " +
+      "seconds after it succeeds (check with get_project). The link works for 24 hours. Pass it to your user; you cannot pay yourself.",
     input: noArgs,
   },
   {

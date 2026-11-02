@@ -1,16 +1,17 @@
 // Public entry for agents. Serves Agent Auth discovery and the agent endpoints, the hosted MCP
-// server at /mcp behind OAuth, and turns capability executions into signed calls on the
+// server at /mcp behind OAuth, Stripe's payment webhook, and turns capability executions into signed calls on the
 // private Rust API (API binding).
 
 import { OAuthProvider, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { importSigningKey } from "./api";
 import { BASE_PATH, createAuth, type AuthEnv } from "./auth";
+import { handleStripeWebhook, type BillingEnv } from "./billing";
 import { handleAuthorize } from "./consent";
 import { handleMcp, type McpProps } from "./mcp";
 
 export { AuthStore } from "./store";
 
-export interface Env extends AuthEnv {
+export interface Env extends AuthEnv, BillingEnv {
   /** Hex-encoded 32-byte Ed25519 seed; its public key is the API's GATEWAY_PUBLIC_KEY. */
   ASSERTION_PRIVATE_KEY: string;
   REGISTER_RATE: RateLimit;
@@ -104,6 +105,16 @@ const gateway = {
     const url = new URL(request.url);
 
     if (url.pathname === "/authorize") return handleAuthorize(request, env);
+
+    if (url.pathname === "/billing/webhook") {
+      let key: CryptoKey;
+      try {
+        key = await signingKey(env);
+      } catch {
+        return error(500, "misconfigured", "assertion signing key is not configured");
+      }
+      return handleStripeWebhook(request, env, key);
+    }
 
     if (request.method === "GET" && url.pathname === "/health") {
       const api = await env.API.fetch("https://api.internal/health");

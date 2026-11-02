@@ -109,6 +109,7 @@ fn required_scope(method: &Method, path: &[&str]) -> Option<Scope> {
     Some(match (method, path) {
         (Method::Post, ["v1", "projects"]) => Scope::Project,
         (Method::Get, ["v1", "projects", "self"]) => Scope::Read,
+        (Method::Post, ["v1", "projects", "self", "credits"]) => Scope::Billing,
         (Method::Post, ["v1", "tasks"]) => Scope::Schedule,
         (Method::Get, ["v1", "tasks"]) => Scope::Read,
         (Method::Get, ["v1", "tasks", _]) => Scope::Read,
@@ -187,6 +188,13 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
 pub struct TaskLedger {
     state: State,
     env: Env,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreditBody {
+    payment_id: String,
+    attempts: i64,
 }
 
 #[derive(Deserialize)]
@@ -270,6 +278,14 @@ impl TaskLedger {
                     .map(|(p, c)| created(&p, c))
             }
             (Method::Get, ["v1", "projects", "self"]) => ledger.project().map(|p| json(&p, 200)),
+            (Method::Post, ["v1", "projects", "self", "credits"]) => {
+                match body::<CreditBody>(req).await {
+                    Ok(c) => ledger
+                        .add_credit(&c.payment_id, c.attempts, t)
+                        .map(|(p, added)| created(&p, added)),
+                    Err(e) => Err(e),
+                }
+            }
             (Method::Post, ["v1", "tasks"]) => match body::<ScheduleRequest>(req).await {
                 Ok(r) => {
                     let id = format!("task_{}", hex::encode(random_bytes(10)?));

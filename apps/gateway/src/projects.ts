@@ -2,7 +2,11 @@
 // connection. One project per owner, never reassigned.
 
 import { ApiClient, ApiError } from "./api";
-import { execute } from "./capabilities";
+import { billingEnabled, paymentLink, type BillingEnv } from "./billing";
+import { ArgumentError, execute } from "./capabilities";
+
+/** Errors that buying attempts fixes; the agent is told how. */
+const OUT_OF_ATTEMPTS = new Set(["budget_exhausted", "trial_expired"]);
 
 export async function findProject(db: D1Database, owner: string): Promise<string | null> {
   const row = await db
@@ -26,7 +30,7 @@ export async function ensureProject(db: D1Database, owner: string): Promise<stri
 
 /** Runs a capability for an owner: create_project allocates its project, anything else needs one. */
 export async function runCapability(
-  env: { DB: D1Database; API: Fetcher },
+  env: BillingEnv & { DB: D1Database; API: Fetcher },
   key: CryptoKey,
   owner: string,
   capability: string,
@@ -38,5 +42,18 @@ export async function runCapability(
       error: { code: "project_not_found", message: "call create_project before using other capabilities" },
     });
   }
-  return execute(new ApiClient(env.API, key, projectId), capability, args);
+  if (capability === "get_payment_link") {
+    const extra = Object.keys(args)[0];
+    if (extra !== undefined) throw new ArgumentError(`unknown argument ${JSON.stringify(extra)}`, extra);
+    return paymentLink(env, owner, projectId);
+  }
+  try {
+    return await execute(new ApiClient(env.API, key, projectId), capability, args);
+  } catch (e) {
+    if (e instanceof ApiError && OUT_OF_ATTEMPTS.has(e.body.error.code) && billingEnabled(env)) {
+      const error = { ...e.body.error, message: `${e.body.error.message}; get_payment_link returns a link your user can use to buy more` };
+      throw new ApiError(e.status, { error });
+    }
+    throw e;
+  }
 }

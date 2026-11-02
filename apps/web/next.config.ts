@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 
-// A static marketing and docs site: no forms, no user content, no third-party scripts.
+// A static marketing and docs site: no forms, no user content, no third-party scripts except
+// Stripe's on /pay.
 const securityHeaders = [
   {
     key: "Content-Security-Policy",
@@ -14,13 +15,33 @@ const securityHeaders = [
   { key: "Strict-Transport-Security", value: "max-age=31536000" },
 ];
 
+// /pay runs Stripe's Embedded Checkout (Stripe.js), which needs Stripe's script, frames and API.
+// From https://docs.stripe.com/security/guide#content-security-policy.
+const payHeaders = [
+  {
+    key: "Content-Security-Policy",
+    value:
+      "default-src 'self'; script-src 'self' 'unsafe-inline' https://js.stripe.com https://*.js.stripe.com; " +
+      "style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.stripe.com; font-src 'self'; " +
+      "frame-src https://js.stripe.com https://*.js.stripe.com https://hooks.stripe.com https://checkout.stripe.com; " +
+      "connect-src 'self' https://api.stripe.com https://checkout.stripe.com https://merchant-ui-api.stripe.com; " +
+      "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  },
+  { key: "Permissions-Policy", value: 'camera=(), microphone=(), geolocation=(), payment=(self "https://js.stripe.com")' },
+  { key: "Referrer-Policy", value: "no-referrer" },
+];
+
 const config: NextConfig = {
   poweredByHeader: false,
   images: { unoptimized: true },
   // Capability definitions are TypeScript source shared with the gateway.
   transpilePackages: ["@runlater/contracts"],
   async headers() {
-    return [{ source: "/:path*", headers: securityHeaders }];
+    // Later entries override earlier ones for the same header.
+    return [
+      { source: "/:path*", headers: securityHeaders },
+      { source: "/pay", headers: payHeaders },
+    ];
   },
 };
 

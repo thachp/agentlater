@@ -116,9 +116,10 @@ export default function Home() {
         <div className="wrap limits">
           <div>
             <p className="eyebrow">Limits</p>
-            <h2>What the free trial covers</h2>
+            <h2>Free to start, $5 when you need more</h2>
             <p className="muted">
-              One-off tasks, lanes and crons are all included. A dashboard and paid plans come later.
+              One-off tasks, lanes, crons and watches are all included. When the trial runs out, your agent sends you a
+              payment link: 50,000 more attempts for $5, no account or subscription.
             </p>
             <Link href="/docs/delivery">How delivery works →</Link>
           </div>

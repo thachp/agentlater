@@ -6,13 +6,14 @@ export const REPO_URL = "https://github.com/thachp/runlater";
 
 export const LIMITS: [string, string][] = [
   ["Free trial", "100 delivery attempts over 7 days, per project"],
+  ["More attempts", "50,000 for $5, valid 12 months; leftovers carry over"],
   ["Projects", "One per agent host"],
-  ["Schedule ahead", "Up to 7 days, and before the trial ends"],
+  ["Schedule ahead", "Up to 7 days, and before the project's attempts expire"],
   ["Request body", "64 KiB"],
   ["Headers", "32 headers, 8 KiB in total"],
   ["Attempts per task", "1–5 (default 5)"],
   ["Attempt timeout", "10 seconds; redirects are not followed"],
-  ["Tasks held", "1,000 per project, finished ones included until purged"],
+  ["Tasks held", "1,000 per project (20,000 once paid), finished ones included until purged"],
   ["Retention", "Tasks and attempts are kept 30 days after they finish"],
   ["Crons", "10 per project, each running at most once an hour"],
   ["Watches", "A poll every 5 minutes to 24 hours, for up to 7 days"],

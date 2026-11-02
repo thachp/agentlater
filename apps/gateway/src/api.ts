@@ -2,7 +2,7 @@
 // assertion signed with the gateway's Ed25519 key; the API trusts nothing else.
 // Format and claims: packages/contracts/openapi.yaml (securitySchemes.assertion).
 
-export type Scope = "project" | "schedule" | "read" | "cancel";
+export type Scope = "project" | "schedule" | "read" | "cancel" | "billing";
 
 const AUDIENCE = "runlater-api";
 const LIFETIME_SECS = 60;

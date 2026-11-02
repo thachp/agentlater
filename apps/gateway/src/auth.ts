@@ -7,11 +7,12 @@ import { ApiError } from "./api";
 import { ArgumentError, capabilities, capabilityNames } from "./capabilities";
 import { runCapability } from "./projects";
 import type { AuthStore } from "./store";
+import type { BillingEnv } from "./billing";
 
 export const BASE_PATH = "/api/auth";
 const WEEK_SECS = 7 * 24 * 3600;
 
-export interface AuthEnv {
+export interface AuthEnv extends BillingEnv {
   DB: D1Database;
   API: Fetcher;
   AUTH_STORE: DurableObjectNamespace<AuthStore>;

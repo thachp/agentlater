@@ -45,6 +45,30 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Project" }
         default: { $ref: "#/components/responses/Error" }
+  /v1/projects/self/credits:
+    post:
+      operationId: addCredit
+      description: >
+        Adds attempts bought with one payment. The balance, including attempts left from the
+        trial or an earlier purchase unless they have expired, becomes valid for 365 days from
+        now, and crons stopped by expiry start again. 201 when the payment is new; 200 when
+        payment_id was already applied, which changes nothing. Called by the gateway's Stripe
+        webhook only. Scope: billing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [payment_id, attempts]
+              properties:
+                payment_id: { type: string, pattern: "^[A-Za-z0-9_]{1,255}$", description: The Stripe Checkout Session id. }
+                attempts: { type: integer, minimum: 1, maximum: 10000000 }
+      responses:
+        "201": { $ref: "#/components/responses/Project" }
+        "200": { $ref: "#/components/responses/Project" }
+        default: { $ref: "#/components/responses/Error" }
   /v1/tasks:
     post:
       operationId: scheduleTask
@@ -179,7 +203,7 @@ components:
       description: >
         base64url(claims JSON) "." base64url(Ed25519 signature over the first segment).
         Claims: aud "runlater-api", sub (project id, [A-Za-z0-9_-]{1,64}), scope
-        (space-separated: project schedule read cancel), iat and exp in unix seconds,
+        (space-separated: project schedule read cancel billing), iat and exp in unix seconds,
         lifetime at most 300 s.
   parameters:
     TaskId:
@@ -194,7 +218,7 @@ components:
       schema: { type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$" }
   responses:
     Project:
-      description: The project and its trial.
+      description: The project and its attempts.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Project" }
@@ -320,7 +344,7 @@ components:
       enum: [GET, POST, PUT, PATCH, DELETE]
     Project:
       type: object
-      required: [id, created_ms, expires_ms, attempt_budget, attempts_used, attempts_remaining, signing_secret]
+      required: [id, created_ms, expires_ms, attempt_budget, attempts_used, attempts_remaining, paid, signing_secret]
       properties:
         id: { type: string }
         created_ms: { type: integer }
@@ -328,6 +352,7 @@ components:
         attempt_budget: { type: integer }
         attempts_used: { type: integer }
         attempts_remaining: { type: integer }
+        paid: { type: boolean, description: Whether attempts have ever been bought for this project. }
         signing_secret: { type: string, description: Verifies RunLater-Signature on deliveries. }
     ScheduleRequest:
       type: object

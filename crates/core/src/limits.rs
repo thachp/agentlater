@@ -42,12 +42,19 @@ pub const RETRY_CAP_MS: i64 = 10 * MINUTE_MS;
 /// Tasks a project may hold at once, finished ones included until they are purged.
 /// Bounds storage even when tasks are scheduled and canceled without using attempts.
 pub const MAX_RETAINED_TASKS: i64 = 1_000;
+/// The same cap once a project has bought attempts: a pack covers far more tasks than a trial.
+pub const MAX_RETAINED_TASKS_PAID: i64 = 20_000;
 
 /// Terminal tasks and their attempts are kept this long, then purged.
 pub const RETENTION_MS: i64 = 30 * DAY_MS;
 
 pub const TRIAL_ATTEMPTS: u32 = 100;
 pub const TRIAL_DURATION_MS: i64 = 7 * DAY_MS;
+
+/// Bought attempts, and any still unused, stay valid this long after each purchase.
+pub const CREDIT_VALIDITY_MS: i64 = 365 * DAY_MS;
+/// Most attempts one payment may add; a sanity bound, well above any pack.
+pub const MAX_CREDIT_ATTEMPTS: i64 = 10_000_000;
 
 const _: () = assert!(LEASE_MS > 2 * ATTEMPT_TIMEOUT_MS);
 const _: () = assert!(DEFAULT_MAX_ATTEMPTS <= MAX_ATTEMPTS);
