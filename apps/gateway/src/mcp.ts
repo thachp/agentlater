@@ -18,6 +18,7 @@ export interface McpProps {
 }
 
 export interface McpEnv extends BillingEnv {
+  PUBLIC_URL: string;
   DB: D1Database;
   API: Fetcher;
 }

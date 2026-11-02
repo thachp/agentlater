@@ -54,10 +54,12 @@ jobs:
         env:
           ASSERTION_PRIVATE_KEY: ${{ secrets.ASSERTION_PRIVATE_KEY }}
           BETTER_AUTH_SECRET: ${{ secrets.BETTER_AUTH_SECRET }}
-          # Billing (docs/DEPLOY.md, "Billing"): optional; without all three, buying attempts is off.
+          # Billing (docs/DEPLOY.md, "Billing"): optional; Checkout needs the first three, MPP the
+          # secret key, webhook secret and profile id.
           STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
           STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
           STRIPE_PUBLISHABLE_KEY: ${{ vars.STRIPE_PUBLISHABLE_KEY }}
+          STRIPE_PROFILE_ID: ${{ vars.STRIPE_PROFILE_ID }}
         run: |
           test -n "$ASSERTION_PRIVATE_KEY" && test -n "$BETTER_AUTH_SECRET" || { echo "::error::gateway secrets are not set; run scripts/setup-deploy-secrets.mjs"; exit 1; }
           secrets="$(mktemp "$RUNNER_TEMP/secrets.XXXXXX")"
@@ -65,7 +67,7 @@ jobs:
           node -e '
             const e = process.env;
             const out = { ASSERTION_PRIVATE_KEY: e.ASSERTION_PRIVATE_KEY, BETTER_AUTH_SECRET: e.BETTER_AUTH_SECRET };
-            for (const k of ["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_PUBLISHABLE_KEY"]) if (e[k]) out[k] = e[k];
+            for (const k of ["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_PUBLISHABLE_KEY", "STRIPE_PROFILE_ID"]) if (e[k]) out[k] = e[k];
             process.stdout.write(JSON.stringify(out));
           ' > "$secrets"
           npx wrangler deploy --env "$DEPLOY_ENV" --secrets-file "$secrets"

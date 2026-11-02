@@ -1,11 +1,13 @@
-// Selling attempt packs. An agent asks for a payment link (get_payment_link) and hands it to a
-// person; runlater.io/pay shows Stripe's Embedded Checkout (Stripe.js) for that link's Checkout
-// Session, and once the payment succeeds Stripe calls /billing/webhook, which adds the pack to the
-// project. Card details never reach RunLater. With no Stripe keys configured, billing is off.
+// Selling attempt packs. get_payment_link returns up to two ways to pay for the caller's project:
+// - payment_url: a person pays on runlater.io/pay, Stripe's Embedded Checkout (Stripe.js) for one
+//   Checkout Session; Stripe then calls /billing/webhook, which adds the pack.
+// - mpp_url: an agent with a payment credential pays itself over MPP (mpp.ts).
+// Card details never reach RunLater. With no Stripe keys configured, billing is off.
 
 import { ATTEMPT_PACK } from "@runlater/contracts/billing";
 import { ApiClient, ApiError } from "./api";
 import { readLimited } from "./body";
+import { MPP_ATTEMPTS_KEY, MPP_PROJECT_KEY, mppEnabled, mppLink } from "./mpp";
 import { findProject } from "./projects";
 
 export interface BillingEnv {
@@ -13,6 +15,8 @@ export interface BillingEnv {
   /** Public; handed to runlater.io/pay inside the link. */
   STRIPE_PUBLISHABLE_KEY?: string;
   STRIPE_WEBHOOK_SECRET?: string;
+  /** The Stripe profile (`profile_…`) MPP charges are made for; unset turns MPP off. */
+  STRIPE_PROFILE_ID?: string;
   /** Stripe's API origin; tests point it at a fake. */
   STRIPE_API_BASE?: string;
 }
@@ -26,15 +30,34 @@ const TOLERANCE_SECS = 300;
 const MAX_EVENT_BYTES = 256 * 1024;
 const PAID_EVENTS = new Set(["checkout.session.completed", "checkout.session.async_payment_succeeded"]);
 
-export function billingEnabled(env: BillingEnv): boolean {
+function checkoutEnabled(env: BillingEnv): boolean {
   return Boolean(env.STRIPE_SECRET_KEY && env.STRIPE_PUBLISHABLE_KEY && env.STRIPE_WEBHOOK_SECRET);
+}
+
+export function billingEnabled(env: BillingEnv): boolean {
+  return checkoutEnabled(env) || mppEnabled(env);
 }
 
 const unavailable = (message: string) => new ApiError(503, { error: { code: "billing_unavailable", message } });
 
-/** Starts a Checkout Session for one pack and returns the link that pays it. */
-export async function paymentLink(env: BillingEnv, owner: string, projectId: string): Promise<unknown> {
+/** The ways to pay for one pack for this project: a Checkout link, an MPP link, or both. */
+export async function paymentLink(env: BillingEnv & { PUBLIC_URL: string }, owner: string, projectId: string): Promise<unknown> {
   if (!billingEnabled(env)) throw unavailable("buying attempts is not available yet");
+  const link: Record<string, unknown> = {
+    attempts: ATTEMPT_PACK.attempts,
+    price: { amount_cents: ATTEMPT_PACK.priceCents, currency: ATTEMPT_PACK.currency },
+    project_id: projectId,
+  };
+  if (checkoutEnabled(env)) Object.assign(link, await checkoutLink(env, owner, projectId));
+  if (mppEnabled(env)) {
+    const mpp = await mppLink(env, projectId);
+    Object.assign(link, { mpp_url: mpp.url, mpp_expires_ms: mpp.expires_ms });
+  }
+  return link;
+}
+
+/** Starts a Checkout Session for one pack and returns the page that pays it. */
+async function checkoutLink(env: BillingEnv, owner: string, projectId: string) {
   const attempts = ATTEMPT_PACK.attempts.toLocaleString("en-US");
   const form = new URLSearchParams({
     mode: "payment",
@@ -67,13 +90,7 @@ export async function paymentLink(env: BillingEnv, owner: string, projectId: str
   const session = (await res.json()) as { id: string; client_secret: string; expires_at: number };
   // In the fragment, so neither the secret nor the key reaches a server or a Referer.
   const fragment = new URLSearchParams({ key: env.STRIPE_PUBLISHABLE_KEY!, secret: session.client_secret });
-  return {
-    payment_url: `${PAY_URL}#${fragment}`,
-    expires_ms: session.expires_at * 1000,
-    attempts: ATTEMPT_PACK.attempts,
-    price: { amount_cents: ATTEMPT_PACK.priceCents, currency: ATTEMPT_PACK.currency },
-    project_id: projectId,
-  };
+  return { payment_url: `${PAY_URL}#${fragment}`, expires_ms: session.expires_at * 1000 };
 }
 
 const hex = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -97,15 +114,28 @@ export async function verifyStripeSignature(header: string | null, body: string,
   return signatures.some((s) => equal(s, expected));
 }
 
-interface CheckoutSession {
+interface StripeObject {
   id: string;
-  payment_status: string;
+  /** Checkout Sessions. */
+  payment_status?: string;
   metadata?: Record<string, string>;
 }
 
+async function credit(env: { API: Fetcher }, key: CryptoKey, projectId: string, paymentId: string, attempts: number): Promise<Response> {
+  try {
+    await new ApiClient(env.API, key, projectId).call("POST", "/v1/projects/self/credits", "billing", { payment_id: paymentId, attempts });
+  } catch (e) {
+    console.error(`stripe: crediting ${paymentId} failed: ${e instanceof ApiError ? JSON.stringify(e.body) : String(e)}`);
+    return Response.json({ error: "credit_failed" }, { status: 500 });
+  }
+  return Response.json({ received: true });
+}
+
 /**
- * Stripe's webhook. A paid Checkout Session adds its pack to the project it was made for. The API
- * applies each session once, so Stripe's retries are safe; anything but a 2xx makes Stripe retry.
+ * Stripe's webhook. A paid Checkout Session adds its pack to the project it was made for; a
+ * succeeded MPP PaymentIntent does the same, in case crediting failed when it was charged. The API
+ * applies each payment id once, so retries and the overlap are safe; anything but a 2xx makes
+ * Stripe retry.
  */
 export async function handleStripeWebhook(
   request: Request,
@@ -124,13 +154,20 @@ export async function handleStripeWebhook(
     return Response.json({ error: "bad_signature" }, { status: 400 });
   }
 
-  let event: { type: string; data: { object: CheckoutSession } };
+  let event: { type: string; data: { object: StripeObject } };
   try {
     event = JSON.parse(body);
   } catch {
     return Response.json({ error: "bad_json" }, { status: 400 });
   }
-  const session = event.data?.object;
+  const object = event.data?.object;
+  if (event.type === "payment_intent.succeeded") {
+    // Only MPP charges carry these; Checkout's PaymentIntents are credited by their session.
+    const projectId = object?.metadata?.[MPP_PROJECT_KEY];
+    if (!projectId) return Response.json({ received: true });
+    return credit(env, key, projectId, object.id, Number(object.metadata?.[MPP_ATTEMPTS_KEY]));
+  }
+  const session = object;
   // Card payments are paid on completion; delayed methods arrive later as async_payment_succeeded.
   if (!PAID_EVENTS.has(event.type) || session?.payment_status !== "paid") return Response.json({ received: true });
 
@@ -139,14 +176,5 @@ export async function handleStripeWebhook(
     console.error(`stripe: paid session ${session.id} does not match a project`);
     return Response.json({ error: "unknown_project" }, { status: 500 });
   }
-  try {
-    await new ApiClient(env.API, key, projectId).call("POST", "/v1/projects/self/credits", "billing", {
-      payment_id: session.id,
-      attempts: Number(attempts),
-    });
-  } catch (e) {
-    console.error(`stripe: crediting session ${session.id} failed: ${e instanceof ApiError ? JSON.stringify(e.body) : String(e)}`);
-    return Response.json({ error: "credit_failed" }, { status: 500 });
-  }
-  return Response.json({ received: true });
+  return credit(env, key, projectId, session.id, Number(attempts));
 }

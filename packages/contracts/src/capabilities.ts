@@ -40,8 +40,10 @@ export const capabilities: CapabilityDefinition[] = [
     description:
       `Get a link a person can open to buy more delivery attempts for this project: ${ATTEMPT_PACK.attempts.toLocaleString("en-US")} ` +
       `attempts for $${(ATTEMPT_PACK.priceCents / 100).toFixed(2)}. Attempts left over carry over, and the whole balance stays valid ` +
-      "for 12 months from the purchase. Payment is by card on runlater.io through Stripe; the attempts are added a few " +
-      "seconds after it succeeds (check with get_project). The link works for 24 hours. Pass it to your user; you cannot pay yourself.",
+      "for 12 months from the purchase. Returns payment_url, a page where a person pays by card through Stripe (works for 24 hours; " +
+      "pass it to your user), and, when available, mpp_url: if you can pay with MPP (Machine Payments Protocol, e.g. " +
+      "`npx @stripe/link-cli mpp pay <mpp_url> -X POST`), POST it, pay the 402 challenge, and the attempts are added at once " +
+      "(works for 7 days). Check the result with get_project.",
     input: noArgs,
   },
   {

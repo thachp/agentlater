@@ -30,7 +30,7 @@ export async function ensureProject(db: D1Database, owner: string): Promise<stri
 
 /** Runs a capability for an owner: create_project allocates its project, anything else needs one. */
 export async function runCapability(
-  env: BillingEnv & { DB: D1Database; API: Fetcher },
+  env: BillingEnv & { DB: D1Database; API: Fetcher; PUBLIC_URL: string },
   key: CryptoKey,
   owner: string,
   capability: string,

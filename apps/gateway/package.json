@@ -20,9 +20,10 @@
     "@better-auth/agent-auth": "0.6.2",
     "@cfworker/json-schema": "4.1.1",
     "@cloudflare/workers-oauth-provider": "1.2.4",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "@runlater/contracts": "*",
     "better-auth": "1.7.14",
-    "zod": "4.1.12",
-    "@modelcontextprotocol/sdk": "1.32.2"
+    "mppx": "0.13.5",
+    "zod": "4.1.12"
   }
 }

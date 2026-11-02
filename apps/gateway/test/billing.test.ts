@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../src/api";
 import { verifyStripeSignature } from "../src/billing";
+import { mppLink, readMppLink } from "../src/mpp";
 import { runCapability } from "../src/projects";
 
 const SECRET = "whsec_test_secret";
@@ -35,7 +36,7 @@ describe("running out of attempts", () => {
   it("points the agent at get_payment_link only when billing is on", async () => {
     const key = (await crypto.subtle.generateKey("Ed25519", false, ["sign", "verify"])) as CryptoKeyPair;
     const run = (env: object) =>
-      runCapability({ DB: db, API: api, ...env }, key.privateKey, "host", "schedule_http", { url: "https://a.example.com/" }).catch(
+      runCapability({ DB: db, API: api, PUBLIC_URL: "https://gateway.test", ...env }, key.privateKey, "host", "schedule_http", { url: "https://a.example.com/" }).catch(
         (e: ApiError) => e,
       );
     const on = (await run(stripe)) as ApiError;
@@ -43,8 +44,31 @@ describe("running out of attempts", () => {
     expect(on.body.error).toMatchObject({ code: "budget_exhausted", message: expect.stringContaining("get_payment_link") });
     const off = (await run({})) as ApiError;
     expect(off.body.error.message).not.toContain("get_payment_link");
-    await expect(runCapability({ DB: db, API: api }, key.privateKey, "host", "get_payment_link", {})).rejects.toMatchObject({
+    await expect(runCapability({ DB: db, API: api, PUBLIC_URL: "https://gateway.test" }, key.privateKey, "host", "get_payment_link", {})).rejects.toMatchObject({
       body: { error: { code: "billing_unavailable" } },
     });
+  });
+});
+
+describe("MPP links", () => {
+  const env = { STRIPE_SECRET_KEY: "sk_test_a", STRIPE_PROFILE_ID: "profile_test", STRIPE_WEBHOOK_SECRET: "whsec", PUBLIC_URL: "https://gateway.test" };
+  const PROJECT = "prj_0123456789abcdef01234567";
+  const token = (url: string) => url.split("/billing/mpp/")[1]!;
+
+  it("name their project until they expire", async () => {
+    const { url, expires_ms } = await mppLink(env, PROJECT, 1_000);
+    expect(url.startsWith("https://gateway.test/billing/mpp/prj_")).toBe(true);
+    expect(await readMppLink(env, token(url), 2_000)).toBe(PROJECT);
+    expect(await readMppLink(env, token(url), expires_ms)).toBeNull();
+  });
+
+  it("cannot be forged, retargeted or signed with another key", async () => {
+    const t = token((await mppLink(env, PROJECT, 1_000)).url);
+    const [, exp, mac] = t.split(".");
+    expect(await readMppLink(env, `prj_ffffffffffffffffffffffff.${exp}.${mac}`, 2_000)).toBeNull();
+    expect(await readMppLink(env, `${PROJECT}.${Number(exp) + 1}.${mac}`, 2_000)).toBeNull();
+    expect(await readMppLink({ ...env, STRIPE_SECRET_KEY: "sk_test_b" }, t, 2_000)).toBeNull();
+    expect(await readMppLink(env, `${t}.x`, 2_000)).toBeNull();
+    expect(await readMppLink(env, "", 2_000)).toBeNull();
   });
 });
