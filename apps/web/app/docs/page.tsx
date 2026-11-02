@@ -97,6 +97,10 @@ export default function Quickstart() {
         </li>
       </ul>
       <p>The project, its tasks and its keys stay the same; there is no need to connect again.</p>
+      <p>
+        The same goes for the inbox tools, <code>read_inbox</code> and <code>ack_inbox</code>. Clients of the hosted{" "}
+        <code>/mcp</code> server get new tools without asking.
+      </p>
 
       <h2 id="next">Next</h2>
       <ul>

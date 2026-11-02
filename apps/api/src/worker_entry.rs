@@ -3,10 +3,12 @@
 
 use crate::assertion::{self, Scope};
 use crate::db::{Db, DbError, Param};
-use crate::ledger::{ApiError, Claimed, Delivery, Dispatch, Ledger};
+use crate::ledger::{ApiError, Claimed, Delivery, Dispatch, Ledger, ResponseRead};
 use futures_util::future::{join_all, select, Either};
 use futures_util::StreamExt;
-use runlater_core::limits::{ATTEMPT_TIMEOUT_MS, MAX_WATCH_RESPONSE_BYTES};
+use runlater_core::limits::{
+    ATTEMPT_TIMEOUT_MS, CAPTURED_HEADERS, CAPTURE_BODY_BYTES, MAX_WATCH_RESPONSE_BYTES,
+};
 use runlater_core::{CronRequest, Outcome, PollBody, ScheduleRequest, Status, WatchRequest};
 use runlater_egress::{sign, Destination};
 use serde::de::DeserializeOwned;
@@ -120,6 +122,9 @@ fn required_scope(method: &Method, path: &[&str]) -> Option<Scope> {
         (Method::Get, ["v1", "crons"]) => Scope::Read,
         (Method::Get, ["v1", "crons", _]) => Scope::Read,
         (Method::Post, ["v1", "crons", _, "delete"]) => Scope::Cancel,
+        // Acking is part of reading: it moves the project's one cursor, nothing else.
+        (Method::Post, ["v1", "inbox", "read"]) => Scope::Read,
+        (Method::Post, ["v1", "inbox", "ack"]) => Scope::Read,
         _ => return None,
     })
 }
@@ -214,11 +219,32 @@ struct FinishBody {
     task_id: String,
     fence: u64,
     outcome: Outcome,
-    /// A watch's poll: up to 64 KiB of the response body, and whether it was longer.
+    /// A watch's poll: up to 64 KiB of the response body, and whether it was longer. A task
+    /// with `capture`: up to 16 KiB.
     #[serde(default)]
     body: Option<String>,
     #[serde(default)]
     truncated: bool,
+    /// With `capture`: the response headers worth keeping.
+    #[serde(default)]
+    headers: Vec<(String, String)>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InboxReadBody {
+    #[serde(default)]
+    after: Option<i64>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    ack: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InboxAckBody {
+    up_to: i64,
 }
 
 #[derive(Deserialize)]
@@ -324,6 +350,16 @@ impl TaskLedger {
             (Method::Post, ["v1", "crons", name, "delete"]) => {
                 ledger.delete_cron(name).map(|c| json(&c, 200))
             }
+            (Method::Post, ["v1", "inbox", "read"]) => match body::<InboxReadBody>(req).await {
+                Ok(r) => ledger
+                    .read_inbox(r.after, r.limit, r.ack)
+                    .map(|p| json(&p, 200)),
+                Err(e) => Err(e),
+            },
+            (Method::Post, ["v1", "inbox", "ack"]) => match body::<InboxAckBody>(req).await {
+                Ok(a) => ledger.ack_inbox(a.up_to).map(|c| json(&c, 200)),
+                Err(e) => Err(e),
+            },
             (Method::Post, ["internal", "claim"]) => match body::<ClaimBody>(req).await {
                 Ok(c) => ledger.claim(&c.task_id, c.generation, t).map(|claimed| {
                     let reply = match claimed {
@@ -346,9 +382,12 @@ impl TaskLedger {
                         &f.task_id,
                         f.fence,
                         f.outcome,
-                        f.body.as_deref().map(|text| PollBody {
-                            text,
-                            truncated: f.truncated,
+                        Some(ResponseRead {
+                            body: f.body.as_deref().map(|text| PollBody {
+                                text,
+                                truncated: f.truncated,
+                            }),
+                            headers: &f.headers,
                         }),
                         t,
                         jitter(),
@@ -465,7 +504,8 @@ async fn process(env: &Env, d: &Dispatch) -> Result<()> {
         return Ok(());
     };
     let (outcome, read) = deliver(&delivery).await;
-    let (body, truncated) = read.map_or((None, false), |(b, t)| (Some(b), t));
+    let (body, truncated, headers) =
+        read.map_or((None, false, vec![]), |r| (r.body, r.truncated, r.headers));
     let _: serde_json::Value = call(
         &stub,
         &d.project_id,
@@ -476,6 +516,7 @@ async fn process(env: &Env, d: &Dispatch) -> Result<()> {
             outcome,
             body,
             truncated,
+            headers,
         },
     )
     .await?;
@@ -498,10 +539,20 @@ async fn queue(batch: MessageBatch<Dispatch>, env: Env, _ctx: Context) -> Result
     Ok(())
 }
 
-/// A poll's response body as read, and whether it was cut short.
-type Read = Option<(String, bool)>;
+/// A response as read for a watch's poll or a task's capture.
+struct ResponseBody {
+    /// None when a captured body could not be read in time.
+    body: Option<String>,
+    /// Whether the body was cut short.
+    truncated: bool,
+    /// [`CAPTURED_HEADERS`], `content-length` and `content-encoding`, for capture.
+    headers: Vec<(String, String)>,
+}
 
-/// Makes one attempt. For a watch's poll, also returns up to 64 KiB of the response body.
+type Read = Option<ResponseBody>;
+
+/// Makes one attempt. For a watch's poll, also returns up to 64 KiB of the response body;
+/// for a task with `capture`, up to 16 KiB and a few headers.
 async fn deliver(d: &Delivery) -> (Outcome, Read) {
     // Re-check policy on every attempt; the provider flag `global_fetch_strictly_public`
     // separately refuses private addresses after DNS resolution.
@@ -522,22 +573,37 @@ async fn deliver(d: &Delivery) -> (Outcome, Read) {
     }
 }
 
-/// Reads at most [`MAX_WATCH_RESPONSE_BYTES`] of a response, and whether there was more.
-async fn read_capped(response: &mut Response) -> Result<(String, bool)> {
+/// Reads at most `max` bytes of a response, and whether there was more.
+async fn read_capped(response: &mut Response, max: usize) -> Result<(String, bool)> {
     let mut bytes = Vec::new();
     let mut truncated = false;
     // A response with no body has no stream; that is an empty body, not an error.
     if let Ok(mut stream) = response.stream() {
         while let Some(chunk) = stream.next().await {
             bytes.extend_from_slice(&chunk?);
-            if bytes.len() > MAX_WATCH_RESPONSE_BYTES {
-                bytes.truncate(MAX_WATCH_RESPONSE_BYTES);
+            if bytes.len() > max {
+                bytes.truncate(max);
                 truncated = true;
                 break;
             }
         }
     }
     Ok((String::from_utf8_lossy(&bytes).into_owned(), truncated))
+}
+
+/// Stop reading a captured body this long before the attempt times out, so the outcome is
+/// recorded rather than lost to the timeout.
+const CAPTURE_READ_MARGIN_MS: i64 = 500;
+
+fn kept_headers(response: &Response) -> Vec<(String, String)> {
+    CAPTURED_HEADERS
+        .iter()
+        .chain(&["content-length", "content-encoding"])
+        .filter_map(|name| {
+            let value = response.headers().get(name).ok().flatten()?;
+            Some(((*name).to_string(), value))
+        })
+        .collect()
 }
 
 async fn send(
@@ -573,6 +639,7 @@ async fn send(
     let controller = AbortController::default();
     let signal = controller.signal();
     let fetch = Fetch::Request(request);
+    let started = now();
     // The timeout covers reading a poll's body as well as the response itself.
     let attempt = async {
         let mut response = fetch.send_with_signal(&signal).await?;
@@ -588,11 +655,46 @@ async fn send(
         if !d.read_body {
             return Ok::<_, Error>((outcome, None));
         }
+        if d.capture {
+            // The destination has answered, so a slow or broken body must not turn that answer
+            // into a failure (and a retry). Read only while the attempt has time left.
+            let headers = kept_headers(&response);
+            let unread = |headers| ResponseBody {
+                body: None,
+                truncated: true,
+                headers,
+            };
+            let left = started + ATTEMPT_TIMEOUT_MS - CAPTURE_READ_MARGIN_MS - now();
+            if left <= 0 {
+                return Ok((outcome, Some(unread(headers))));
+            }
+            let read = read_capped(&mut response, CAPTURE_BODY_BYTES);
+            let limit = Delay::from(Duration::from_millis(left as u64));
+            futures_util::pin_mut!(read, limit);
+            let body = match select(read, limit).await {
+                Either::Left((Ok((body, truncated)), _)) => ResponseBody {
+                    body: Some(body),
+                    truncated,
+                    headers,
+                },
+                _ => unread(headers),
+            };
+            return Ok((outcome, Some(body)));
+        }
         // A body cut off mid-read is a failed poll, not an empty answer.
-        Ok(match read_capped(&mut response).await {
-            Ok(read) => (outcome, Some(read)),
-            Err(_) => (Outcome::Network, None),
-        })
+        Ok(
+            match read_capped(&mut response, MAX_WATCH_RESPONSE_BYTES).await {
+                Ok((body, truncated)) => (
+                    outcome,
+                    Some(ResponseBody {
+                        body: Some(body),
+                        truncated,
+                        headers: vec![],
+                    }),
+                ),
+                Err(_) => (Outcome::Network, None),
+            },
+        )
     };
     let deadline = Delay::from(Duration::from_millis(ATTEMPT_TIMEOUT_MS as u64));
     futures_util::pin_mut!(attempt, deadline);

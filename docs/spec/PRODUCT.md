@@ -30,6 +30,7 @@ There is no human sign-up, password, or dashboard in v1. The agent *is* the cust
 3. **List** recent tasks for the project.
 4. **Cancel** a task that hasn't run yet.
 5. **Redrive** a task that failed, to try it again.
+6. **Find out later** what happened while the agent was away, without a public URL of its own: the *Inbox*.
 
 That's the whole product for v1.
 
@@ -91,9 +92,9 @@ The bridge keeps the agent's keys in `~/.agent-auth`. Losing them loses access t
 | Capability | Input | Output |
 | --- | --- | --- |
 | `create_project` | — | project id, trial budget, expiry |
-| `get_project` | — | budget used/remaining, expiry, `paid`, signing secret |
+| `get_project` | — | budget used/remaining, expiry, `paid`, signing secret, `inbox_unread` |
 | `get_payment_link` | — | `payment_url` for a person to buy a pack, `mpp_url` for the agent to buy one over MPP, expiries, price |
-| `schedule_http` | `url`, `method`, `headers?`, `body?`, `run_at?` or `delay?`, `idempotency_key?`, `max_attempts?`, `callback_url?`, `lane?` | `task_id`, `status` |
+| `schedule_http` | `url`, `method`, `headers?`, `body?`, `run_at?` or `delay?`, `idempotency_key?`, `max_attempts?`, `callback_url?`, `capture?`, `lane?` | `task_id`, `status` |
 | `get_task` | `task_id` | task + attempts |
 | `list_tasks` | `status?`, `lane?`, `cursor?` | page of tasks |
 | `cancel_task` | `task_id` | task |
@@ -103,6 +104,8 @@ The bridge keeps the agent's keys in `~/.agent-auth`. Losing them loses access t
 | `list_crons` | — | crons |
 | `delete_cron` | `name` | cron as it was |
 | `watch_http` | `url`, `every`, `until`, `deadline`, `method?`, `headers?`, `body?`, `callback_url?`, `idempotency_key?` | task, with `watch` |
+| `read_inbox` | `after?`, `limit?`, `ack?` | `events`, `acked_seq`, `unread`, `dropped` |
+| `ack_inbox` | `up_to` | `acked_seq`, `unread` |
 
 The REST routes underneath (`/v1/tasks`, …) are an internal contract between
 services, not a public product in v1.
@@ -119,6 +122,18 @@ services, not a public product in v1.
 - **Lanes:** tasks given the same `lane` (1–64 of `A-Z a-z 0-9 _ - . :`) run one at a time. A task that has started (delivering, or waiting to retry) holds its lane until it succeeds, fails or is canceled; then the waiting task with the earliest due time (ties: earliest scheduled) goes next. A failed or canceled task does not block the lane. A redriven task rejoins it with a due time of now. Order is by due time, not by when tasks were scheduled: schedule A with `delay: "1h"` and then B for now in the same lane, and B runs first. Lanes order delivery attempts, not what the destination does with them; at-least-once still applies. Callbacks are not in any lane.
 - **Delay:** `delay` is a relative alternative to `run_at_ms`: a whole number followed by `s`, `m`, `h` or `d` (`"90s"`, `"24h"`, `"7d"`), at most 7 days. Giving both is an error.
 - **Callbacks:** with `callback_url`, every time the task finishes (succeeded, failed or canceled) RunLater queues a *callback task*: a signed `POST` of `{"event": "task.finished", "task": {…}}` (the task as `get_task` returns it) to that URL. It follows the same destination rules, retries and signing, and is visible with `get_task` (`callback_task_id` on the task, `callback_for` on the callback). Each callback try costs one delivery attempt, so scheduling a task with a callback reserves two attempts and two task slots. Callbacks do not themselves call back. A callback always gets at least one try, even after the trial's attempts run out or it expires (but no retries then, and `max_attempts` shows 1); so `attempts_used` can go over the budget by one attempt per such callback. The report includes the task's full `url`, query string included, so don't put secrets there if the callback goes to another party. Callback tasks appear in `list_tasks` like any other.
+
+## Inbox and captured responses
+
+Callbacks need a public HTTPS URL, and most agents (everything on the hosted `/mcp`) have none. The inbox is where results wait for the agent's next session instead. Why and what was decided: [INBOX.md](INBOX.md).
+
+- **Sending to it.** `callback_url: "inbox"` on `schedule_http` or `watch_http`, `alert_url: "inbox"` on `create_cron`: exactly that string; anything else is a URL under the destination rules. The payload is what the callback or alert would have POSTed (`task.finished` with the task, `cron.failing` / `cron.recovered`), written as an event in the same ledger transaction as the finish. It is not a task: no delivery attempt, no task slot, no retries, and it is written even past the budget or the trial. A task shows its latest event as `inbox_seq`; every finish adds one, so a redriven task reports again.
+- **Reading it.** One inbox per project, an append-only log numbered by `seq` (1, 2, … never reused), with one cursor, `acked_seq`, kept by RunLater because the agent can't keep it across sessions. `read_inbox` returns events after `after` (default `acked_seq`), oldest first, as `{seq, at_ms, event, …}`; `limit` is 1–50, default 10, since every event lands in the agent's context. Reading does not move the cursor: `ack_inbox(up_to)` does, or `read_inbox(ack: true)` up to the last event returned (with `ack`, an `after` past the cursor is refused, since it would ack the events skipped over). So delivery to the agent is at-least-once, like delivery to a destination; events carry the task id to dedupe on.
+- **The cursor only moves forward.** An `up_to` at or below `acked_seq` changes nothing; one above the newest event is `400 ack_beyond_inbox` (it would ack events the agent hasn't read). Two sessions at once may both see an event; neither can move the other back.
+- **Retention.** Unread events are kept 30 days, acked ones 7 days after they arrive (replayable with `after`). At 10,000 events a new one removes the oldest acked event, or, if none is acked, the oldest unread one. `dropped` counts unread events removed by age or by the cap since the cursor last moved; the reply that moves it still shows the count.
+- **Capture.** `capture: true` on `schedule_http` keeps the response of the latest attempt that got one, success or failure, as the task's `response`: `attempt`, `status`, the `content-type`, `location`, `etag` and `retry-after` headers, the first 16 KiB of the body as UTF-8 (invalid bytes replaced), `body_bytes` from `Content-Length` (null for an encoded body), and `truncated`. Any HTTP answer replaces the earlier capture; a timeout or network error leaves it in place; a redrive keeps it until a new attempt replaces it. It shows in `get_task` and in the callback or inbox report; `list_tasks` leaves out the body. It costs nothing extra. It is deleted 7 days after the task finishes, and an inbox event's copy loses its body at the same time (its status and headers stay). A failed URL callback keeps its payload, never returned by the API, for redrive until it is purged. Reading the body never changes an attempt's outcome: if the body is slow or broken, the status and headers are recorded with `body: null` and `truncated: true`.
+- **The response is untrusted.** It comes from whatever server the agent called. Tool descriptions tell agents to treat it as data, never as instructions.
+- **Telling agents to look.** The hosted `/mcp` server's instructions, the tool descriptions and `/llms.txt` all say: at the start of a session, if `get_project` shows `inbox_unread`, call `read_inbox`.
 
 ## Crons
 
@@ -178,6 +193,8 @@ An agent cannot pay, so a person pays for it. Stripe takes the payment; RunLater
 | Projects | 1 per agent host |
 | Crons | 10 per project, at most one run an hour each |
 | Watches | One poll every 5 min to 24 h, for at most 7 days; first 64 KB of a response read |
+| Captured response | First 16 KiB and 4 headers; deleted 7 days after the task finishes |
+| Inbox | 10,000 events per project; unread kept 30 days, acked 7 days; `read_inbox` returns at most 50 |
 
 ## Explicitly not in v1
 
@@ -199,6 +216,6 @@ An agent cannot pay, so a person pays for it. Stripe takes the payment; RunLater
 ## Open questions
 
 1. ~~**Remote-only MCP clients.**~~ Resolved: a hosted `/mcp` with one-click OAuth consent (no account), one project per connection.
-2. **Key loss.** If an agent loses its keys, its project is gone. Acceptable for a trial?
+2. **Key loss.** If an agent loses its keys, its project is gone, inbox included. Acceptable for a trial?
 3. **Abuse.** New keys are new identities (Sybil). Is a global trial cap + per-IP registration limit enough for launch?
 4. ~~**What happens after the trial?**~~ Resolved: the agent's person buys attempt packs (*Buying attempts*).

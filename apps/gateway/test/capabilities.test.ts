@@ -19,6 +19,8 @@ describe("capabilities", () => {
       "list_crons",
       "delete_cron",
       "watch_http",
+      "read_inbox",
+      "ack_inbox",
     ]);
     for (const c of capabilities) {
       expect(c.description.length).toBeGreaterThan(20);
@@ -43,6 +45,8 @@ describe("capabilities", () => {
     expect(route("list_crons", {})).toMatchObject({ method: "GET", path: "/v1/crons", scope: "read" });
     expect(route("delete_cron", { name: "a:b.c" })).toMatchObject({ path: "/v1/crons/a:b.c/delete", scope: "cancel" });
     expect(route("watch_http", { url: "https://a.example.com/" })).toMatchObject({ method: "POST", path: "/v1/watches", scope: "schedule" });
+    expect(route("read_inbox", { ack: true })).toEqual({ method: "POST", path: "/v1/inbox/read", scope: "read", body: { ack: true } });
+    expect(route("ack_inbox", { up_to: 3 })).toEqual({ method: "POST", path: "/v1/inbox/ack", scope: "read", body: { up_to: 3 } });
   });
 
   it("build list queries", () => {

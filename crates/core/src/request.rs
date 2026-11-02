@@ -49,9 +49,13 @@ pub struct ScheduleRequest {
     /// Relative alternative to `run_at_ms`, e.g. `"90s"`, `"15m"`, `"24h"`, `"7d"`.
     #[serde(default)]
     pub delay: Option<String>,
-    /// Where to POST the task's final state once it succeeds, fails or is canceled.
+    /// Where to POST the task's final state once it succeeds, fails or is canceled, or
+    /// [`INBOX`] to add it to the project's inbox instead.
     #[serde(default)]
     pub callback_url: Option<String>,
+    /// Keep the destination's last response (status, a few headers, the start of the body).
+    #[serde(default)]
+    pub capture: bool,
     /// Tasks sharing a lane run one at a time, in order.
     #[serde(default)]
     pub lane: Option<String>,
@@ -59,6 +63,36 @@ pub struct ScheduleRequest {
     pub idempotency_key: Option<String>,
     #[serde(default)]
     pub max_attempts: Option<u32>,
+}
+
+/// The `callback_url` (or a cron's `alert_url`) that reports to the project's inbox.
+pub const INBOX: &str = "inbox";
+
+/// Where a finished task, or a cron alert, is reported.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Callback {
+    /// A signed POST to this destination: a callback task, with retries.
+    Url(Destination),
+    /// An event in the project's inbox, read with `read_inbox`.
+    Inbox,
+}
+
+impl Callback {
+    pub fn parse(s: &str) -> Result<Self, DestinationError> {
+        if s == INBOX {
+            Ok(Self::Inbox)
+        } else {
+            Destination::parse(s).map(Self::Url)
+        }
+    }
+
+    /// As stored and reported: the normalized URL, or `"inbox"`.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Url(d) => d.as_str(),
+            Self::Inbox => INBOX,
+        }
+    }
 }
 
 /// A validated request, ready to become a task.
@@ -71,7 +105,8 @@ pub struct TaskSpec {
     pub run_at_ms: i64,
     pub max_attempts: u32,
     pub idempotency_key: Option<String>,
-    pub callback: Option<Destination>,
+    pub callback: Option<Callback>,
+    pub capture: bool,
     pub lane: Option<String>,
     /// Hash of the request as submitted. A repeated idempotency key with a different
     /// fingerprint is a conflict, not a replay.
@@ -198,7 +233,7 @@ impl ScheduleRequest {
         let callback = self
             .callback_url
             .as_deref()
-            .map(Destination::parse)
+            .map(Callback::parse)
             .transpose()
             .map_err(ValidationError::Callback)?;
 
@@ -234,6 +269,7 @@ impl ScheduleRequest {
             max_attempts,
             idempotency_key: self.idempotency_key,
             callback,
+            capture: self.capture,
             lane: self.lane,
             fingerprint,
         })
@@ -243,7 +279,7 @@ impl ScheduleRequest {
     /// and the *submitted* `run_at_ms` or `delay` so "now" resolving differently on a retry
     /// still matches. Fields added after v1 are only hashed when present, so fingerprints of
     /// requests that do not use them are unchanged.
-    fn fingerprint(&self, destination: &Destination, callback: Option<&Destination>) -> String {
+    fn fingerprint(&self, destination: &Destination, callback: Option<&Callback>) -> String {
         let headers: BTreeMap<_, _> = self
             .headers
             .iter()
@@ -265,8 +301,9 @@ impl ScheduleRequest {
         // the fingerprint of a request that does not use it.
         let extras = [
             ("delay", self.delay.as_deref()),
-            ("callback_url", callback.map(Destination::as_str)),
+            ("callback_url", callback.map(Callback::as_str)),
             ("lane", self.lane.as_deref()),
+            ("capture", self.capture.then_some("true")),
         ];
         for (name, value) in extras {
             if let Some(value) = value {
@@ -509,6 +546,11 @@ mod tests {
             "https://hooks.example.com/done"
         );
         assert_eq!(ok().validate(NOW).unwrap().callback, None);
+        assert_eq!(
+            cb("inbox").validate(NOW).unwrap().callback,
+            Some(Callback::Inbox)
+        );
+        assert!(matches!(invalid(cb("INBOX")), ValidationError::Callback(_)));
         let e = invalid(cb("https://localhost/done"));
         assert!(matches!(e, ValidationError::Callback(_)));
         assert_eq!(e.field(), "callback_url");
@@ -538,6 +580,26 @@ mod tests {
             ..ok()
         };
         assert_eq!(fp(shouty, NOW), fp(called, NOW));
+    }
+
+    #[test]
+    fn capture_is_off_by_default_and_part_of_the_fingerprint() {
+        assert!(!ok().validate(NOW).unwrap().capture);
+        let captured = ScheduleRequest {
+            capture: true,
+            ..ok()
+        };
+        let spec = captured.clone().validate(NOW).unwrap();
+        assert!(spec.capture);
+        assert_ne!(spec.fingerprint, ok().validate(NOW).unwrap().fingerprint);
+        let inbox = ScheduleRequest {
+            callback_url: Some(INBOX.into()),
+            ..ok()
+        };
+        assert_ne!(
+            inbox.validate(NOW).unwrap().fingerprint,
+            ok().validate(NOW).unwrap().fingerprint
+        );
     }
 
     #[test]

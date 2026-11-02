@@ -6,8 +6,8 @@
 //! day field starting with `*` (like `*/2`) makes both fields apply together instead.
 
 use crate::limits::{DAY_MS, MAX_LANE_BYTES, MINUTE_MS, MIN_CRON_INTERVAL_MS};
-use crate::request::{valid_lane, Method, ScheduleRequest, TaskSpec, ValidationError};
-use runlater_egress::{Destination, DestinationError};
+use crate::request::{valid_lane, Callback, Method, ScheduleRequest, TaskSpec, ValidationError};
+use runlater_egress::DestinationError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -177,7 +177,7 @@ pub struct CronRequest {
     pub body: Option<String>,
     #[serde(default)]
     pub max_attempts: Option<u32>,
-    /// Gets a signed POST when the cron starts failing or recovers.
+    /// Gets a signed POST when the cron starts failing or recovers, or `"inbox"`.
     #[serde(default)]
     pub alert_url: Option<String>,
 }
@@ -190,7 +190,7 @@ pub struct CronSpec {
     pub schedule_text: String,
     /// The request each run makes. `run_at_ms` is meaningless here.
     pub request: TaskSpec,
-    pub alert: Option<Destination>,
+    pub alert: Option<Callback>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -252,7 +252,7 @@ impl CronRequest {
         let alert = self
             .alert_url
             .as_deref()
-            .map(Destination::parse)
+            .map(Callback::parse)
             .transpose()
             .map_err(CronRequestError::Alert)?;
         let request = ScheduleRequest {

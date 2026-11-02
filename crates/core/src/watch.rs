@@ -8,7 +8,7 @@
 use crate::limits::{
     MAX_POLL_ERRORS, MAX_SCHEDULE_AHEAD_MS, MAX_WATCH_INTERVAL_MS, MINUTE_MS, MIN_WATCH_INTERVAL_MS,
 };
-use crate::request::{parse_delay, Method, ScheduleRequest, TaskSpec, ValidationError};
+use crate::request::{parse_delay, Callback, Method, ScheduleRequest, TaskSpec, ValidationError};
 use crate::retry::{classify, Outcome, Verdict};
 use runlater_egress::Destination;
 use serde::{Deserialize, Serialize};
@@ -41,7 +41,7 @@ pub struct WatchRequest {
     pub until: Until,
     /// How long to keep polling, e.g. `"6h"`.
     pub deadline: String,
-    /// Where to POST the watch's final state.
+    /// Where to POST the watch's final state, or `"inbox"`.
     #[serde(default)]
     pub callback_url: Option<String>,
     #[serde(default)]
@@ -160,7 +160,7 @@ impl WatchRequest {
 
     /// Like `schedule_http`'s: normalized URLs and lowercased header names, and the
     /// *submitted* durations, so a retried call replays.
-    fn fingerprint(&self, destination: &Destination, callback: Option<&Destination>) -> String {
+    fn fingerprint(&self, destination: &Destination, callback: Option<&Callback>) -> String {
         let headers: BTreeMap<_, _> = self
             .headers
             .iter()
@@ -175,7 +175,7 @@ impl WatchRequest {
             &self.every,
             &self.until,
             &self.deadline,
-            callback.map(Destination::as_str),
+            callback.map(Callback::as_str),
         ))
         .expect("plain data always serializes");
         hex::encode(Sha256::digest(canonical))
