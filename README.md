@@ -39,3 +39,7 @@ npm run dev -w @runlater/gateway
 ```bash
 npm run dev -w @runlater/web
 ```
+
+## License
+
+The code is [MIT](LICENSE). Using the hosted service at runlater.io is covered by its [Terms of Service](https://runlater.io/terms) and [Privacy Policy](https://runlater.io/privacy).

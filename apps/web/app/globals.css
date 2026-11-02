@@ -166,3 +166,5 @@ th { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: 
 .pay { padding: 48px 0 64px; }
 .pay-checkout { margin: 8px 0 24px; min-height: 0; }
 .pay-note { font-size: 14px; color: var(--muted); }
+
+.legal { padding: 48px 0 64px; }
