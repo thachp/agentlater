@@ -2,6 +2,8 @@ import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../src/api";
 import { verifyStripeSignature } from "../src/billing";
+import { validate } from "mppx/discovery";
+import { openApi } from "../src/discovery";
 import { mppLink, readMppLink } from "../src/mpp";
 import { runCapability } from "../src/projects";
 
@@ -70,5 +72,23 @@ describe("MPP links", () => {
     expect(await readMppLink({ ...env, STRIPE_SECRET_KEY: "sk_test_b" }, t, 2_000)).toBeNull();
     expect(await readMppLink(env, `${t}.x`, 2_000)).toBeNull();
     expect(await readMppLink(env, "", 2_000)).toBeNull();
+  });
+});
+
+describe("MPP discovery", () => {
+  const on = { STRIPE_SECRET_KEY: "sk_test_a", STRIPE_PROFILE_ID: "profile_test", STRIPE_WEBHOOK_SECRET: "whsec", PUBLIC_URL: "https://gateway.test" };
+
+  it("passes mppx's discovery validation and advertises one $5 Stripe charge", () => {
+    const doc = openApi(on);
+    expect(validate(doc).filter((e) => e.severity === "error")).toEqual([]);
+    expect(validate(doc)).toEqual([]);
+    const info = (doc.paths as Record<string, { post: Record<string, unknown> }>)["/billing/mpp/{link}"]!.post["x-payment-info"];
+    expect(info).toMatchObject({ method: "stripe", intent: "charge", amount: "500", currency: "usd" });
+  });
+
+  it("lists no paid endpoint while MPP is off", () => {
+    const doc = openApi({ PUBLIC_URL: "https://gateway.test" });
+    expect(doc.paths).toEqual({});
+    expect(validate(doc)).toEqual([]);
   });
 });

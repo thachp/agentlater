@@ -6,6 +6,7 @@ import { OAuthProvider, type OAuthHelpers } from "@cloudflare/workers-oauth-prov
 import { importSigningKey } from "./api";
 import { BASE_PATH, createAuth, type AuthEnv } from "./auth";
 import { handleStripeWebhook, type BillingEnv } from "./billing";
+import { llmsTxt, openApi } from "./discovery";
 import { readLimited } from "./body";
 import { handleAuthorize } from "./consent";
 import { handleMcp, type McpProps } from "./mcp";
@@ -94,6 +95,15 @@ const gateway = {
         return error(500, "misconfigured", "assertion signing key is not configured");
       }
       return mppToken !== null ? handleMpp(request, env, key, mppToken) : handleStripeWebhook(request, env, key);
+    }
+
+    if (request.method === "GET" && url.pathname === "/openapi.json") {
+      return Response.json(openApi(env), { headers: { "Cache-Control": "public, max-age=300", "Access-Control-Allow-Origin": "*" } });
+    }
+    if (request.method === "GET" && url.pathname === "/llms.txt") {
+      return new Response(llmsTxt(env), {
+        headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "public, max-age=300", "Access-Control-Allow-Origin": "*" },
+      });
     }
 
     if (request.method === "GET" && url.pathname === "/health") {

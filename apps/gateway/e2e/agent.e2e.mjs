@@ -701,6 +701,15 @@ describe("hosted MCP at /mcp", () => {
     await client.close();
   });
 
+  test("discovery documents describe the paid MPP endpoint", async () => {
+    const doc = await (await fetch(`${origin}/openapi.json`)).json();
+    assert.equal(doc.servers[0].url, origin);
+    assert.equal(doc.paths["/billing/mpp/{link}"].post["x-payment-info"].amount, "500");
+    const llms = await fetch(`${origin}/llms.txt`);
+    assert.match(llms.headers.get("content-type"), /^text\/plain/);
+    assert.match(await llms.text(), new RegExp(`${origin}/mcp`));
+  });
+
   test("Stripe's webhook ignores MPP charges it cannot apply, without retries", async () => {
     const send = async (metadata) => {
       const event = JSON.stringify({ id: "evt_x", type: "payment_intent.succeeded", data: { object: { id: "pi_test_x", metadata } } });
