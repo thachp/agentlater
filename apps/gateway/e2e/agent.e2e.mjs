@@ -592,7 +592,7 @@ describe("hosted MCP at /mcp", () => {
     const session = stripeSessions.at(-1);
     assert.equal(fragment.get("secret"), `${session.id}_secret_e2e`);
     assert.equal(session.fields.ui_mode, "embedded_page");
-    assert.equal(session.fields["payment_method_types[0]"], "card");
+    assert.equal(session.fields["allowed_payment_method_types[0]"], "card");
     assert.equal(session.fields["line_items[0][price_data][unit_amount]"], "500");
     assert.equal(session.fields["metadata[project_id]"], project.id);
 
