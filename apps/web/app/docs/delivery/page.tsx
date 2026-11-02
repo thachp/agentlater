@@ -148,6 +148,39 @@ read_inbox({ ack: true })
         </li>
       </ul>
 
+      <h2 id="wake">Wake</h2>
+      <p>
+        The inbox holds results until a session reads them. <code>set_wake</code> makes RunLater start that session:
+        give it the URL that starts an agent run (a routine or workflow trigger, a chat webhook, your own server) and
+        whatever headers it needs.
+      </p>
+      <Code label="set_wake">{`set_wake({
+  url: "https://api.example.com/agents/deploy-watcher/run",
+  headers: { "Authorization": "Bearer …" },
+  debounce: "15m"
+})`}</Code>
+      <p>
+        When an event lands in the inbox, RunLater sends a signed <code>POST</code> carrying only{" "}
+        <code>{'{"event": "inbox.unread", "project_id": "…", "unread": 3}'}</code>. The agent it starts calls{" "}
+        <code>read_inbox</code> for the details, so the trigger never sees results or secrets.
+      </p>
+      <ul>
+        <li>
+          At most one wake per <code>debounce</code> (1 minute to 24 hours, default 15 minutes): a burst of results
+          starts the agent once. A wake that comes due after everything has been read is dropped, at no cost.
+        </li>
+        <li>
+          Events that arrive after a wake was sent get the next one. Each wake is a task with{" "}
+          <code>wake_call: true</code>: signed, retried, visible with <code>get_task</code>, and it costs one delivery
+          attempt (one try even after the trial&apos;s attempts run out).
+        </li>
+        <li>
+          After 3 wakes in a row fail, the wake turns itself off (<code>state: &quot;disabled&quot;</code>) and adds a{" "}
+          <code>wake.disabled</code> event to the inbox. Call <code>set_wake</code> again to turn it back on;{" "}
+          <code>delete_wake</code> stops it. <code>get_project</code> shows how it stands.
+        </li>
+      </ul>
+
       <h2 id="lanes">Lanes</h2>
       <p>
         Give tasks the same <code>lane</code> (for example <code>"payments"</code> or <code>"user-42"</code>) and they

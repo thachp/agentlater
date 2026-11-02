@@ -46,6 +46,13 @@ pub const INBOX_DEFAULT_PAGE: usize = 10;
 /// response can be ~20 KiB.
 pub const INBOX_MAX_PAGE: usize = 50;
 
+/// Debounce for `set_wake`: at most one wake per window, default 15 minutes.
+pub const DEFAULT_WAKE_DEBOUNCE: &str = "15m";
+pub const MIN_WAKE_DEBOUNCE_MS: i64 = MINUTE_MS;
+pub const MAX_WAKE_DEBOUNCE_MS: i64 = DAY_MS;
+/// Wakes in a row that may fail (all their attempts) before the wake turns itself off.
+pub const MAX_WAKE_FAILURES: i64 = 3;
+
 pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
 pub const MAX_ATTEMPTS: u32 = 5;
 pub const ATTEMPT_TIMEOUT_MS: i64 = 10 * SECOND_MS;

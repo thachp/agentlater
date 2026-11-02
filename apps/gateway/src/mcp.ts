@@ -28,7 +28,8 @@ const INSTRUCTIONS =
   "then schedule_http (one request), create_cron (a repeating one) or watch_http (poll until done). " +
   "To learn the result in a later session without a public URL of your own, pass callback_url: \"inbox\" " +
   "(and capture: true to keep the response). At the start of a session, if get_project shows inbox_unread above 0, " +
-  "call read_inbox and ack what you handle. Check a single task with get_task. " +
+  "call read_inbox and ack what you handle. If something can start you without a person (a routine or workflow trigger), " +
+  "give its URL to set_wake and RunLater starts you when results arrive. Check a single task with get_task. " +
   "When the project runs out of attempts, get_payment_link gives your user a link to buy more.";
 
 /** A schedule_http body can be 64 KiB of string; leave room for JSON-RPC and escaping. */

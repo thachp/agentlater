@@ -9,6 +9,7 @@ pub mod limits;
 mod request;
 mod retry;
 mod task;
+mod wake;
 mod watch;
 
 pub use cron::{valid_cron_name, CronError, CronRequest, CronRequestError, CronSpec, Schedule};
@@ -17,6 +18,7 @@ pub use request::{
 };
 pub use retry::{backoff_ms, classify, Outcome, Verdict};
 pub use task::{Attempt, CancelError, Cancelled, ClaimError, RedriveError, Stale, Status, Task};
+pub use wake::{WakeRequest, WakeRequestError, WakeSpec};
 pub use watch::{
     judge, next_poll, Poll, PollBody, Until, Watch, WatchRequest, WatchRequestError, WatchSpec,
 };

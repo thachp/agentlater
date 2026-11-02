@@ -29,7 +29,7 @@ const RECEIVER_HOST = "receiver.example.com";
 const receiverToken = randomBytes(16).toString("hex");
 const CAPABILITIES = [
   "create_project", "get_project", "get_payment_link", "schedule_http", "get_task", "list_tasks", "cancel_task", "redrive_task",
-  "create_cron", "get_cron", "list_crons", "delete_cron", "watch_http", "read_inbox", "ack_inbox",
+  "create_cron", "get_cron", "list_crons", "delete_cron", "watch_http", "read_inbox", "ack_inbox", "set_wake", "delete_wake",
 ];
 
 // Gateway → API assertion keys, fresh per run.
@@ -606,6 +606,33 @@ describe("hosted MCP at /mcp", () => {
     assert.equal(beyond.isError, true);
     assert.equal(value(beyond).error.code, "ack_beyond_inbox");
     await next.close();
+  });
+
+  test("set_wake starts the agent when a result lands in its inbox", async () => {
+    const client = await mcpClient((await connect("Woken Agent")).access_token);
+    const project = value(await client.callTool({ name: "create_project", arguments: {} }));
+    const wake = value(
+      await client.callTool({
+        name: "set_wake",
+        arguments: { url: "https://dest.example.com/agent-trigger", headers: { Authorization: "Bearer trig" }, debounce: "1m" },
+      }),
+    );
+    assert.equal(wake.state, "active");
+    assert.deepEqual(wake.header_names, ["Authorization"]);
+    assert.equal(value(await client.callTool({ name: "get_project", arguments: {} })).wake.url, "https://dest.example.com/agent-trigger");
+
+    await client.callTool({ name: "schedule_http", arguments: { url: "https://dest.example.com/wake-job", callback_url: "inbox" } });
+    const call = await until(() => received.find((r) => r.url === "https://dest.example.com/agent-trigger"));
+    assert.equal(call.headers.authorization, "Bearer trig");
+    assert.deepEqual(JSON.parse(call.body), { event: "inbox.unread", project_id: project.id, unread: 1 });
+
+    const bad = await client.callTool({ name: "set_wake", arguments: { url: "https://dest.example.com/", debounce: "5s" } });
+    assert.equal(bad.isError, true);
+    assert.equal(value(bad).error.field, "debounce");
+    assert.equal(value(await client.callTool({ name: "delete_wake", arguments: {} })).url, "https://dest.example.com/agent-trigger");
+    const again = await client.callTool({ name: "delete_wake", arguments: {} });
+    assert.equal(value(again).error.code, "wake_not_set");
+    await client.close();
   });
 
   test("a person buys attempts through the payment link; Stripe's webhook adds them once", async () => {

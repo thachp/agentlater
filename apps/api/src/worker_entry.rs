@@ -9,7 +9,9 @@ use futures_util::StreamExt;
 use runlater_core::limits::{
     ATTEMPT_TIMEOUT_MS, CAPTURED_HEADERS, CAPTURE_BODY_BYTES, MAX_WATCH_RESPONSE_BYTES,
 };
-use runlater_core::{CronRequest, Outcome, PollBody, ScheduleRequest, Status, WatchRequest};
+use runlater_core::{
+    CronRequest, Outcome, PollBody, ScheduleRequest, Status, WakeRequest, WatchRequest,
+};
 use runlater_egress::{sign, Destination};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -125,6 +127,8 @@ fn required_scope(method: &Method, path: &[&str]) -> Option<Scope> {
         // Acking is part of reading: it moves the project's one cursor, nothing else.
         (Method::Post, ["v1", "inbox", "read"]) => Scope::Read,
         (Method::Post, ["v1", "inbox", "ack"]) => Scope::Read,
+        (Method::Post, ["v1", "wake"]) => Scope::Schedule,
+        (Method::Post, ["v1", "wake", "delete"]) => Scope::Cancel,
         _ => return None,
     })
 }
@@ -360,6 +364,13 @@ impl TaskLedger {
                 Ok(a) => ledger.ack_inbox(a.up_to).map(|c| json(&c, 200)),
                 Err(e) => Err(e),
             },
+            (Method::Post, ["v1", "wake"]) => match body::<WakeRequest>(req).await {
+                Ok(w) => ledger.set_wake(w, t).map(|v| json(&v, 200)),
+                Err(e) => Err(e),
+            },
+            (Method::Post, ["v1", "wake", "delete"]) => {
+                ledger.delete_wake(t).map(|v| json(&v, 200))
+            }
             (Method::Post, ["internal", "claim"]) => match body::<ClaimBody>(req).await {
                 Ok(c) => ledger.claim(&c.task_id, c.generation, t).map(|claimed| {
                     let reply = match claimed {
