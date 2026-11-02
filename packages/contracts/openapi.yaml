@@ -317,7 +317,7 @@ components:
       description: >
         400 invalid_request / ack_beyond_inbox, 401 unauthorized, 402 budget_exhausted, 403 forbidden or
         trial_expired, 404 not_found / project_not_found / task_not_found / cron_not_found / wake_not_set,
-        409 idempotency_conflict / task_finished / task_not_failed / watch_not_redrivable,
+        409 idempotency_conflict / task_finished / task_not_failed / watch_not_redrivable / wake_not_redrivable,
         429 task_limit (1,000 tasks held, finished ones included until purged) / cron_limit,
         500 internal_error.
       content:
@@ -581,7 +581,7 @@ components:
         state: { type: string, enum: [active, disabled] }
         disabled_reason: { type: [string, "null"], description: wake_failing after 3 failed wakes in a row. }
         consecutive_failures: { type: integer }
-        last_wake_ms: { type: [integer, "null"], description: When the last wake was sent, or is due. }
+        last_wake_ms: { type: [integer, "null"], description: When the last wake was sent; the next goes no sooner than debounce_ms after it. }
         last_wake_task_id: { type: [string, "null"] }
         created_ms: { type: integer }
         updated_ms: { type: integer }

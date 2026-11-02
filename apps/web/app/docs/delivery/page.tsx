@@ -172,7 +172,8 @@ read_inbox({ ack: true })
         <li>
           Events that arrive after a wake was sent get the next one. Each wake is a task with{" "}
           <code>wake_call: true</code>: signed, retried, visible with <code>get_task</code>, and it costs one delivery
-          attempt (one try even after the trial&apos;s attempts run out).
+          attempt. It only uses attempts no waiting task needs, and gets one try even after the trial&apos;s attempts
+          run out if nothing else is waiting.
         </li>
         <li>
           After 3 wakes in a row fail, the wake turns itself off (<code>state: &quot;disabled&quot;</code>) and adds a{" "}

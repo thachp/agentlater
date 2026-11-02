@@ -168,6 +168,8 @@ const MIGRATIONS: &[&[&str]] = &[
             updated_ms INTEGER NOT NULL
         )",
         "ALTER TABLE tasks ADD COLUMN wake_call INTEGER NOT NULL DEFAULT 0",
+        // Numbers wake tasks. On the project, so deleting and setting the wake never reuses one.
+        "ALTER TABLE project ADD COLUMN wakes_queued INTEGER NOT NULL DEFAULT 0",
     ],
 ];
 
@@ -292,8 +294,9 @@ pub struct WakeView {
     pub disabled_reason: Option<String>,
     /// Wakes in a row that failed; three turn the wake off.
     pub consecutive_failures: i64,
-    /// When the last wake was sent, or is due.
+    /// When the last wake was sent; the next goes no sooner than `debounce_ms` after it.
     pub last_wake_ms: Option<i64>,
+    /// The latest wake task: pending, being sent, or finished.
     pub last_wake_task_id: Option<String>,
     pub created_ms: i64,
     pub updated_ms: i64,
@@ -1169,6 +1172,13 @@ impl<'a, D: Db> Ledger<'a, D> {
                 "a watch cannot be redriven; start a new one",
             ));
         }
+        if row.wake_call != 0 {
+            return Err(ApiError::new(
+                409,
+                "wake_not_redrivable",
+                "a wake cannot be redriven; the next inbox event sends a new one",
+            ));
+        }
         let mut task = row.task()?;
         if let Err(RedriveError::NotFailed(s)) = task.redrive(now) {
             return Err(ApiError::new(
@@ -1315,21 +1325,38 @@ impl<'a, D: Db> Ledger<'a, D> {
 
         // A callback reports on work already done, so it gets one try even when the trial
         // has run out, but no retries.
-        let last_try =
-            (row.callback_for.is_some() || row.alert_for.is_some() || row.wake_call != 0)
-                && task.run_attempts == 0;
-        // A wake that is due after the agent already read everything has nothing to say.
-        if row.wake_call != 0
-            && project.inbox_unread == 0
-            && task.generation == generation
-            && task.is_due(now)
-            && task.cancel(now).is_ok()
-        {
-            self.save_row(&row, &task, now)?;
-            return Ok(Claimed::Skip("inbox_read"));
+        let mut last_try =
+            (row.callback_for.is_some() || row.alert_for.is_some()) && task.run_attempts == 0;
+        // A wake was never admitted, so it may only spend attempts no waiting task was promised.
+        // With nothing else waiting it gets one more try even past the budget; otherwise it
+        // stands down (canceled, not failed: the wake itself is fine). And a wake due after the
+        // agent read everything has nothing to say.
+        if row.wake_call != 0 && task.generation == generation && task.is_due(now) {
+            let left = if now < project.expires_ms {
+                project.attempt_budget - project.attempts_used
+            } else {
+                0
+            };
+            let reserved = self.reserved_attempts()?;
+            let skip = if project.inbox_unread == 0 {
+                Some("inbox_read")
+            } else if left - reserved >= 1 {
+                None
+            } else if reserved == 0 {
+                last_try = true;
+                None
+            } else {
+                Some("budget_reserved")
+            };
+            if let Some(why) = skip {
+                if task.cancel(now).is_ok() {
+                    self.save_row(&row, &task, now)?;
+                }
+                return Ok(Claimed::Skip(why));
+            }
         }
         if !project.can_attempt(now) && last_try {
-            task.max_attempts = 1;
+            task.max_attempts = task.run_attempts + 1;
         } else if !project.can_attempt(now) {
             if task.generation == generation && task.is_due(now) && task.abandon(now) {
                 if row.watch.is_some() {
@@ -1376,8 +1403,8 @@ impl<'a, D: Db> Ledger<'a, D> {
         // A wake says how things stand when it is sent, and covers every event so far.
         let body = if row.wake_call != 0 {
             self.db.exec(
-                "UPDATE wake SET covered_seq = ?",
-                vec![project.inbox_last_seq.into()],
+                "UPDATE wake SET covered_seq = ?, last_wake_ms = ?",
+                vec![project.inbox_last_seq.into(), now.into()],
             )?;
             Some(wake_payload(&project.id, project.inbox_unread))
         } else {
@@ -2002,8 +2029,22 @@ impl<'a, D: Db> Ledger<'a, D> {
         Ok(())
     }
 
-    /// The inbox has unread events: queue a wake, unless one is already on its way. The
-    /// debounce sets the earliest time it may go, so a burst of events shares one wake.
+    /// Attempts admission promised to work that is waiting: one per task not yet attempted
+    /// (scheduled or retrying) and one per callback still owed. Wakes are not counted.
+    fn reserved_attempts(&self) -> Result<i64, DbError> {
+        let rows: Vec<Counts> = self.db.query(
+            &format!(
+                "SELECT COALESCE(SUM(status IN ('scheduled', 'retrying')), 0) \
+                 + COALESCE(SUM(status IN ('scheduled', 'retrying', 'delivering') \
+                 AND {OWES_CALLBACK}), 0) AS total, 0 AS waiting FROM tasks WHERE wake_call = 0"
+            ),
+            vec![],
+        )?;
+        Ok(rows.first().map_or(0, |c| c.total))
+    }
+
+    /// The inbox has unread events: queue a wake, unless one is already on its way. It goes
+    /// no sooner than `debounce` after the last wake sent, so a burst of events shares one.
     fn wake_soon(&self, now: i64) -> Result<(), DbError> {
         let Some(wake) = self.wake_row()? else {
             return Ok(());
@@ -2028,7 +2069,15 @@ impl<'a, D: Db> Ledger<'a, D> {
         let due = wake
             .last_wake_ms
             .map_or(now, |last| now.max(last + wake.debounce_ms));
-        let id = derived_id(&format!("wake/{}/{due}", project.inbox_last_seq));
+        // Numbered, not derived from what it covers: a wake canceled by set_wake is followed by
+        // one for the same events and time, which must not collide with it.
+        self.db
+            .exec("UPDATE project SET wakes_queued = wakes_queued + 1", vec![])?;
+        let queued: Vec<SeqRow> = self
+            .db
+            .query("SELECT wakes_queued AS seq FROM project", vec![])?;
+        let n = queued.first().map_or(0, |r| r.seq);
+        let id = derived_id(&format!("wake/{n}"));
         self.insert(
             NewTask {
                 id: &id,
@@ -2053,28 +2102,29 @@ impl<'a, D: Db> Ledger<'a, D> {
             now,
         )?;
         self.db.exec(
-            "UPDATE wake SET last_wake_ms = ?, last_wake_task_id = ?, updated_ms = ?",
-            vec![due.into(), id.as_str().into(), now.into()],
+            "UPDATE wake SET last_wake_task_id = ?, updated_ms = ?",
+            vec![id.as_str().into(), now.into()],
         )
     }
 
-    /// A wake ended. Success resets the failure count; a failure counts, and enough in a row
-    /// turn the wake off with an inbox event saying why. Events that arrived after it was
-    /// sent get the next wake.
+    /// A wake ended. For the current wake setting, success resets the failure count and a
+    /// failure counts, enough in a row turning the wake off with an inbox event saying why.
+    /// Any wake ending (even one sent before set_wake replaced the setting) checks whether
+    /// unread events still need one. Canceled wakes say nothing: whoever canceled them decides.
     fn wake_finished(&self, task_id: &str, status: Status, now: i64) -> Result<(), DbError> {
         let Some(wake) = self.wake_row()? else {
             return Ok(());
         };
-        if wake.last_wake_task_id.as_deref() != Some(task_id) {
-            return Ok(());
-        }
+        let current = wake.last_wake_task_id.as_deref() == Some(task_id);
         match status {
-            Status::Succeeded => {
+            Status::Succeeded if current => {
                 self.db.exec(
                     "UPDATE wake SET consecutive_failures = 0, updated_ms = ?",
                     vec![now.into()],
                 )?;
             }
+            Status::Succeeded => {}
+            Status::Failed if !current => {}
             Status::Failed => {
                 let failures = wake.consecutive_failures + 1;
                 if failures >= MAX_WAKE_FAILURES {
@@ -2334,10 +2384,7 @@ impl<'a, D: Db> Ledger<'a, D> {
         let NewTask { id, task, .. } = &new;
         let headers = serde_json::to_string(new.headers).map_err(|e| DbError(e.to_string()))?;
         // Callback, run and alert ids are derived, so queueing the same one again is a no-op.
-        let derived = new.callback_for.is_some()
-            || new.cron.is_some()
-            || new.alert_for.is_some()
-            || new.wake_call;
+        let derived = new.callback_for.is_some() || new.cron.is_some() || new.alert_for.is_some();
         let verb = if derived {
             "INSERT OR IGNORE"
         } else {
@@ -2399,8 +2446,8 @@ impl<'a, D: Db> Ledger<'a, D> {
         if row.wake_call != 0 {
             self.wake_finished(&row.id, task.status, now)?;
         }
-        if row.watch.is_some() {
-            // A watch is never sent again, and its headers often carry an API token.
+        if row.watch.is_some() || row.wake_call != 0 {
+            // Watches and wakes are never sent again, and their headers often carry a token.
             let names: Vec<(String, String)> = row
                 .headers()?
                 .into_iter()
@@ -4730,6 +4777,11 @@ mod tests {
         l.project().unwrap().wake.and_then(|w| w.last_wake_task_id)
     }
 
+    /// When the pending wake is due.
+    fn wake_due(l: &Ledger<'_, Memory>) -> Option<i64> {
+        l.task(&wake_id(l)?).unwrap().next_attempt_ms
+    }
+
     /// Sends the pending wake at `now` and answers it with `status`.
     fn send_wake(l: &Ledger<'_, Memory>, status: u16, now: i64) -> Delivery {
         let id = wake_id(l).expect("a wake was queued");
@@ -4801,8 +4853,7 @@ mod tests {
         finish_to_inbox(&l, "t2", T0 + 60_000);
         finish_to_inbox(&l, "t3", T0 + 120_000);
         assert_eq!(wake_tasks(&db), 2);
-        let w = l.project().unwrap().wake.unwrap();
-        assert_eq!(w.last_wake_ms, Some(T0 + 600_000));
+        assert_eq!(wake_due(&l), Some(T0 + 600_000));
         let a = send_wake(&l, 200, T0 + 600_000);
         let payload: serde_json::Value = serde_json::from_str(a.body.as_deref().unwrap()).unwrap();
         assert_eq!(payload["unread"], 3, "the count when it is sent");
@@ -4855,8 +4906,9 @@ mod tests {
         l.finish(&id, a.fence, http(200), T0 + 2, 0.0).unwrap();
         assert_eq!(wake_tasks(&db), 2);
         assert_eq!(
-            l.project().unwrap().wake.unwrap().last_wake_ms,
-            Some(T0 + 60_000)
+            wake_due(&l),
+            Some(T0 + 60_000),
+            "a minute after it was sent"
         );
 
         // A delivered wake with nothing new after it queues nothing more.
@@ -4879,7 +4931,9 @@ mod tests {
             assert_eq!(l.task(&id).unwrap().status, Status::Failed);
             let w = l.project().unwrap().wake.unwrap();
             assert_eq!(w.consecutive_failures, failures);
-            now = w.last_wake_ms.unwrap();
+            if let Some(due) = wake_due(&l) {
+                now = due;
+            }
         }
         let w = l.project().unwrap().wake.unwrap();
         assert_eq!(
@@ -4971,5 +5025,128 @@ mod tests {
             .unwrap();
         l.set_wake(waking(serde_json::json!({})), T0).unwrap();
         assert_eq!(wake_tasks(&db), 1);
+    }
+
+    #[test]
+    fn replacing_the_wake_while_one_is_in_flight_still_wakes_for_later_events() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.set_wake(waking(serde_json::json!({ "debounce": "1m" })), T0)
+            .unwrap();
+        finish_to_inbox(&l, "t1", T0);
+        let old = wake_id(&l).unwrap();
+        let d = l
+            .publish_due(P, T0)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.task_id == old)
+            .unwrap();
+        let a = deliver(&l, &d, T0);
+        finish_to_inbox(&l, "t2", T0 + 1);
+        l.delete_wake(T0 + 2).unwrap();
+        l.set_wake(
+            waking(serde_json::json!({ "url": "https://agents.example.com/v2", "debounce": "1m" })),
+            T0 + 3,
+        )
+        .unwrap();
+        assert_eq!(wake_tasks(&db), 1, "the old one is still in flight");
+        l.finish(&old, a.fence, http(200), T0 + 4, 0.0).unwrap();
+        let next = wake_id(&l).expect("t2 still needs a wake");
+        assert_ne!(next, old);
+        assert_eq!(l.task(&next).unwrap().url, "https://agents.example.com/v2");
+    }
+
+    #[test]
+    fn a_wake_cannot_be_redriven_and_forgets_its_token() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.set_wake(waking(serde_json::json!({})), T0).unwrap();
+        finish_to_inbox(&l, "t1", T0);
+        let id = wake_id(&l).unwrap();
+        send_wake(&l, 404, T0);
+        assert_eq!(
+            l.redrive(&id, T0 + 1).unwrap_err().code,
+            "wake_not_redrivable"
+        );
+        let stored: String =
+            db.0.query_row("SELECT headers FROM tasks WHERE id = ?", [&id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(!stored.contains("t0ken"), "{stored}");
+        assert_eq!(l.task(&id).unwrap().header_names, ["Authorization"]);
+    }
+
+    #[test]
+    fn a_wake_never_spends_attempts_promised_to_waiting_tasks() {
+        let db = Memory::new();
+        let l = setup(&db);
+        db.0.execute("UPDATE project SET attempt_budget = 3", [])
+            .unwrap();
+        l.set_wake(waking(serde_json::json!({})), T0).unwrap();
+        let later = ScheduleRequest {
+            delay: Some("1h".into()),
+            ..req("https://a.example.com/")
+        };
+        l.schedule(later, "t2", T0).unwrap();
+        finish_to_inbox(&l, "t1", T0);
+        // One attempt is spare: the wake may use it, and fails retryably.
+        send_wake(&l, 503, T0);
+        let id = wake_id(&l).unwrap();
+        let retry = l.task(&id).unwrap().next_attempt_ms.unwrap();
+        let d = l
+            .publish_due(P, retry)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.task_id == id)
+            .unwrap();
+        // The last attempt is t2's, so the wake stands down instead of retrying.
+        assert_eq!(
+            l.claim(&d.task_id, d.generation, retry).unwrap(),
+            Claimed::Skip("budget_reserved")
+        );
+        assert_eq!(l.task(&id).unwrap().status, Status::Canceled);
+        assert_eq!(
+            l.project().unwrap().wake.unwrap().consecutive_failures,
+            0,
+            "not a failure"
+        );
+        let t2 = T0 + 3_600_000;
+        answer(&l, "t2", 200, "", &[], t2);
+        assert_eq!(l.task("t2").unwrap().status, Status::Succeeded);
+    }
+
+    #[test]
+    fn the_debounce_counts_from_the_last_wake_sent() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let daily = || waking(serde_json::json!({ "debounce": "24h" }));
+        l.set_wake(daily(), T0).unwrap();
+        finish_to_inbox(&l, "t1", T0);
+        send_wake(&l, 200, T0);
+        finish_to_inbox(&l, "t2", T0 + 1);
+        assert_eq!(wake_due(&l), Some(T0 + DAY));
+        // Replacing the setting (say, a new token) does not push the pending wake out.
+        l.set_wake(daily(), T0 + 3_600_000).unwrap();
+        assert_eq!(wake_due(&l), Some(T0 + DAY));
+        // A wake dropped because everything was read does not count as sent.
+        l.read_inbox(None, None, true).unwrap();
+        let id = wake_id(&l).unwrap();
+        let d = l
+            .publish_due(P, T0 + DAY)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.task_id == id)
+            .unwrap();
+        assert_eq!(
+            l.claim(&d.task_id, d.generation, T0 + DAY).unwrap(),
+            Claimed::Skip("inbox_read")
+        );
+        finish_to_inbox(&l, "t3", T0 + DAY + 3_600_000);
+        assert_eq!(
+            wake_due(&l),
+            Some(T0 + DAY + 3_600_000),
+            "a day after the last one sent"
+        );
     }
 }
