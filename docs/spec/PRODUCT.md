@@ -100,7 +100,7 @@ The bridge keeps the agent's keys in `~/.agent-auth`. Losing them loses access t
 | `list_tasks` | `status?`, `lane?`, `cursor?` | page of tasks |
 | `cancel_task` | `task_id` | task |
 | `redrive_task` | `task_id` | task |
-| `create_cron` | `name`, `schedule`, `url`, `method?`, `headers?`, `body?`, `max_attempts?`, `alert_url?` | cron |
+| `create_cron` | `name`, `schedule`, `url`, `method?`, `headers?`, `body?`, `max_attempts?`, `alert_url?`, `callback_url?`, `capture?`, `report?` | cron |
 | `get_cron` | `name` | cron, with health |
 | `list_crons` | — | crons |
 | `delete_cron` | `name` | cron as it was |
@@ -155,6 +155,7 @@ A cron runs the same HTTP request on a schedule: five fields (`minute hour day-o
 - **Missed slots are not made up.** If the scheduler wakes late, the cron runs once and moves to the next slot after now.
 - **At most once an hour.** The minute field must be a single value; anything that could run twice in an hour is refused. The trial's 100 attempts last about four days at hourly, about three months at daily.
 - **Dead man's switch.** `health` is `pending` until a run finishes, `healthy` after a success, `failing` after a failed run or a run that could not start (`health_reason`: `run_failed`, `budget_exhausted`, `task_limit`, `trial_expired`). Becoming failing sends one signed alert to `alert_url` (`{"event": "cron.failing", "reason", "task_id", "cron"}`); the next success sends `cron.recovered`. Alerts are tasks like callbacks (`alert_for` names the cron) and get one try even past the trial; they are not admitted, so they can exceed the task cap by one per health change. The alert includes the cron's full `url`, query string included. A run that started but could not be attempted (attempts ran out between start and send) reports `run_failed`. Only runs of the current cron count, and a run older than the one that last set the health is ignored.
+- **Runs can report.** `callback_url` (a URL or `"inbox"`) and `capture` work on each run exactly as on a task scheduled with them: the run's `task.finished` report goes there, with its captured response, and an inbox report can wake the agent. `report: "failures"` (default `"always"`, and only with `callback_url`) holds back the report of a run that succeeds or is canceled, so a healthy cron is quiet. A run reporting to a URL is admitted with a second attempt and task slot for its callback task, so a project with one attempt left marks the cron failing (`budget_exhausted`) instead. Replacing a cron by name replaces these too; runs already started keep what they started with.
 - **The trial ending stops crons:** `next_run_ms` becomes null and they alert with `trial_expired`. Buying a pack starts them again.
 - Re-creating a cron by name replaces its schedule and request and keeps its health. Deleting one stops it; a run already started finishes but no longer affects health.
 

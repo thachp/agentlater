@@ -16,9 +16,9 @@ use runlater_core::limits::{
 };
 use runlater_core::{
     judge, next_poll, valid_lane, Attempt, Callback, CancelError, ClaimError, CronRequest,
-    CronRequestError, Method, Outcome, Poll, PollBody, RedriveError, Schedule, ScheduleRequest,
-    Status, Task, Until, ValidationError, WakeRequest, WakeRequestError, Watch, WatchRequest,
-    WatchRequestError, INBOX,
+    CronRequestError, Method, Outcome, Poll, PollBody, RedriveError, Report, Schedule,
+    ScheduleRequest, Status, Task, Until, ValidationError, WakeRequest, WakeRequestError, Watch,
+    WatchRequest, WatchRequestError, INBOX,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -170,6 +170,14 @@ const MIGRATIONS: &[&[&str]] = &[
         "ALTER TABLE tasks ADD COLUMN wake_call INTEGER NOT NULL DEFAULT 0",
         // Numbers wake tasks. On the project, so deleting and setting the wake never reuses one.
         "ALTER TABLE project ADD COLUMN wakes_queued INTEGER NOT NULL DEFAULT 0",
+    ],
+    // 8: crons that report. Each run inherits the cron's callback_url and capture;
+    // report_failures_only holds back a run's report unless it failed.
+    &[
+        "ALTER TABLE crons ADD COLUMN callback_url TEXT",
+        "ALTER TABLE crons ADD COLUMN capture INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE crons ADD COLUMN report TEXT NOT NULL DEFAULT 'always'",
+        "ALTER TABLE tasks ADD COLUMN report_failures_only INTEGER NOT NULL DEFAULT 0",
     ],
 ];
 
@@ -547,6 +555,7 @@ struct TaskRow {
     response: Option<String>,
     inbox_seq: Option<i64>,
     wake_call: i64,
+    report_failures_only: i64,
     created_ms: i64,
     updated_ms: i64,
 }
@@ -676,7 +685,7 @@ const TASK_COLUMNS: &str = "seq, id, status, due_ms, max_attempts, run_attempts,
     total_attempts, generation, fence, lease_until_ms, cancel_requested, terminal_ms, \
     method, url, headers, body, run_at_ms, idempotency_key, callback_url, callback_task_id, \
     callback_for, lane, cron, alert_for, watch, watch_errors, watch_state, capture, response, \
-    inbox_seq, wake_call, created_ms, updated_ms";
+    inbox_seq, wake_call, report_failures_only, created_ms, updated_ms";
 
 /// A row to insert into `tasks`.
 struct NewTask<'s> {
@@ -696,6 +705,8 @@ struct NewTask<'s> {
     cron: Option<&'s str>,
     alert_for: Option<&'s str>,
     wake_call: bool,
+    /// Report to `callback_url` only if the task fails (a cron run with `report: failures`).
+    report_failures_only: bool,
     /// A watch's settings, as JSON.
     watch: Option<String>,
 }
@@ -734,6 +745,12 @@ pub struct CronView {
     pub body_bytes: usize,
     pub max_attempts: u32,
     pub alert_url: Option<String>,
+    /// Where each run reports when it finishes (a URL or "inbox"), and which runs: always,
+    /// or failures only.
+    pub callback_url: Option<String>,
+    pub report: Report,
+    /// Whether each run keeps the destination's response.
+    pub capture: bool,
     /// None once the cron has stopped (the trial ended).
     pub next_run_ms: Option<i64>,
     pub health: Health,
@@ -762,6 +779,9 @@ struct CronRow {
     body: Option<String>,
     max_attempts: u32,
     alert_url: Option<String>,
+    callback_url: Option<String>,
+    capture: i64,
+    report: String,
     next_run_ms: Option<i64>,
     health: String,
     health_reason: Option<String>,
@@ -776,7 +796,7 @@ struct CronRow {
 }
 
 const CRON_COLUMNS: &str = "name, schedule, method, url, headers, body, max_attempts, \
-    alert_url, next_run_ms, health, health_reason, last_run_task_id, last_run_ms, \
+    alert_url, callback_url, capture, report, next_run_ms, health, health_reason, last_run_task_id, last_run_ms, \
     last_success_ms, failing_since_ms, health_run_at_ms, created_ms, updated_ms";
 
 impl CronRow {
@@ -794,6 +814,9 @@ impl CronRow {
             body_bytes: self.body.as_ref().map_or(0, String::len),
             max_attempts: self.max_attempts,
             alert_url: self.alert_url.clone(),
+            callback_url: self.callback_url.clone(),
+            report: parse(&self.report)?,
+            capture: self.capture != 0,
             next_run_ms: self.next_run_ms,
             health: match self.health.as_str() {
                 "healthy" => Health::Healthy,
@@ -1064,6 +1087,7 @@ impl<'a, D: Db> Ledger<'a, D> {
                 cron: None,
                 alert_for: None,
                 wake_call: false,
+                report_failures_only: false,
                 watch: None,
             },
             now,
@@ -1114,6 +1138,7 @@ impl<'a, D: Db> Ledger<'a, D> {
                 cron: None,
                 alert_for: None,
                 wake_call: false,
+                report_failures_only: false,
                 watch: Some(watch),
             },
             now,
@@ -1643,13 +1668,15 @@ impl<'a, D: Db> Ledger<'a, D> {
             serde_json::to_string(&request.headers).map_err(|e| DbError(e.to_string()))?;
         self.db.exec(
             "INSERT INTO crons (name, schedule, method, url, headers, body, max_attempts, \
-             alert_url, next_run_ms, health, created_ms, updated_ms) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?) \
+             alert_url, callback_url, capture, report, next_run_ms, health, created_ms, \
+             updated_ms) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?) \
              ON CONFLICT (name) DO UPDATE SET schedule = excluded.schedule, \
              method = excluded.method, url = excluded.url, headers = excluded.headers, \
              body = excluded.body, max_attempts = excluded.max_attempts, \
-             alert_url = excluded.alert_url, next_run_ms = excluded.next_run_ms, \
-             updated_ms = excluded.updated_ms",
+             alert_url = excluded.alert_url, callback_url = excluded.callback_url, \
+             capture = excluded.capture, report = excluded.report, \
+             next_run_ms = excluded.next_run_ms, updated_ms = excluded.updated_ms",
             vec![
                 spec.name.as_str().into(),
                 spec.schedule_text.as_str().into(),
@@ -1659,6 +1686,9 @@ impl<'a, D: Db> Ledger<'a, D> {
                 request.body.clone().into(),
                 request.max_attempts.into(),
                 spec.alert.as_ref().map(|a| a.as_str()).into(),
+                request.callback.as_ref().map(|c| c.as_str()).into(),
+                request.capture.into(),
+                spec.report.as_str().into(),
                 spec.schedule.next_after(now).into(),
                 now.into(),
                 now.into(),
@@ -1728,7 +1758,9 @@ impl<'a, D: Db> Ledger<'a, D> {
                     cron.name.as_str().into(),
                 ],
             )?;
-            if let Err(e) = self.admit(&project, 1, 1, now) {
+            // A run reporting to a URL needs a second attempt and row for its callback task.
+            let needs = 1 + i64::from(cron.callback_url.as_deref().is_some_and(|u| u != INBOX));
+            if let Err(e) = self.admit(&project, needs, needs, now) {
                 if e.status >= 500 {
                     return Err(DbError(e.message));
                 }
@@ -1747,13 +1779,14 @@ impl<'a, D: Db> Ledger<'a, D> {
                     run_at_ms: slot,
                     idempotency_key: None,
                     fingerprint: "cron",
-                    callback_url: None,
+                    callback_url: cron.callback_url.as_deref(),
                     callback_for: None,
-                    capture: false,
+                    capture: cron.capture != 0,
                     lane: None,
                     cron: Some(&cron.name),
                     alert_for: None,
                     wake_call: false,
+                    report_failures_only: cron.report == Report::Failures.as_str(),
                     watch: None,
                 },
                 now,
@@ -1891,6 +1924,7 @@ impl<'a, D: Db> Ledger<'a, D> {
                 cron: None,
                 alert_for: Some(name),
                 wake_call: false,
+                report_failures_only: false,
                 watch: None,
             },
             now,
@@ -2097,6 +2131,7 @@ impl<'a, D: Db> Ledger<'a, D> {
                 cron: None,
                 alert_for: None,
                 wake_call: true,
+                report_failures_only: false,
                 watch: None,
             },
             now,
@@ -2395,9 +2430,9 @@ impl<'a, D: Db> Ledger<'a, D> {
                 "{verb} INTO tasks (id, status, due_ms, max_attempts, run_attempts, \
              total_attempts, generation, fence, lease_until_ms, cancel_requested, terminal_ms, \
              published_ms, method, url, headers, body, run_at_ms, idempotency_key, fingerprint, \
-             callback_url, callback_for, capture, lane, cron, alert_for, wake_call, watch, \
-             created_ms, updated_ms) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+             callback_url, callback_for, capture, lane, cron, alert_for, wake_call, \
+             report_failures_only, watch, created_ms, updated_ms) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             ),
             vec![
                 (*id).into(),
@@ -2425,6 +2460,7 @@ impl<'a, D: Db> Ledger<'a, D> {
                 new.cron.into(),
                 new.alert_for.into(),
                 new.wake_call.into(),
+                new.report_failures_only.into(),
                 new.watch.into(),
                 now.into(),
                 now.into(),
@@ -2458,6 +2494,9 @@ impl<'a, D: Db> Ledger<'a, D> {
                 "UPDATE tasks SET headers = ?, body = NULL WHERE id = ?",
                 vec![names.into(), row.id.as_str().into()],
             )?;
+        }
+        if row.report_failures_only != 0 && task.status != Status::Failed {
+            return Ok(());
         }
         match row.callback_url.as_deref() {
             Some(INBOX) => self.report_to_inbox(&row.id, now),
@@ -2517,6 +2556,7 @@ impl<'a, D: Db> Ledger<'a, D> {
                 cron: None,
                 alert_for: None,
                 wake_call: false,
+                report_failures_only: false,
                 watch: None,
             },
             now,
@@ -5148,5 +5188,150 @@ mod tests {
             Some(T0 + DAY + 3_600_000),
             "a day after the last one sent"
         );
+    }
+
+    // -- crons that report ----------------------------------------------------------------
+
+    fn reporting(name: &str, extra: serde_json::Value) -> CronRequest {
+        let mut r = serde_json::json!({
+            "name": name,
+            "schedule": "0 6 * * *",
+            "url": "https://a.example.com/status",
+            "method": "GET",
+            "max_attempts": 1,
+            "callback_url": "inbox",
+            "capture": true,
+        });
+        r.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(r).unwrap()
+    }
+
+    fn run_id(l: &Ledger<'_, Memory>, name: &str) -> String {
+        l.cron(name).unwrap().last_run_task_id.unwrap()
+    }
+
+    #[test]
+    fn a_cron_run_reports_to_the_inbox_with_its_response() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let (c, _) = l
+            .put_cron(reporting("health", serde_json::json!({})), T0)
+            .unwrap();
+        assert_eq!(
+            (c.callback_url.as_deref(), c.report, c.capture),
+            (Some("inbox"), Report::Always, true)
+        );
+        l.fire_crons(SIX).unwrap();
+        let id = run_id(&l, "health");
+        let t = l.task(&id).unwrap();
+        assert_eq!(
+            (t.callback_url.as_deref(), t.capture),
+            (Some("inbox"), true)
+        );
+        answer(&l, &id, 200, r#"{"deploy":"failed"}"#, &[], SIX);
+        let e = &inbox(&l).events[0];
+        assert_eq!(e["event"], "task.finished");
+        assert_eq!(e["task"]["cron"], "health");
+        assert_eq!(e["task"]["response"]["body"], r#"{"deploy":"failed"}"#);
+        // The next day's run reports again.
+        l.fire_crons(SIX + DAY).unwrap();
+        answer(&l, &run_id(&l, "health"), 200, "{}", &[], SIX + DAY);
+        assert_eq!(inbox(&l).events.len(), 2);
+    }
+
+    #[test]
+    fn report_failures_keeps_a_healthy_cron_quiet() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.put_cron(
+            reporting("health", serde_json::json!({ "report": "failures" })),
+            T0,
+        )
+        .unwrap();
+        l.set_wake(waking(serde_json::json!({})), T0).unwrap();
+        l.fire_crons(SIX).unwrap();
+        answer(&l, &run_id(&l, "health"), 200, "fine", &[], SIX);
+        assert_eq!(inbox(&l).events.len(), 0, "a success says nothing");
+        assert_eq!(wake_tasks(&db), 0, "and wakes nobody");
+
+        l.fire_crons(SIX + DAY).unwrap();
+        let failed = run_id(&l, "health");
+        answer(&l, &failed, 500, "broken", &[], SIX + DAY);
+        let e = &inbox(&l).events[0];
+        assert_eq!(
+            (e["task"]["id"].as_str(), e["task"]["status"].as_str()),
+            (Some(failed.as_str()), Some("failed"))
+        );
+        assert_eq!(e["task"]["response"]["body"], "broken");
+        assert_eq!(wake_tasks(&db), 1, "the failure wakes the agent");
+    }
+
+    #[test]
+    fn a_cron_reporting_to_a_url_reserves_its_callback() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.put_cron(
+            reporting(
+                "health",
+                serde_json::json!({ "callback_url": "https://cb.example.com/runs" }),
+            ),
+            T0,
+        )
+        .unwrap();
+        db.0.execute("UPDATE project SET attempt_budget = 1", [])
+            .unwrap();
+        l.fire_crons(SIX).unwrap();
+        let c = l.cron("health").unwrap();
+        assert_eq!(
+            (c.last_run_task_id, c.health_reason.as_deref()),
+            (None, Some("budget_exhausted")),
+            "a run and its callback need two attempts"
+        );
+
+        db.0.execute("UPDATE project SET attempt_budget = 10", [])
+            .unwrap();
+        l.fire_crons(SIX + DAY).unwrap();
+        let id = run_id(&l, "health");
+        answer(&l, &id, 200, "ok", &[], SIX + DAY);
+        let cb = l
+            .task(&id)
+            .unwrap()
+            .callback_task_id
+            .expect("a callback task");
+        assert_eq!(l.task(&cb).unwrap().url, "https://cb.example.com/runs");
+    }
+
+    #[test]
+    fn replacing_a_cron_changes_how_it_reports_and_old_crons_stay_quiet() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let (c, _) = l.put_cron(daily("backup"), T0).unwrap();
+        assert_eq!(
+            (c.callback_url, c.report, c.capture),
+            (None, Report::Always, false)
+        );
+        let (c, created) = l
+            .put_cron(
+                reporting("backup", serde_json::json!({ "report": "failures" })),
+                T0,
+            )
+            .unwrap();
+        assert!(!created);
+        assert_eq!(
+            (c.callback_url.as_deref(), c.report),
+            (Some("inbox"), Report::Failures)
+        );
+        let e = l
+            .put_cron(
+                CronRequest {
+                    report: Some(Report::Failures),
+                    ..daily("x")
+                },
+                T0,
+            )
+            .unwrap_err();
+        assert_eq!((e.status, e.field), (400, Some("report")));
     }
 }

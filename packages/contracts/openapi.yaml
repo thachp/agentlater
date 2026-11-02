@@ -393,10 +393,13 @@ components:
           description: >
             Gets a signed POST {"event": "cron.failing" | "cron.recovered", "reason", "task_id", "cron": <Cron>}
             when the cron starts failing and when it recovers. "inbox" adds that payload to the inbox instead.
+        callback_url: { type: string, maxLength: 2048, description: 'Where each run reports, as ScheduleRequest.callback_url: https:// URL, or "inbox".' }
+        capture: { type: boolean, default: false, description: "Each run keeps its response, as ScheduleRequest.capture." }
+        report: { type: string, enum: [always, failures], default: always, description: Which runs report to callback_url. Needs callback_url. }
     Cron:
       type: object
       description: Header values and the body are never returned.
-      required: [name, schedule, method, url, header_names, body_bytes, max_attempts, alert_url, next_run_ms, health, health_reason, last_run_task_id, last_run_ms, last_success_ms, failing_since_ms, created_ms, updated_ms]
+      required: [name, schedule, method, url, header_names, body_bytes, max_attempts, alert_url, callback_url, report, capture, next_run_ms, health, health_reason, last_run_task_id, last_run_ms, last_success_ms, failing_since_ms, created_ms, updated_ms]
       properties:
         name: { type: string }
         schedule: { type: string }
@@ -406,6 +409,9 @@ components:
         body_bytes: { type: integer }
         max_attempts: { type: integer }
         alert_url: { type: [string, "null"] }
+        callback_url: { type: [string, "null"] }
+        report: { type: string, enum: [always, failures] }
+        capture: { type: boolean }
         next_run_ms: { type: [integer, "null"], description: Null once the cron has stopped because the trial ended. }
         health: { type: string, enum: [pending, healthy, failing] }
         health_reason:

@@ -180,6 +180,35 @@ pub struct CronRequest {
     /// Gets a signed POST when the cron starts failing or recovers, or `"inbox"`.
     #[serde(default)]
     pub alert_url: Option<String>,
+    /// Where each run reports when it finishes, as `schedule_http`'s `callback_url`.
+    #[serde(default)]
+    pub callback_url: Option<String>,
+    /// Keep each run's response, as `schedule_http`'s `capture`.
+    #[serde(default)]
+    pub capture: bool,
+    /// Which runs report to `callback_url`. Needs `callback_url`.
+    #[serde(default)]
+    pub report: Option<Report>,
+}
+
+/// Which of a cron's runs report to its `callback_url`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Report {
+    /// Every run that finishes.
+    #[default]
+    Always,
+    /// Only runs that fail, so a healthy cron stays quiet.
+    Failures,
+}
+
+impl Report {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Always => "always",
+            Self::Failures => "failures",
+        }
+    }
 }
 
 /// A validated cron, ready to store.
@@ -189,8 +218,10 @@ pub struct CronSpec {
     pub schedule: Schedule,
     pub schedule_text: String,
     /// The request each run makes. `run_at_ms` is meaningless here.
+    /// Its `callback` and `capture` apply to every run.
     pub request: TaskSpec,
     pub alert: Option<Callback>,
+    pub report: Report,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -200,6 +231,7 @@ pub enum CronRequestError {
     TooFrequent,
     Never,
     Alert(DestinationError),
+    ReportWithoutCallback,
     Request(ValidationError),
 }
 
@@ -209,6 +241,7 @@ impl CronRequestError {
             Self::Name => "name",
             Self::Schedule(_) | Self::TooFrequent | Self::Never => "schedule",
             Self::Alert(_) => "alert_url",
+            Self::ReportWithoutCallback => "report",
             Self::Request(e) => e.field(),
         }
     }
@@ -230,6 +263,7 @@ impl fmt::Display for CronRequestError {
             ),
             Self::Never => f.write_str("schedule never runs"),
             Self::Alert(e) => write!(f, "alert_url: {e}"),
+            Self::ReportWithoutCallback => f.write_str("report needs a callback_url to report to"),
             Self::Request(e) => e.fmt(f),
         }
     }
@@ -255,12 +289,17 @@ impl CronRequest {
             .map(Callback::parse)
             .transpose()
             .map_err(CronRequestError::Alert)?;
+        if self.report.is_some() && self.callback_url.is_none() {
+            return Err(CronRequestError::ReportWithoutCallback);
+        }
         let request = ScheduleRequest {
             url: self.url,
             method: self.method,
             headers: self.headers,
             body: self.body,
             max_attempts: self.max_attempts,
+            callback_url: self.callback_url,
+            capture: self.capture,
             ..Default::default()
         }
         .validate(now_ms)
@@ -275,6 +314,7 @@ impl CronRequest {
             schedule,
             request,
             alert,
+            report: self.report.unwrap_or_default(),
         })
     }
 }
@@ -453,6 +493,54 @@ mod tests {
         );
         assert!(serde_json::from_str::<CronRequest>(
             r#"{"name":"a","schedule":"0 6 * * *","url":"https://a.example.com/","run_at_ms":1}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn runs_can_report_and_capture() {
+        let base = || CronRequest {
+            name: "deploy-health".into(),
+            schedule: "0 7 * * *".into(),
+            url: "https://a.example.com/status".into(),
+            ..Default::default()
+        };
+        let quiet = base().validate(T0).unwrap();
+        assert_eq!(
+            (quiet.request.callback, quiet.request.capture),
+            (None, false)
+        );
+        assert_eq!(quiet.report, Report::Always);
+
+        let spec = CronRequest {
+            callback_url: Some("inbox".into()),
+            capture: true,
+            report: Some(Report::Failures),
+            ..base()
+        }
+        .validate(T0)
+        .unwrap();
+        assert_eq!(spec.request.callback, Some(Callback::Inbox));
+        assert!(spec.request.capture);
+        assert_eq!(spec.report, Report::Failures);
+
+        let e = CronRequest {
+            report: Some(Report::Always),
+            ..base()
+        }
+        .validate(T0)
+        .unwrap_err();
+        assert_eq!(e, CronRequestError::ReportWithoutCallback);
+        assert_eq!(e.field(), "report");
+        let e = CronRequest {
+            callback_url: Some("https://localhost/x".into()),
+            ..base()
+        }
+        .validate(T0)
+        .unwrap_err();
+        assert_eq!(e.field(), "callback_url");
+        assert!(serde_json::from_str::<CronRequest>(
+            r#"{"name":"a","schedule":"0 7 * * *","url":"https://a.example.com/","report":"sometimes"}"#
         )
         .is_err());
     }

@@ -62,6 +62,6 @@ Durable Object SQLite refuses compound `SELECT`s with more than a few terms, whi
 | Next | Notes |
 | --- | --- |
 | ~~**Wake.**~~ | Built: `set_wake`, see [PRODUCT.md](PRODUCT.md#wake). |
-| Callbacks and capture for cron runs | Crons have no `callback_url` yet; "every morning, fetch X and tell me" needs it. |
+| ~~Callbacks and capture for cron runs~~ | Built: `create_cron`'s `callback_url`, `capture` and `report`. |
 | Notes an agent writes to its own future inbox | RunLater as timed memory, not only an HTTP scheduler. A product decision of its own. |
 | Several inboxes or cursors per project | One owner per project in v1, so one reader. |

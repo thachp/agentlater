@@ -12,7 +12,9 @@ mod task;
 mod wake;
 mod watch;
 
-pub use cron::{valid_cron_name, CronError, CronRequest, CronRequestError, CronSpec, Schedule};
+pub use cron::{
+    valid_cron_name, CronError, CronRequest, CronRequestError, CronSpec, Report, Schedule,
+};
 pub use request::{
     valid_lane, Callback, Method, ScheduleRequest, TaskSpec, ValidationError, INBOX,
 };
