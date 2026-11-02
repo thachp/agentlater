@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
+import { ATTEMPT_PACK } from "@runlater/contracts/billing";
 import { LIMITS } from "../lib/site";
 import { verifyNode, verifyPython } from "../lib/snippets";
 
@@ -120,6 +121,12 @@ describe("stated limits", () => {
     expect(stated["Attempts per task"]).toBe("1–5 (default 5)");
     expect(constant("ATTEMPT_TIMEOUT_MS")).toBe("10 * SECOND_MS");
     expect(constant("MAX_RETAINED_TASKS")).toBe("1_000");
+    expect(constant("MAX_RETAINED_TASKS_PAID")).toBe("20_000");
+    expect(stated["Tasks held"]).toContain("1,000 per project (20,000 once paid)");
+    expect(constant("CREDIT_VALIDITY_MS")).toBe("365 * DAY_MS");
+    expect(stated["More attempts"]).toBe(
+      `${ATTEMPT_PACK.attempts.toLocaleString("en-US")} for $${ATTEMPT_PACK.priceCents / 100}, valid 12 months; leftovers carry over`,
+    );
     expect(constant("RETENTION_MS")).toBe("30 * DAY_MS");
     expect(constant("MAX_SCHEDULE_AHEAD_MS")).toBe("7 * DAY_MS");
   });

@@ -1,16 +1,18 @@
 // Public entry for agents. Serves Agent Auth discovery and the agent endpoints, the hosted MCP
-// server at /mcp behind OAuth, and turns capability executions into signed calls on the
+// server at /mcp behind OAuth, Stripe's payment webhook, and turns capability executions into signed calls on the
 // private Rust API (API binding).
 
 import { OAuthProvider, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { importSigningKey } from "./api";
 import { BASE_PATH, createAuth, type AuthEnv } from "./auth";
+import { handleStripeWebhook, type BillingEnv } from "./billing";
+import { readLimited } from "./body";
 import { handleAuthorize } from "./consent";
 import { handleMcp, type McpProps } from "./mcp";
 
 export { AuthStore } from "./store";
 
-export interface Env extends AuthEnv {
+export interface Env extends AuthEnv, BillingEnv {
   /** Hex-encoded 32-byte Ed25519 seed; its public key is the API's GATEWAY_PUBLIC_KEY. */
   ASSERTION_PRIVATE_KEY: string;
   REGISTER_RATE: RateLimit;
@@ -47,31 +49,6 @@ const json = (body: unknown, status = 200) =>
   Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
 const error = (status: number, code: string, message: string) => json({ error: code, message }, status);
 
-/** The body, or null if it exceeds `limit` bytes. Counts bytes read, not Content-Length. */
-async function readLimited(request: Request, limit: number): Promise<Uint8Array | null> {
-  if (!request.body) return new Uint8Array();
-  const reader = request.body.getReader();
-  const parts: Uint8Array[] = [];
-  let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > limit) {
-      await reader.cancel();
-      return null;
-    }
-    parts.push(value);
-  }
-  const out = new Uint8Array(size);
-  let offset = 0;
-  for (const p of parts) {
-    out.set(p, offset);
-    offset += p.byteLength;
-  }
-  return out;
-}
-
 /**
  * The replay key for a bearer JWT, read without verifying it. Better Auth verifies the
  * token afterwards; this only lets the gateway reject a second use atomically, which the
@@ -104,6 +81,16 @@ const gateway = {
     const url = new URL(request.url);
 
     if (url.pathname === "/authorize") return handleAuthorize(request, env);
+
+    if (url.pathname === "/billing/webhook") {
+      let key: CryptoKey;
+      try {
+        key = await signingKey(env);
+      } catch {
+        return error(500, "misconfigured", "assertion signing key is not configured");
+      }
+      return handleStripeWebhook(request, env, key);
+    }
 
     if (request.method === "GET" && url.pathname === "/health") {
       const api = await env.API.fetch("https://api.internal/health");

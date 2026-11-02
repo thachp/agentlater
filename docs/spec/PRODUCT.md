@@ -1,6 +1,6 @@
 # RunLater — Product Spec (v1)
 
-Status: **v1, live** at `gateway.runlater.io` · Owner: Patrick Thach · Last updated: 2026-11-01
+Status: **v1, live** at `gateway.runlater.io` · Owner: Patrick Thach · Last updated: 2026-11-02
 
 ## One line
 
@@ -53,6 +53,7 @@ Agent ──get_task──▶ RunLater           ← status: succeeded, attempts
 | **Agent identity** | An Agent Auth host + agent keypair. The only way to authenticate. |
 | **Project** | Owned by exactly one agent host. Holds tasks, budget, and the signing secret. One project per host in v1. |
 | **Trial** | A project's free allocation: N delivery attempts, expires after 7 days. No refills. |
+| **Attempt pack** | Delivery attempts bought for a project: 50,000 for $5. See *Buying attempts*. |
 | **Task** | One HTTP request to make at `run_at`, with a retry policy. |
 | **Attempt** | One try at delivering a task: time, response status, duration, error. |
 
@@ -90,7 +91,8 @@ The bridge keeps the agent's keys in `~/.agent-auth`. Losing them loses access t
 | Capability | Input | Output |
 | --- | --- | --- |
 | `create_project` | — | project id, trial budget, expiry |
-| `get_project` | — | budget used/remaining, expiry, signing key id |
+| `get_project` | — | budget used/remaining, expiry, `paid`, signing secret |
+| `get_payment_link` | — | `payment_url` for a person to buy a pack, its expiry, price |
 | `schedule_http` | `url`, `method`, `headers?`, `body?`, `run_at?` or `delay?`, `idempotency_key?`, `max_attempts?`, `callback_url?`, `lane?` | `task_id`, `status` |
 | `get_task` | `task_id` | task + attempts |
 | `list_tasks` | `status?`, `lane?`, `cursor?` | page of tasks |
@@ -126,7 +128,7 @@ A cron runs the same HTTP request on a schedule: five fields (`minute hour day-o
 - **Missed slots are not made up.** If the scheduler wakes late, the cron runs once and moves to the next slot after now.
 - **At most once an hour.** The minute field must be a single value; anything that could run twice in an hour is refused. The trial's 100 attempts last about four days at hourly, about three months at daily.
 - **Dead man's switch.** `health` is `pending` until a run finishes, `healthy` after a success, `failing` after a failed run or a run that could not start (`health_reason`: `run_failed`, `budget_exhausted`, `task_limit`, `trial_expired`). Becoming failing sends one signed alert to `alert_url` (`{"event": "cron.failing", "reason", "task_id", "cron"}`); the next success sends `cron.recovered`. Alerts are tasks like callbacks (`alert_for` names the cron) and get one try even past the trial; they are not admitted, so they can exceed the task cap by one per health change. The alert includes the cron's full `url`, query string included. A run that started but could not be attempted (attempts ran out between start and send) reports `run_failed`. Only runs of the current cron count, and a run older than the one that last set the health is ignored.
-- **The trial ending stops crons:** `next_run_ms` becomes null and they alert with `trial_expired`.
+- **The trial ending stops crons:** `next_run_ms` becomes null and they alert with `trial_expired`. Buying a pack starts them again.
 - Re-creating a cron by name replaces its schedule and request and keeps its health. Deleting one stops it; a run already started finishes but no longer affects health.
 
 ## Watches
@@ -140,6 +142,21 @@ A watch hands off waiting on someone else's long-running job: RunLater polls a s
 - **What is kept:** `watch.last_status` and up to 16 KiB of the last response body (`watch.last_body`, in `get_task` and the callback but not in `list_tasks`). Header values and the body are deleted when the watch ends, since they often hold an API token; header names stay.
 - `deadline` is at most 7 days and must fall before the trial ends. A watch cannot be redriven (`409 watch_not_redrivable`); start a new one.
 
+## Buying attempts
+
+An agent cannot pay, so a person pays for it. Stripe takes the payment; RunLater never sees card details.
+
+1. The agent calls `get_payment_link` and passes the `payment_url` to its person. When attempts run out or expire, the `budget_exhausted` / `trial_expired` error says so.
+2. The person opens `runlater.io/pay#…` and pays with Stripe's Embedded Checkout (Stripe.js). The link opens one Stripe Checkout Session and works for 24 hours. The publishable key and the session's client secret travel in the URL fragment, so they never reach a server or a `Referer`.
+3. Stripe calls the gateway's webhook. The pack is added to the project the link was made for, once per Checkout Session however often Stripe retries.
+
+- **One pack:** 50,000 delivery attempts for $5.00 (10¢ per 1,000). Card fees are about 9% of that; Cloudflare costs about $0.03 per 1,000 attempts.
+- **Validity:** each purchase makes the project's whole balance valid for 12 months from that day. Attempts not yet expired, from the trial or an earlier pack, carry over; expired ones do not come back.
+- **A purchase reopens a project:** a project whose trial or attempts expired takes new work again, and crons stopped by expiry start again from their next slot.
+- **Paid projects hold more:** up to 20,000 tasks instead of 1,000.
+- Other limits are unchanged; `run_at`, watch deadlines and cron runs still cannot fall after the project's expiry.
+- Billing is off until Stripe keys are configured (`billing_unavailable`).
+
 ## v1 limits
 
 | Limit | Value |
@@ -148,8 +165,9 @@ A watch hands off waiting on someone else's long-running job: RunLater polls a s
 | Headers | 32 headers, 8 KB total |
 | Furthest `run_at` | 7 days out (bounded by trial expiry) |
 | Trial | 100 delivery attempts, 7 days |
+| Attempt pack | 50,000 delivery attempts for $5; balance valid 12 months from the latest purchase |
 | Retention | Task + attempts kept 30 days after terminal state |
-| Tasks held per project | 1,000, finished ones included until purged. A task's body is dropped once it succeeds or is canceled; failed tasks keep it for redrive. |
+| Tasks held per project | 1,000 (20,000 once a pack is bought), finished ones included until purged. A task's body is dropped once it succeeds or is canceled; failed tasks keep it for redrive. |
 | Projects | 1 per agent host |
 | Crons | 10 per project, at most one run an hour each |
 | Watches | One poll every 5 min to 24 h, for at most 7 days; first 64 KB of a response read |
@@ -159,9 +177,9 @@ A watch hands off waiting on someone else's long-running job: RunLater polls a s
 | Out of scope | Why it's later |
 | --- | --- |
 | Web dashboard | A page where a human signs in to see tasks. v1 has no humans signing in. |
-| Billing / paid plans | Charging for more than the free trial. Needed once trials run out — v2. |
+| Subscriptions, invoices, larger packs | One pack size, paid by card, covers launch. |
 | SDKs | A packaged npm client. Agents use capabilities/MCP directly. |
-| API keys, OAuth, invitations, anonymous trials, receiver pairing | Replaced by Agent Auth. |
+| API keys, invitations, receiver pairing | Replaced by Agent Auth and hosted MCP's one-click OAuth. |
 | Workflows, fan-out, ordering across lanes | Different product. Lanes give one-at-a-time order within a lane only. |
 
 ## Success criteria for v1 launch
@@ -176,4 +194,4 @@ A watch hands off waiting on someone else's long-running job: RunLater polls a s
 1. ~~**Remote-only MCP clients.**~~ Resolved: a hosted `/mcp` with one-click OAuth consent (no account), one project per connection.
 2. **Key loss.** If an agent loses its keys, its project is gone. Acceptable for a trial?
 3. **Abuse.** New keys are new identities (Sybil). Is a global trial cap + per-IP registration limit enough for launch?
-4. **What happens after the trial?** Even without billing, do we want a waitlist / "contact us" path?
+4. ~~**What happens after the trial?**~~ Resolved: the agent's person buys attempt packs (*Buying attempts*).

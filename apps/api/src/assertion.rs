@@ -31,6 +31,8 @@ pub enum Scope {
     /// Read the project, tasks and attempts.
     Read,
     Cancel,
+    /// Add bought attempts; only the gateway's payment webhook asks for it.
+    Billing,
 }
 
 impl Scope {
@@ -40,6 +42,7 @@ impl Scope {
             "schedule" => Self::Schedule,
             "read" => Self::Read,
             "cancel" => Self::Cancel,
+            "billing" => Self::Billing,
             _ => return None,
         })
     }

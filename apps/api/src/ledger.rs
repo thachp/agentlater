@@ -9,8 +9,8 @@
 
 use crate::db::{Db, DbError, Param};
 use runlater_core::limits::{
-    DEFAULT_MAX_ATTEMPTS, MAX_CRONS, MAX_RETAINED_TASKS, RETENTION_MS, TRIAL_ATTEMPTS,
-    TRIAL_DURATION_MS, WATCH_EXCERPT_BYTES,
+    CREDIT_VALIDITY_MS, DEFAULT_MAX_ATTEMPTS, MAX_CREDIT_ATTEMPTS, MAX_CRONS, MAX_RETAINED_TASKS,
+    MAX_RETAINED_TASKS_PAID, RETENTION_MS, TRIAL_ATTEMPTS, TRIAL_DURATION_MS, WATCH_EXCERPT_BYTES,
 };
 use runlater_core::{
     judge, next_poll, valid_lane, Attempt, CancelError, ClaimError, CronRequest, CronRequestError,
@@ -121,6 +121,12 @@ const MIGRATIONS: &[&[&str]] = &[
         "ALTER TABLE tasks ADD COLUMN watch_errors INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE tasks ADD COLUMN watch_state TEXT",
     ],
+    // 5: bought attempts. One row per payment, so a repeated webhook adds nothing.
+    &["CREATE TABLE IF NOT EXISTS payments (
+            id TEXT PRIMARY KEY,
+            attempts INTEGER NOT NULL,
+            created_ms INTEGER NOT NULL
+        )"],
 ];
 
 /// SQL condition, over `tasks t`: the task may run now as far as its lane is concerned.
@@ -217,6 +223,8 @@ pub struct ProjectView {
     pub attempt_budget: i64,
     pub attempts_used: i64,
     pub attempts_remaining: i64,
+    /// Whether attempts have ever been bought for this project.
+    pub paid: bool,
     /// Receivers verify `RunLater-Signature` with this.
     pub signing_secret: String,
 }
@@ -340,6 +348,7 @@ struct ProjectRow {
     attempt_budget: i64,
     attempts_used: i64,
     signing_secret: String,
+    paid: i64,
 }
 
 impl ProjectRow {
@@ -351,7 +360,16 @@ impl ProjectRow {
             expires_ms: self.expires_ms,
             attempt_budget: self.attempt_budget,
             attempts_used: self.attempts_used,
+            paid: self.paid != 0,
             signing_secret: self.signing_secret,
+        }
+    }
+
+    fn max_retained_tasks(&self) -> i64 {
+        if self.paid != 0 {
+            MAX_RETAINED_TASKS_PAID
+        } else {
+            MAX_RETAINED_TASKS
         }
     }
 
@@ -675,8 +693,8 @@ impl<'a, D: Db> Ledger<'a, D> {
         Ok(self
             .db
             .query(
-                "SELECT id, created_ms, expires_ms, attempt_budget, attempts_used, signing_secret \
-                 FROM project LIMIT 1",
+                "SELECT id, created_ms, expires_ms, attempt_budget, attempts_used, signing_secret, \
+                 EXISTS (SELECT 1 FROM payments) AS paid FROM project LIMIT 1",
                 vec![],
             )?
             .pop())
@@ -711,6 +729,81 @@ impl<'a, D: Db> Ledger<'a, D> {
         Ok((self.project()?, true))
     }
 
+    /// Adds `attempts` bought with payment `payment_id`, and makes the whole balance valid for
+    /// [`CREDIT_VALIDITY_MS`] from now. Attempts left from an earlier purchase or the trial carry
+    /// over unless they have already expired. Crons stopped by expiry start again. Returns the
+    /// project and whether the payment was new; a payment already applied changes nothing.
+    pub fn add_credit(
+        &self,
+        payment_id: &str,
+        attempts: i64,
+        now: i64,
+    ) -> Result<(ProjectView, bool), ApiError> {
+        if payment_id.is_empty()
+            || payment_id.len() > 255
+            || !payment_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            return Err(ApiError {
+                field: Some("payment_id"),
+                ..ApiError::bad_request("payment_id is not a valid payment id")
+            });
+        }
+        if !(1..=MAX_CREDIT_ATTEMPTS).contains(&attempts) {
+            return Err(ApiError {
+                field: Some("attempts"),
+                ..ApiError::bad_request(format!("attempts must be 1-{MAX_CREDIT_ATTEMPTS}"))
+            });
+        }
+        let project = self.project_row()?.ok_or_else(no_project)?;
+        let applied: Vec<Counts> = self.db.query(
+            "SELECT COUNT(*) AS total, 0 AS waiting FROM payments WHERE id = ?",
+            vec![payment_id.into()],
+        )?;
+        if applied.first().map_or(0, |c| c.total) > 0 {
+            return Ok((project.view(), false));
+        }
+        let left = if now < project.expires_ms {
+            (project.attempt_budget - project.attempts_used).max(0)
+        } else {
+            0
+        };
+        // Credit before recording the payment: if recording fails, Stripe's retry credits again,
+        // which costs RunLater a little; the other order could leave a paid pack never credited.
+        self.db.exec(
+            "UPDATE project SET attempt_budget = ?, expires_ms = ?",
+            vec![
+                (project.attempts_used + left + attempts).into(),
+                project.expires_ms.max(now + CREDIT_VALIDITY_MS).into(),
+            ],
+        )?;
+        self.db.exec(
+            "INSERT INTO payments (id, attempts, created_ms) VALUES (?, ?, ?)",
+            vec![payment_id.into(), attempts.into(), now.into()],
+        )?;
+        let stopped: Vec<CronRow> = self.db.query(
+            &format!("SELECT {CRON_COLUMNS} FROM crons WHERE next_run_ms IS NULL"),
+            vec![],
+        )?;
+        for cron in stopped {
+            // Schedules were validated when stored; one that no longer parses stays stopped
+            // rather than failing a payment that has already been applied.
+            let Ok(schedule) = Schedule::parse(&cron.schedule) else {
+                continue;
+            };
+            self.db.exec(
+                "UPDATE crons SET next_run_ms = ?, updated_ms = ? WHERE name = ?",
+                vec![
+                    schedule.next_after(now).into(),
+                    now.into(),
+                    cron.name.as_str().into(),
+                ],
+            )?;
+        }
+        Ok((self.project()?, true))
+    }
+
     /// Admission for new work: the trial must be live, every waiting task (and the callback
     /// it will send) must still be able to get at least one attempt, and new rows must fit
     /// under the retained-task cap. `rows` and `attempts` are what the new work needs.
@@ -725,7 +818,7 @@ impl<'a, D: Db> Ledger<'a, D> {
             return Err(ApiError::new(
                 403,
                 "trial_expired",
-                "this project's trial has ended",
+                "this project's attempts have expired",
             ));
         }
         let counts: Vec<Counts> = self.db.query(
@@ -737,12 +830,13 @@ impl<'a, D: Db> Ledger<'a, D> {
             vec![],
         )?;
         let (total, waiting) = counts.first().map_or((0, 0), |c| (c.total, c.waiting));
-        if rows > 0 && total + rows > MAX_RETAINED_TASKS {
+        let cap = project.max_retained_tasks();
+        if rows > 0 && total + rows > cap {
             return Err(ApiError::new(
                 429,
                 "task_limit",
                 format!(
-                    "this project already holds {MAX_RETAINED_TASKS} tasks; \
+                    "this project already holds {cap} tasks; \
                      finished tasks are removed 30 days after they finish"
                 ),
             ));
@@ -751,7 +845,7 @@ impl<'a, D: Db> Ledger<'a, D> {
             return Err(ApiError::new(
                 402,
                 "budget_exhausted",
-                "not enough delivery attempts left in this project's trial",
+                "not enough delivery attempts left in this project",
             ));
         }
         Ok(())
@@ -1233,7 +1327,7 @@ impl<'a, D: Db> Ledger<'a, D> {
             return Err(ApiError::new(
                 403,
                 "trial_expired",
-                "this project's trial has ended",
+                "this project's attempts have expired",
             ));
         }
         let spec = request.validate(now).map_err(ApiError::invalid_cron)?;
@@ -1847,6 +1941,101 @@ mod tests {
             again, p,
             "a second create must not refill or rekey the trial"
         );
+    }
+
+    #[test]
+    fn credit_adds_attempts_once_and_extends_expiry() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.schedule(req("https://a.example.com/"), "t1", T0).unwrap();
+        db.0.execute("UPDATE project SET attempts_used = 30", [])
+            .unwrap();
+
+        let (p, added) = l.add_credit("cs_test_1", 50_000, T0 + 10).unwrap();
+        assert!(added);
+        assert!(p.paid);
+        assert_eq!(
+            p.attempts_remaining,
+            70 + 50_000,
+            "unused trial attempts carry over"
+        );
+        assert_eq!(p.expires_ms, T0 + 10 + CREDIT_VALIDITY_MS);
+
+        let (again, added) = l.add_credit("cs_test_1", 50_000, T0 + 20).unwrap();
+        assert!(!added);
+        assert_eq!(again, p, "a repeated payment must not add twice");
+
+        let (two, _) = l.add_credit("cs_test_2", 50_000, T0 + 30).unwrap();
+        assert_eq!(two.attempts_remaining, 70 + 100_000);
+        assert_eq!(two.expires_ms, T0 + 30 + CREDIT_VALIDITY_MS);
+    }
+
+    #[test]
+    fn credit_after_expiry_drops_expired_attempts_and_reopens_the_project() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let end = T0 + TRIAL_DURATION_MS;
+        assert_eq!(
+            l.schedule(req("https://a.example.com/"), "t1", end)
+                .unwrap_err()
+                .code,
+            "trial_expired"
+        );
+        let (p, _) = l.add_credit("cs_1", 50_000, end).unwrap();
+        assert_eq!(
+            p.attempts_remaining, 50_000,
+            "expired trial attempts are not revived"
+        );
+        l.schedule(req("https://a.example.com/"), "t1", end)
+            .unwrap();
+    }
+
+    #[test]
+    fn credit_restarts_crons_stopped_by_expiry() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.put_cron(daily("backup"), T0).unwrap();
+        let end = T0 + TRIAL_DURATION_MS;
+        l.fire_crons(end).unwrap();
+        assert_eq!(l.cron("backup").unwrap().next_run_ms, None);
+
+        l.add_credit("cs_1", 50_000, end).unwrap();
+        assert!(l.cron("backup").unwrap().next_run_ms.unwrap() > end);
+        assert!(l.next_wake().unwrap().is_some());
+    }
+
+    #[test]
+    fn credit_rejects_bad_arguments() {
+        let db = Memory::new();
+        let l = Ledger::open(&db).unwrap();
+        assert_eq!(
+            l.add_credit("cs_1", 1, T0).unwrap_err().code,
+            "project_not_found"
+        );
+        let l = setup(&db);
+        for (id, attempts, field) in [
+            ("", 1, "payment_id"),
+            ("cs 1", 1, "payment_id"),
+            ("cs_1", 0, "attempts"),
+            ("cs_1", MAX_CREDIT_ATTEMPTS + 1, "attempts"),
+        ] {
+            assert_eq!(
+                l.add_credit(id, attempts, T0).unwrap_err().field,
+                Some(field)
+            );
+        }
+        assert!(!l.project().unwrap().paid);
+    }
+
+    #[test]
+    fn a_paid_project_holds_more_tasks() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.add_credit("cs_1", 5_000, T0).unwrap();
+        for i in 0..=MAX_RETAINED_TASKS {
+            l.schedule(req("https://a.example.com/"), &format!("t{i}"), T0)
+                .unwrap();
+        }
     }
 
     #[test]

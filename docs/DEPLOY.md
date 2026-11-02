@@ -102,6 +102,39 @@ documents. Its clients, grants and tokens live in the KV namespaces `runlater-oa
 `OAUTH_KV`. Entries expire on their own: tokens after an hour, grants 30 days after last use,
 registered clients after 90 days. The deploy token needs Account · Workers KV Storage · Edit.
 
+### Billing
+
+Agents buy attempt packs through Stripe (`apps/gateway/src/billing.ts`, page `runlater.io/pay`).
+Billing stays off until all three values below are set in a GitHub environment; until then
+`get_payment_link` answers `billing_unavailable`. Use **test-mode** keys in `staging` and live keys in
+`production`. Staging's links also open `runlater.io/pay`: the page takes the publishable key from
+the link, so a test-mode link shows Stripe's test form.
+
+1. Stripe Dashboard → Developers → Webhooks → *Add endpoint*: `https://gateway-staging.runlater.io/billing/webhook`
+   (production: `https://gateway.runlater.io/billing/webhook`), events `checkout.session.completed` and
+   `checkout.session.async_payment_succeeded`. Copy its signing secret.
+2. In the GitHub environment:
+
+   ```bash
+   gh secret set STRIPE_SECRET_KEY --env staging          # sk_test_… (a restricted key with Checkout Sessions: Write is enough)
+   gh secret set STRIPE_WEBHOOK_SECRET --env staging      # whsec_… from step 1
+   gh variable set STRIPE_PUBLISHABLE_KEY --env staging --body pk_test_…
+   ```
+
+3. Redeploy. To test on staging: ask for a link with `get_payment_link`, pay with card
+   `4242 4242 4242 4242`, then check `get_project` shows `paid: true` and 50,000 more attempts.
+
+A payment that Stripe reports but the webhook could not apply shows as a failed delivery under the
+endpoint in the Stripe Dashboard; Stripe retries it for three days, and the gateway logs
+`stripe: …` in Workers Logs. Each Checkout Session is applied once. If Stripe gives up (three days
+of failures), the customer has paid and has no attempts: credit them by hand or refund in the
+Dashboard. Refunds and disputes do not take attempts back.
+
+- **Apple Pay** on `runlater.io` needs it registered under Settings → Payment method domains.
+- **Turning billing off:** deleting the GitHub values is not enough, because deploys keep Worker
+  secrets that are left out. Also run `npx wrangler secret delete STRIPE_SECRET_KEY --env <env>`
+  in `apps/gateway`.
+
 ## Hostnames
 
 | Hostname | Worker |

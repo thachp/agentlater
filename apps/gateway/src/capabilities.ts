@@ -67,7 +67,7 @@ function listQuery(args: Args): string {
   return s ? `?${s}` : "";
 }
 
-/** The API call a capability makes, minus project creation (handled by the caller). */
+/** The API call a capability makes. Project allocation and get_payment_link are handled by the caller. */
 export function route(capability: string, args: Args): { method: "GET" | "POST"; path: string; scope: Scope; body?: unknown } {
   switch (capability) {
     case "create_project":

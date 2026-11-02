@@ -8,6 +8,7 @@ describe("capabilities", () => {
     expect(capabilityNames).toEqual([
       "create_project",
       "get_project",
+      "get_payment_link",
       "schedule_http",
       "get_task",
       "list_tasks",

@@ -7,6 +7,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker";
 import { ApiError } from "./api";
+import type { BillingEnv } from "./billing";
 import { ArgumentError, capabilities, capabilityNames } from "./capabilities";
 import { runCapability } from "./projects";
 
@@ -16,7 +17,7 @@ export interface McpProps {
   owner: string;
 }
 
-export interface McpEnv {
+export interface McpEnv extends BillingEnv {
   DB: D1Database;
   API: Fetcher;
 }
@@ -24,7 +25,7 @@ export interface McpEnv {
 const INSTRUCTIONS =
   "RunLater makes HTTP requests later and records whether they happened. Call create_project once, " +
   "then schedule_http (one request), create_cron (a repeating one) or watch_http (poll until done). " +
-  "Check results with get_task.";
+  "Check results with get_task. When the project runs out of attempts, get_payment_link gives your user a link to buy more.";
 
 /** A schedule_http body can be 64 KiB of string; leave room for JSON-RPC and escaping. */
 const MAX_BODY_BYTES = 192 * 1024;

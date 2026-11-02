@@ -27,7 +27,7 @@ const receiverDir = fileURLToPath(new URL("../../receiver/", import.meta.url));
 const RECEIVER_HOST = "receiver.example.com";
 const receiverToken = randomBytes(16).toString("hex");
 const CAPABILITIES = [
-  "create_project", "get_project", "schedule_http", "get_task", "list_tasks", "cancel_task", "redrive_task",
+  "create_project", "get_project", "get_payment_link", "schedule_http", "get_task", "list_tasks", "cancel_task", "redrive_task",
   "create_cron", "get_cron", "list_crons", "delete_cron", "watch_http",
 ];
 
@@ -47,6 +47,11 @@ const freePort = () =>
       s.close(() => resolve(port));
     });
   });
+
+/** Fake Stripe: the Checkout Sessions the gateway created, as form fields. */
+const STRIPE_API_BASE = "https://stripe.test";
+const STRIPE_WEBHOOK_SECRET = "whsec_e2e";
+const stripeSessions = [];
 
 /** Deliveries the API sent out, and scripted replies per path (default 200). */
 const received = [];
@@ -91,6 +96,10 @@ before(async () => {
             PUBLIC_URL: origin,
             ASSERTION_PRIVATE_KEY: seed.toString("hex"),
             BETTER_AUTH_SECRET: randomBytes(32).toString("hex"),
+            STRIPE_SECRET_KEY: "sk_test_e2e",
+            STRIPE_PUBLISHABLE_KEY: "pk_test_e2e",
+            STRIPE_WEBHOOK_SECRET,
+            STRIPE_API_BASE,
           },
           serviceBindings: { API: "api" },
           d1Databases: { DB: "gateway-db" },
@@ -100,8 +109,15 @@ before(async () => {
             OAUTH_RATE: { namespace_id: "1003", simple: { limit: 100, period: 60 } },
           },
           kvNamespaces: { OAUTH_KV: "oauth-kv" },
-          outboundService: () => {
-            throw new Error("the gateway must not reach the internet");
+          outboundService: async (req) => {
+            if (req.url !== `${STRIPE_API_BASE}/v1/checkout/sessions` || req.method !== "POST") {
+              throw new Error("the gateway must not reach the internet");
+            }
+            assert.equal(req.headers.get("authorization"), "Bearer sk_test_e2e");
+            const fields = Object.fromEntries(new URLSearchParams(await req.text()));
+            const id = `cs_test_${stripeSessions.length + 1}`;
+            stripeSessions.push({ id, fields });
+            return Response.json({ id, client_secret: `${id}_secret_e2e`, expires_at: Math.floor(Date.now() / 1000) + 86_400 });
           },
         },
         {
@@ -545,6 +561,65 @@ describe("hosted MCP at /mcp", () => {
     assert.equal(peek.isError, true);
     assert.equal(value(peek).error.code, "task_not_found");
     await other.close();
+  });
+
+  test("a person buys attempts through the payment link; Stripe's webhook adds them once", async () => {
+    const client = await mcpClient((await connect("Buyer")).access_token);
+    const project = value(await client.callTool({ name: "create_project", arguments: {} }));
+
+    const link = value(await client.callTool({ name: "get_payment_link", arguments: {} }));
+    assert.equal(link.attempts, 50_000);
+    assert.deepEqual(link.price, { amount_cents: 500, currency: "usd" });
+    const url = new URL(link.payment_url);
+    assert.equal(`${url.origin}${url.pathname}`, "https://runlater.io/pay");
+    assert.equal(url.search, "", "nothing secret in the query string");
+    const fragment = new URLSearchParams(url.hash.slice(1));
+    assert.equal(fragment.get("key"), "pk_test_e2e");
+    const session = stripeSessions.at(-1);
+    assert.equal(fragment.get("secret"), `${session.id}_secret_e2e`);
+    assert.equal(session.fields.ui_mode, "embedded_page");
+    assert.equal(session.fields["payment_method_types[0]"], "card");
+    assert.equal(session.fields["line_items[0][price_data][unit_amount]"], "500");
+    assert.equal(session.fields["metadata[project_id]"], project.id);
+
+    const metadata = {
+      owner: session.fields["metadata[owner]"],
+      project_id: session.fields["metadata[project_id]"],
+      attempts: session.fields["metadata[attempts]"],
+    };
+    const webhook = (type, paymentStatus, { secret = STRIPE_WEBHOOK_SECRET, meta = metadata } = {}) => {
+      const body = JSON.stringify({ id: "evt_e2e", type, data: { object: { id: session.id, payment_status: paymentStatus, metadata: meta } } });
+      const t = Math.floor(Date.now() / 1000);
+      const sig = createHmac("sha256", secret).update(`${t}.${body}`).digest("hex");
+      return fetch(`${origin}/billing/webhook`, { method: "POST", headers: { "Stripe-Signature": `t=${t},v1=${sig}` }, body });
+    };
+    const remaining = async () => value(await client.callTool({ name: "get_project", arguments: {} }));
+
+    assert.equal((await webhook("checkout.session.completed", "paid", { secret: "whsec_wrong" })).status, 400);
+    const t = Math.floor(Date.now() / 1000);
+    const junk = await fetch(`${origin}/billing/webhook`, {
+      method: "POST",
+      headers: { "Stripe-Signature": `t=${t},v1=${createHmac("sha256", STRIPE_WEBHOOK_SECRET).update(`${t}.not json`).digest("hex")}` },
+      body: "not json",
+    });
+    assert.equal(junk.status, 400);
+    assert.equal((await webhook("checkout.session.completed", "unpaid")).status, 200);
+    assert.equal((await remaining()).paid, false, "an unpaid session adds nothing");
+    const forged = await webhook("checkout.session.completed", "paid", { meta: { ...metadata, project_id: "prj_000000000000000000000000" } });
+    assert.equal(forged.status, 500, "a session must name its owner's own project");
+
+    assert.equal((await webhook("checkout.session.completed", "paid")).status, 200);
+    const after = await remaining();
+    assert.equal(after.paid, true);
+    assert.equal(after.attempts_remaining, project.attempts_remaining + 50_000);
+    assert.ok(after.expires_ms > Date.now() + 360 * 86_400_000);
+
+    assert.equal((await webhook("checkout.session.async_payment_succeeded", "paid")).status, 200);
+    assert.equal((await remaining()).attempts_remaining, after.attempts_remaining, "the same session never adds twice");
+
+    const extra = await client.callTool({ name: "get_payment_link", arguments: { amount: 10 } });
+    assert.equal(extra.isError, true);
+    await client.close();
   });
 
   test("/mcp only takes POST: no standalone stream, no session to delete", async () => {
