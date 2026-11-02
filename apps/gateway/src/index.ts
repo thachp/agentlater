@@ -1,5 +1,5 @@
 // Public entry for agents. Serves Agent Auth discovery and the agent endpoints, the hosted MCP
-// server at /mcp behind OAuth, Stripe's payment webhook, and turns capability executions into signed calls on the
+// server at /mcp behind OAuth, Stripe's payment webhook and MPP purchases, and turns capability executions into signed calls on the
 // private Rust API (API binding).
 
 import { OAuthProvider, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
@@ -9,6 +9,7 @@ import { handleStripeWebhook, type BillingEnv } from "./billing";
 import { readLimited } from "./body";
 import { handleAuthorize } from "./consent";
 import { handleMcp, type McpProps } from "./mcp";
+import { handleMpp } from "./mpp";
 
 export { AuthStore } from "./store";
 
@@ -17,6 +18,8 @@ export interface Env extends AuthEnv, BillingEnv {
   ASSERTION_PRIVATE_KEY: string;
   REGISTER_RATE: RateLimit;
   OAUTH_RATE: RateLimit;
+  /** MPP purchases, per IP and per project. */
+  MPP_RATE: RateLimit;
   /** OAuth clients, grants and tokens for hosted MCP, managed by workers-oauth-provider. */
   OAUTH_KV: KVNamespace;
   /** Set by OAuthProvider before it calls the handlers below. */
@@ -82,14 +85,15 @@ const gateway = {
 
     if (url.pathname === "/authorize") return handleAuthorize(request, env);
 
-    if (url.pathname === "/billing/webhook") {
+    const mppToken = url.pathname.startsWith("/billing/mpp/") ? url.pathname.slice("/billing/mpp/".length) : null;
+    if (url.pathname === "/billing/webhook" || mppToken !== null) {
       let key: CryptoKey;
       try {
         key = await signingKey(env);
       } catch {
         return error(500, "misconfigured", "assertion signing key is not configured");
       }
-      return handleStripeWebhook(request, env, key);
+      return mppToken !== null ? handleMpp(request, env, key, mppToken) : handleStripeWebhook(request, env, key);
     }
 
     if (request.method === "GET" && url.pathname === "/health") {

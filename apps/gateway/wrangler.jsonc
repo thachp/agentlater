@@ -24,7 +24,8 @@
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["AuthStore"] }],
   "ratelimits": [
     { "name": "REGISTER_RATE", "namespace_id": "1001", "simple": { "limit": 10, "period": 60 } },
-    { "name": "OAUTH_RATE", "namespace_id": "1003", "simple": { "limit": 20, "period": 60 } }
+    { "name": "OAUTH_RATE", "namespace_id": "1003", "simple": { "limit": 20, "period": 60 } },
+    { "name": "MPP_RATE", "namespace_id": "1005", "simple": { "limit": 10, "period": 60 } }
   ],
   "env": {
     "staging": {
@@ -39,7 +40,8 @@
       "durable_objects": { "bindings": [{ "name": "AUTH_STORE", "class_name": "AuthStore" }] },
       "ratelimits": [
         { "name": "REGISTER_RATE", "namespace_id": "1001", "simple": { "limit": 10, "period": 60 } },
-        { "name": "OAUTH_RATE", "namespace_id": "1003", "simple": { "limit": 20, "period": 60 } }
+        { "name": "OAUTH_RATE", "namespace_id": "1003", "simple": { "limit": 20, "period": 60 } },
+        { "name": "MPP_RATE", "namespace_id": "1005", "simple": { "limit": 10, "period": 60 } }
       ],
       "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "8d9c410b9f39424fb155ca27b542afe0" }]
     },
@@ -54,7 +56,8 @@
       "durable_objects": { "bindings": [{ "name": "AUTH_STORE", "class_name": "AuthStore" }] },
       "ratelimits": [
         { "name": "REGISTER_RATE", "namespace_id": "1002", "simple": { "limit": 10, "period": 60 } },
-        { "name": "OAUTH_RATE", "namespace_id": "1004", "simple": { "limit": 20, "period": 60 } }
+        { "name": "OAUTH_RATE", "namespace_id": "1004", "simple": { "limit": 20, "period": 60 } },
+        { "name": "MPP_RATE", "namespace_id": "1006", "simple": { "limit": 10, "period": 60 } }
       ],
       "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "d172e7fad1f3452badcbf756685c7abe" }]
     }

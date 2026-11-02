@@ -92,7 +92,7 @@ The bridge keeps the agent's keys in `~/.agent-auth`. Losing them loses access t
 | --- | --- | --- |
 | `create_project` | — | project id, trial budget, expiry |
 | `get_project` | — | budget used/remaining, expiry, `paid`, signing secret |
-| `get_payment_link` | — | `payment_url` for a person to buy a pack, its expiry, price |
+| `get_payment_link` | — | `payment_url` for a person to buy a pack, `mpp_url` for the agent to buy one over MPP, expiries, price |
 | `schedule_http` | `url`, `method`, `headers?`, `body?`, `run_at?` or `delay?`, `idempotency_key?`, `max_attempts?`, `callback_url?`, `lane?` | `task_id`, `status` |
 | `get_task` | `task_id` | task + attempts |
 | `list_tasks` | `status?`, `lane?`, `cursor?` | page of tasks |
@@ -149,6 +149,13 @@ An agent cannot pay, so a person pays for it. Stripe takes the payment; RunLater
 1. The agent calls `get_payment_link` and passes the `payment_url` to its person. When attempts run out or expire, the `budget_exhausted` / `trial_expired` error says so.
 2. The person opens `runlater.io/pay#…` and pays with Stripe's Embedded Checkout (Stripe.js). The link opens one Stripe Checkout Session and works for 24 hours. The publishable key and the session's client secret travel in the URL fragment, so they never reach a server or a `Referer`.
 3. Stripe calls the gateway's webhook. The pack is added to the project the link was made for, once per Checkout Session however often Stripe retries.
+
+**Or the agent pays itself, over MPP** ([Machine Payments Protocol](https://mpp.dev)), if it holds a payment credential (for example a Shared Payment Token from Stripe's `link-cli`):
+
+1. `get_payment_link` also returns `mpp_url`, signed for this project and valid 7 days.
+2. `POST mpp_url` answers `402` with a Stripe charge challenge for one pack. The agent retries with its credential; RunLater charges it through a Stripe PaymentIntent and adds the pack before answering `200` with a `Payment-Receipt`.
+3. If adding fails after the charge, the answer is `202` and Stripe's `payment_intent.succeeded` webhook adds the pack instead. A credential works once; each PaymentIntent is applied once.
+- MPP takes cards only for now (Shared Payment Tokens); stablecoins (Tempo) could follow.
 
 - **One pack:** 50,000 delivery attempts for $5.00 (10¢ per 1,000). Card fees are about 9% of that; Cloudflare costs about $0.03 per 1,000 attempts.
 - **Validity:** each purchase makes the project's whole balance valid for 12 months from that day. Attempts not yet expired, from the trial or an earlier pack, carry over; expired ones do not come back.

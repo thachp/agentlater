@@ -104,29 +104,40 @@ registered clients after 90 days. The deploy token needs Account · Workers KV S
 
 ### Billing
 
-Agents buy attempt packs through Stripe (`apps/gateway/src/billing.ts`, page `runlater.io/pay`).
-Billing stays off until all three values below are set in a GitHub environment; until then
+Agents buy attempt packs through Stripe in two ways: a person pays on `runlater.io/pay` (Checkout,
+`apps/gateway/src/billing.ts`), or the agent pays itself over MPP (`apps/gateway/src/mpp.ts`).
+Checkout is on once the secret key, webhook secret and publishable key are set in a GitHub
+environment; MPP once the secret key, webhook secret and Stripe profile id are. With neither,
 `get_payment_link` answers `billing_unavailable`. Use **test-mode** keys in `staging` and live keys in
 `production`. Staging's links also open `runlater.io/pay`: the page takes the publishable key from
 the link, so a test-mode link shows Stripe's test form.
 
 1. Stripe Dashboard → Developers → Webhooks → *Add endpoint*: `https://gateway-staging.runlater.io/billing/webhook`
-   (production: `https://gateway.runlater.io/billing/webhook`), events `checkout.session.completed` and
-   `checkout.session.async_payment_succeeded`. Copy its signing secret.
+   (production: `https://gateway.runlater.io/billing/webhook`), events `checkout.session.completed`,
+   `checkout.session.async_payment_succeeded` and `payment_intent.succeeded` (the last credits an MPP
+   charge whose immediate credit failed). Copy its signing secret.
 2. In the GitHub environment:
 
    ```bash
-   gh secret set STRIPE_SECRET_KEY --env staging          # sk_test_… (a restricted key with Checkout Sessions: Write is enough)
+   gh secret set STRIPE_SECRET_KEY --env staging          # sk_test_… (restricted: Checkout Sessions and PaymentIntents: Write)
    gh secret set STRIPE_WEBHOOK_SECRET --env staging      # whsec_… from step 1
    gh variable set STRIPE_PUBLISHABLE_KEY --env staging --body pk_test_…
+   gh variable set STRIPE_PROFILE_ID --env staging --body profile_test_…   # MPP; see below
    ```
+
+   MPP needs a Stripe profile (Dashboard → Settings → Profile; the sandbox has its own
+   `profile_test_…`) and, for card payments, Shared Payment Tokens, which are in preview: check the
+   account is enabled for machine payments. MPP links are signed with a key derived from
+   `STRIPE_SECRET_KEY`, so rotating that key invalidates outstanding `mpp_url`s (they last 7 days).
 
 3. Redeploy. To test on staging: ask for a link with `get_payment_link`, pay with card
    `4242 4242 4242 4242`, then check `get_project` shows `paid: true` and 50,000 more attempts.
+   For MPP: `npx @stripe/link-cli auth login`, then `npx @stripe/link-cli mpp pay <mpp_url> -X POST -d '{}'`.
 
 A payment that Stripe reports but the webhook could not apply shows as a failed delivery under the
 endpoint in the Stripe Dashboard; Stripe retries it for three days, and the gateway logs
-`stripe: …` in Workers Logs. Each Checkout Session is applied once. If Stripe gives up (three days
+`stripe: …` or `mpp: …` in Workers Logs. Each Checkout Session and each MPP PaymentIntent is
+applied once. If Stripe gives up (three days
 of failures), the customer has paid and has no attempts: credit them by hand or refund in the
 Dashboard. Refunds and disputes do not take attempts back.
 

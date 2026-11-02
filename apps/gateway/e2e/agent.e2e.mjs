@@ -18,6 +18,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createHash } from "node:crypto";
+import { Challenge, Credential, Receipt } from "mppx";
 import { runJourney } from "./journey.mjs";
 import { REDIRECT, connectHosted } from "./oauth.mjs";
 
@@ -52,6 +53,8 @@ const freePort = () =>
 const STRIPE_API_BASE = "https://stripe.test";
 const STRIPE_WEBHOOK_SECRET = "whsec_e2e";
 const stripeSessions = [];
+/** Fake Stripe: MPP PaymentIntents by idempotency key, as Stripe replays them. */
+const paymentIntents = new Map();
 
 /** Deliveries the API sent out, and scripted replies per path (default 200). */
 const received = [];
@@ -100,6 +103,7 @@ before(async () => {
             STRIPE_PUBLISHABLE_KEY: "pk_test_e2e",
             STRIPE_WEBHOOK_SECRET,
             STRIPE_API_BASE,
+            STRIPE_PROFILE_ID: "profile_test_e2e",
           },
           serviceBindings: { API: "api" },
           d1Databases: { DB: "gateway-db" },
@@ -107,9 +111,19 @@ before(async () => {
           ratelimits: {
             REGISTER_RATE: { namespace_id: "1001", simple: { limit: 100, period: 60 } },
             OAUTH_RATE: { namespace_id: "1003", simple: { limit: 100, period: 60 } },
+            MPP_RATE: { namespace_id: "1005", simple: { limit: 100, period: 60 } },
           },
           kvNamespaces: { OAUTH_KV: "oauth-kv" },
           outboundService: async (req) => {
+            if (req.url === "https://api.stripe.com/v1/payment_intents" && req.method === "POST") {
+              assert.equal(req.headers.get("authorization"), `Basic ${btoa("sk_test_e2e:")}`);
+              const fields = Object.fromEntries(new URLSearchParams(await req.text()));
+              const idem = req.headers.get("idempotency-key");
+              const replayed = paymentIntents.has(idem);
+              if (!replayed) paymentIntents.set(idem, { id: `pi_test_${paymentIntents.size + 1}`, status: "succeeded", fields });
+              const pi = paymentIntents.get(idem);
+              return Response.json({ id: pi.id, status: pi.status }, { headers: replayed ? { "Idempotent-Replayed": "true" } : {} });
+            }
             if (req.url !== `${STRIPE_API_BASE}/v1/checkout/sessions` || req.method !== "POST") {
               throw new Error("the gateway must not reach the internet");
             }
@@ -619,6 +633,100 @@ describe("hosted MCP at /mcp", () => {
 
     const extra = await client.callTool({ name: "get_payment_link", arguments: { amount: 10 } });
     assert.equal(extra.isError, true);
+    await client.close();
+  });
+
+  test("an agent pays for itself over MPP; the pack is added once", async () => {
+    const client = await mcpClient((await connect("MPP Buyer")).access_token);
+    const project = value(await client.callTool({ name: "create_project", arguments: {} }));
+    const link = value(await client.callTool({ name: "get_payment_link", arguments: {} }));
+    assert.ok(link.payment_url, "Checkout stays available alongside MPP");
+    const mppUrl = link.mpp_url.replace(/^https?:\/\/[^/]+/, origin);
+    assert.ok(link.mpp_url.startsWith(`${origin}/billing/mpp/${project.id}.`));
+
+    // No credential: a 402 with a Stripe charge for exactly one pack.
+    const unpaid = await fetch(mppUrl, { method: "POST", body: "{}" });
+    assert.equal(unpaid.status, 402);
+    const challenge = Challenge.fromResponse(unpaid);
+    assert.equal(challenge.method, "stripe");
+    assert.equal(challenge.request.amount, "500");
+    assert.equal(challenge.request.currency, "usd");
+    assert.equal(challenge.request.methodDetails.networkId, "profile_test_e2e");
+
+    // Pay with a (fake) Shared Payment Token.
+    const authorization = Credential.serialize(Credential.from({ challenge, payload: { spt: "spt_test_e2e" } }));
+    const paid = await fetch(mppUrl, { method: "POST", headers: { Authorization: authorization }, body: "{}" });
+    assert.equal(paid.status, 200, await paid.clone().text());
+    const receipt = Receipt.fromResponse(paid);
+    const body = await paid.json();
+    assert.equal(body.attempts_added, 50_000);
+    assert.equal(body.payment_id, receipt.reference);
+    const pi = [...paymentIntents.values()].find((p) => p.id === receipt.reference);
+    assert.equal(pi.fields.amount, "500");
+    assert.equal(pi.fields["metadata[runlater_project_id]"], project.id);
+    assert.equal(pi.fields["shared_payment_granted_token"], "spt_test_e2e");
+    const after = value(await client.callTool({ name: "get_project", arguments: {} }));
+    assert.equal(after.attempts_remaining, project.attempts_remaining + 50_000);
+
+    // The same credential again is refused, and Stripe's webhook for the same PaymentIntent adds nothing.
+    const again = await fetch(mppUrl, { method: "POST", headers: { Authorization: authorization }, body: "{}" });
+    assert.notEqual(again.status, 200);
+    const event = JSON.stringify({
+      id: "evt_pi",
+      type: "payment_intent.succeeded",
+      data: { object: { id: receipt.reference, metadata: { runlater_project_id: project.id, runlater_attempts: "50000" } } },
+    });
+    const t = Math.floor(Date.now() / 1000);
+    const sig = createHmac("sha256", STRIPE_WEBHOOK_SECRET).update(`${t}.${event}`).digest("hex");
+    const hook = await fetch(`${origin}/billing/webhook`, { method: "POST", headers: { "Stripe-Signature": `t=${t},v1=${sig}` }, body: event });
+    assert.equal(hook.status, 200);
+    assert.equal(value(await client.callTool({ name: "get_project", arguments: {} })).attempts_remaining, after.attempts_remaining);
+
+    // A credential paid for this project's challenge is refused at another project's link.
+    const other = await mcpClient((await connect("MPP Other")).access_token);
+    await other.callTool({ name: "create_project", arguments: {} });
+    const otherUrl = value(await other.callTool({ name: "get_payment_link", arguments: {} })).mpp_url.replace(/^https?:\/\/[^/]+/, origin);
+    const fresh = Challenge.fromResponse(await fetch(mppUrl, { method: "POST", body: "{}" }));
+    const stolen = Credential.serialize(Credential.from({ challenge: fresh, payload: { spt: "spt_test_stolen" } }));
+    const intents = paymentIntents.size;
+    assert.equal((await fetch(otherUrl, { method: "POST", headers: { Authorization: stolen }, body: "{}" })).status, 402);
+    assert.equal(paymentIntents.size, intents, "nothing is charged");
+    await other.close();
+
+    // A link for another project, or a tampered one, is not accepted.
+    const [, exp, mac] = new URL(mppUrl).pathname.split("/").pop().split(".");
+    const forged = await fetch(`${origin}/billing/mpp/prj_ffffffffffffffffffffffff.${exp}.${mac}`, { method: "POST" });
+    assert.equal(forged.status, 404);
+    assert.equal((await fetch(mppUrl)).status, 405);
+    await client.close();
+  });
+
+  test("Stripe's webhook ignores MPP charges it cannot apply, without retries", async () => {
+    const send = async (metadata) => {
+      const event = JSON.stringify({ id: "evt_x", type: "payment_intent.succeeded", data: { object: { id: "pi_test_x", metadata } } });
+      const t = Math.floor(Date.now() / 1000);
+      const sig = createHmac("sha256", STRIPE_WEBHOOK_SECRET).update(`${t}.${event}`).digest("hex");
+      return fetch(`${origin}/billing/webhook`, { method: "POST", headers: { "Stripe-Signature": `t=${t},v1=${sig}` }, body: event });
+    };
+    assert.equal((await send({ runlater_project_id: "prj_ffffffffffffffffffffffff", runlater_attempts: "50000" })).status, 200);
+    assert.equal((await send({ runlater_project_id: "prj_ffffffffffffffffffffffff" })).status, 200);
+    assert.equal((await send({ runlater_project_id: "nope", runlater_attempts: "50000" })).status, 200);
+  });
+
+  test("Stripe's webhook credits an MPP charge that was not credited when it was made", async () => {
+    const client = await mcpClient((await connect("MPP Backstop")).access_token);
+    const project = value(await client.callTool({ name: "create_project", arguments: {} }));
+    const event = JSON.stringify({
+      id: "evt_pi2",
+      type: "payment_intent.succeeded",
+      data: { object: { id: "pi_test_backstop", metadata: { runlater_project_id: project.id, runlater_attempts: "50000" } } },
+    });
+    const t = Math.floor(Date.now() / 1000);
+    const sig = createHmac("sha256", STRIPE_WEBHOOK_SECRET).update(`${t}.${event}`).digest("hex");
+    assert.equal((await fetch(`${origin}/billing/webhook`, { method: "POST", headers: { "Stripe-Signature": `t=${t},v1=${sig}` }, body: event })).status, 200);
+    const after = value(await client.callTool({ name: "get_project", arguments: {} }));
+    assert.equal(after.attempts_remaining, project.attempts_remaining + 50_000);
+    assert.equal(after.paid, true);
     await client.close();
   });
 

@@ -19,7 +19,8 @@ export default function Quickstart() {
         <p>
           <strong>Free trial, then $5 for 50,000 attempts.</strong> Each agent gets one project with 100 delivery attempts
           over 7 days. For more, the agent calls <code>get_payment_link</code> and hands the link to its person, who pays
-          by card on runlater.io; the attempts stay valid for 12 months and leftovers carry over.
+          by card on runlater.io, or pays itself over <a href="https://mpp.dev">MPP</a> with the <code>mpp_url</code> it
+          returns. The attempts stay valid for 12 months and leftovers carry over.
         </p>
       </div>
 

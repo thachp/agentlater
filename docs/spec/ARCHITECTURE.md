@@ -11,7 +11,7 @@ Status: **draft for review** · Companion to [PRODUCT.md](PRODUCT.md)
 | Backend | Rust (`workers-rs`) on Cloudflare Workers — task ledger, scheduling, delivery |
 | Agent-facing layer | TypeScript Worker — Agent Auth host and capabilities, and a hosted MCP server at `/mcp` |
 | Frontend | Next.js on Cloudflare Workers via OpenNext |
-| Payments | Stripe Checkout, embedded on `runlater.io/pay` with Stripe.js; the gateway creates sessions and takes Stripe's webhook. Prepaid attempt packs, no accounts or subscriptions. |
+| Payments | Stripe Checkout, embedded on `runlater.io/pay` with Stripe.js, for a person to pay; MPP (`mppx`, Stripe Shared Payment Tokens) for an agent to pay itself. Prepaid attempt packs, no accounts or subscriptions. |
 | Approach | Clean rebuild in a new layout; port the proven ledger/delivery core; delete milestone code. No migration of beta data. |
 
 ## System
@@ -47,6 +47,7 @@ flowchart LR
 - MCP, hosted: `/mcp` (Streamable HTTP, stateless) behind `@cloudflare/workers-oauth-provider` (OAuth 2.1, dynamic client registration, PKCE; clients, grants and tokens in the `OAUTH_KV` namespace). `/authorize` is a one-click consent page with no account; approving creates an owner `mcp:<id>` whose grant carries it, and `runlater_project` maps that owner to a project exactly as it maps an Agent Auth host. Tools are the capabilities, run through the same code path (`runCapability`).
 - MCP, local: MCP clients can also run the Agent Auth bridge (`@auth/agent-cli mcp --url <gateway>`), a local stdio MCP server that holds the agent's keys and exposes generic Agent Auth tools (`connect_agent`, `list_capabilities`, `execute_capability`, …). Our capability names, descriptions and input schemas are what the agent reads through them.
 - Billing: `get_payment_link` creates a Stripe Checkout Session (`ui_mode: embedded_page`) for the caller's project and returns `runlater.io/pay#key=…&secret=…`. `POST /billing/webhook` verifies `Stripe-Signature`, matches the session's metadata to the owner's project, and calls the API's `POST /v1/projects/self/credits` (scope `billing`) with the session id, which the ledger applies once.
+- MPP: `get_payment_link` also returns `/billing/mpp/<project>.<expiry>.<mac>` (HMAC with a key derived from the Stripe secret key). `POST` there runs `mppx`'s Stripe charge: `402` with an HMAC-bound challenge, then a PaymentIntent from the agent's Shared Payment Token, credited by PaymentIntent id. `payment_intent.succeeded` on the webhook is the backstop if that credit fails.
 - Rate limits registration and capability calls (Workers Rate Limiting binding).
 
 **`apps/api` (Rust)** — the task authority. Not on a public route.
