@@ -135,5 +135,10 @@ describe("stated limits", () => {
     expect(constant("MAX_INBOX_EVENTS")).toBe("10_000");
     expect(constant("INBOX_ACKED_RETENTION_MS")).toBe("7 * DAY_MS");
     expect(stated["Inbox"]).toBe("10,000 events per project; unread kept 30 days, acked 7 days");
+    expect(constant("MIN_WAKE_DEBOUNCE_MS")).toBe("MINUTE_MS");
+    expect(constant("MAX_WAKE_DEBOUNCE_MS")).toBe("DAY_MS");
+    expect(limitsRs).toContain('pub const DEFAULT_WAKE_DEBOUNCE: &str = "15m";');
+    expect(constant("MAX_WAKE_FAILURES")).toBe("3");
+    expect(stated["Wake"]).toBe("At most one per 1 minute to 24 hours (default 15 minutes); off after 3 failures in a row");
   });
 });

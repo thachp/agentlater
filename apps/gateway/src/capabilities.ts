@@ -105,6 +105,12 @@ export function route(capability: string, args: Args): { method: "GET" | "POST";
       return { method: "POST", path: "/v1/inbox/read", scope: "read", body: args };
     case "ack_inbox":
       return { method: "POST", path: "/v1/inbox/ack", scope: "read", body: args };
+    case "set_wake":
+      // The API validates the wake fully and names the failing field.
+      return { method: "POST", path: "/v1/wake", scope: "schedule", body: args };
+    case "delete_wake":
+      only(args, []);
+      return { method: "POST", path: "/v1/wake/delete", scope: "cancel", body: {} };
     default:
       throw new ArgumentError(`unknown capability ${capability}`);
   }

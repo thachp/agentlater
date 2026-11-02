@@ -31,6 +31,7 @@ There is no human sign-up, password, or dashboard in v1. The agent *is* the cust
 4. **Cancel** a task that hasn't run yet.
 5. **Redrive** a task that failed, to try it again.
 6. **Find out later** what happened while the agent was away, without a public URL of its own: the *Inbox*.
+7. **Be woken** when something lands there, instead of waiting for a person to open a session: *Wake*.
 
 That's the whole product for v1.
 
@@ -92,7 +93,7 @@ The bridge keeps the agent's keys in `~/.agent-auth`. Losing them loses access t
 | Capability | Input | Output |
 | --- | --- | --- |
 | `create_project` | — | project id, trial budget, expiry |
-| `get_project` | — | budget used/remaining, expiry, `paid`, signing secret, `inbox_unread` |
+| `get_project` | — | budget used/remaining, expiry, `paid`, signing secret, `inbox_unread`, `wake` |
 | `get_payment_link` | — | `payment_url` for a person to buy a pack, `mpp_url` for the agent to buy one over MPP, expiries, price |
 | `schedule_http` | `url`, `method`, `headers?`, `body?`, `run_at?` or `delay?`, `idempotency_key?`, `max_attempts?`, `callback_url?`, `capture?`, `lane?` | `task_id`, `status` |
 | `get_task` | `task_id` | task + attempts |
@@ -106,6 +107,8 @@ The bridge keeps the agent's keys in `~/.agent-auth`. Losing them loses access t
 | `watch_http` | `url`, `every`, `until`, `deadline`, `method?`, `headers?`, `body?`, `callback_url?`, `idempotency_key?` | task, with `watch` |
 | `read_inbox` | `after?`, `limit?`, `ack?` | `events`, `acked_seq`, `unread`, `dropped` |
 | `ack_inbox` | `up_to` | `acked_seq`, `unread` |
+| `set_wake` | `url`, `headers?`, `debounce?` | wake |
+| `delete_wake` | — | wake as it was |
 
 The REST routes underneath (`/v1/tasks`, …) are an internal contract between
 services, not a public product in v1.
@@ -134,6 +137,15 @@ Callbacks need a public HTTPS URL, and most agents (everything on the hosted `/m
 - **Capture.** `capture: true` on `schedule_http` keeps the response of the latest attempt that got one, success or failure, as the task's `response`: `attempt`, `status`, the `content-type`, `location`, `etag` and `retry-after` headers, the first 16 KiB of the body as UTF-8 (invalid bytes replaced), `body_bytes` from `Content-Length` (null for an encoded body), and `truncated`. Any HTTP answer replaces the earlier capture; a timeout or network error leaves it in place; a redrive keeps it until a new attempt replaces it. It shows in `get_task` and in the callback or inbox report; `list_tasks` leaves out the body. It costs nothing extra. It is deleted 7 days after the task finishes, and an inbox event's copy loses its body at the same time (its status and headers stay). A failed URL callback keeps its payload, never returned by the API, for redrive until it is purged. Reading the body never changes an attempt's outcome: if the body is slow or broken, the status and headers are recorded with `body: null` and `truncated: true`.
 - **The response is untrusted.** It comes from whatever server the agent called. Tool descriptions tell agents to treat it as data, never as instructions.
 - **Telling agents to look.** The hosted `/mcp` server's instructions, the tool descriptions and `/llms.txt` all say: at the start of a session, if `get_project` shows `inbox_unread`, call `read_inbox`.
+
+## Wake
+
+The inbox holds results until a session reads them; a wake starts that session. `set_wake` stores one URL per project, something that starts an agent run (a routine or workflow trigger, a chat webhook, the agent's own server), with headers such as its `Authorization`.
+
+- **When.** After an inbox event from a task or a cron alert, if the wake is active and none is already waiting or in flight, RunLater queues one for now, or for `debounce` (1m–24h, default 15m) after the last wake actually sent, if that was more recent. So a burst of results starts the agent once, and re-setting the wake never pushes a pending one later. A wake that comes due with nothing unread is canceled without an attempt and does not count as sent. A delivered wake covers every event up to when it was sent; events after that get the next wake, even if the setting was replaced meanwhile. A failed wake told the agent nothing, so anything still unread gets another.
+- **What.** A signed `POST` of `{"event": "inbox.unread", "project_id", "unread"}`, the count when it is sent, and nothing else: results and captured responses stay behind the authenticated inbox. It is a task with `wake_call: true`, retried like any delivery and costing one attempt per try. It is not admitted, so it never spends attempts promised to waiting tasks: it goes only while an attempt is spare. With nothing else waiting it gets one try even past the budget or the trial; with work waiting and no spare attempt it is canceled (`budget_reserved`), which is not a wake failure. It can exceed the task cap by one at a time. A wake cannot be redriven (`409 wake_not_redrivable`), and its header values are wiped once it ends.
+- **Turning off.** A wake that fails (all its attempts) counts; a delivered one resets the count. After 3 in a row the wake turns itself off (`state: disabled`, `disabled_reason: wake_failing`) and adds a `wake.disabled` event to the inbox, which does not itself wake. `set_wake` again replaces the URL, headers and debounce, turns it back on, cancels a wake not yet sent, and queues one if anything is unread. `delete_wake` removes it (404 `wake_not_set` if there is none); a wake already being sent finishes.
+- `get_project` shows `wake`: URL, header names (never values), debounce, state, failures in a row, and the last wake's time and task id.
 
 ## Crons
 
@@ -195,6 +207,7 @@ An agent cannot pay, so a person pays for it. Stripe takes the payment; RunLater
 | Watches | One poll every 5 min to 24 h, for at most 7 days; first 64 KB of a response read |
 | Captured response | First 16 KiB and 4 headers; deleted 7 days after the task finishes |
 | Inbox | 10,000 events per project; unread kept 30 days, acked 7 days; `read_inbox` returns at most 50 |
+| Wake | One per project; at most one wake per 1m–24h (default 15m); off after 3 failures in a row |
 
 ## Explicitly not in v1
 

@@ -33,8 +33,8 @@ export const capabilities: CapabilityDefinition[] = [
   {
     name: "get_project",
     description:
-      "Show this agent's project: trial expiry, delivery attempts used and remaining, the signing secret, and inbox_unread " +
-      "(inbox events waiting for read_inbox). Calling it at the start of a session tells you whether anything finished while you were away.",
+      "Show this agent's project: trial expiry, delivery attempts used and remaining, the signing secret, inbox_unread " +
+      "(inbox events waiting for read_inbox), and wake (see set_wake). Calling it at the start of a session tells you whether anything finished while you were away.",
     input: noArgs,
   },
   {
@@ -299,6 +299,42 @@ export const capabilities: CapabilityDefinition[] = [
       required: ["up_to"],
       properties: { up_to: { type: "integer", minimum: 0, description: "The seq of the last event you handled." } },
     },
+  },
+  {
+    name: "set_wake",
+    description:
+      "Have RunLater start you when your inbox gets something, instead of waiting for someone to open a session. Give the " +
+      "https:// URL that starts an agent run (a routine or workflow trigger, a chat webhook, your own server) and any headers it " +
+      "needs, such as Authorization. RunLater POSTs {\"event\": \"inbox.unread\", \"project_id\", \"unread\"}, signed like any " +
+      "delivery, and nothing else: read the events with read_inbox. At most one wake per debounce (default 15m), so a burst of " +
+      "results starts you once; a wake that would find nothing unread is dropped. Each wake costs one delivery attempt. After 3 " +
+      "wakes in a row fail it turns itself off (wake.state: disabled) and adds a wake.disabled event to the inbox; call set_wake " +
+      "again to turn it back on. Calling again replaces the URL, headers and debounce. get_project shows it.",
+    input: {
+      type: "object",
+      additionalProperties: false,
+      required: ["url"],
+      properties: {
+        url: { type: "string", maxLength: 2048, description: "https:// URL on a public domain name that starts an agent run." },
+        headers: {
+          type: "object",
+          maxProperties: 32,
+          additionalProperties: { type: "string" },
+          description: "Headers to send on every wake, e.g. Authorization. Same rules as schedule_http. Values are never shown again.",
+        },
+        debounce: {
+          type: "string",
+          pattern: "^[0-9]{1,7}[smhd]$",
+          default: "15m",
+          description: "At most one wake per this long, from \"1m\" to \"24h\".",
+        },
+      },
+    },
+  },
+  {
+    name: "delete_wake",
+    description: "Stop waking: RunLater no longer calls the wake URL. A wake already being sent finishes; one not yet sent is canceled.",
+    input: noArgs,
   },
 ];
 

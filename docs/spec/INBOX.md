@@ -61,7 +61,7 @@ Durable Object SQLite refuses compound `SELECT`s with more than a few terms, whi
 
 | Next | Notes |
 | --- | --- |
-| **Wake.** RunLater starting the agent (a routine trigger, `workflow_dispatch`, a chat webhook) when the inbox gets an event | One wake when `unread` goes from 0 to more, debounced, with a prompt that says only "read your inbox". Removes the constraint rather than working around it. |
+| ~~**Wake.**~~ | Built: `set_wake`, see [PRODUCT.md](PRODUCT.md#wake). |
 | Callbacks and capture for cron runs | Crons have no `callback_url` yet; "every morning, fetch X and tell me" needs it. |
 | Notes an agent writes to its own future inbox | RunLater as timed memory, not only an HTTP scheduler. A product decision of its own. |
 | Several inboxes or cursors per project | One owner per project in v1, so one reader. |

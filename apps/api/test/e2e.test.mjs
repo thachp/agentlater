@@ -281,6 +281,35 @@ describe("api", () => {
     assert.equal(task.response.headers["content-type"], "text/plain");
   });
 
+  test("wakes the agent when its inbox gets something, signed and with only a count", async () => {
+    const project = "proj_wake";
+    assert.equal((await api("POST", "/v1/projects", { project })).status, 201);
+    const { signing_secret } = (await api("GET", "/v1/projects/self", { project })).json;
+    const set = await api("POST", "/v1/wake", {
+      project,
+      body: { url: "https://receiver.example.com/wake", headers: { Authorization: "Bearer trig" }, debounce: "1m" },
+    });
+    assert.equal(set.status, 200);
+    assert.equal(set.json.state, "active");
+    assert.deepEqual(set.json.header_names, ["Authorization"]);
+
+    const res = await api("POST", "/v1/tasks", { project, body: { url: "https://receiver.example.com/job", callback_url: "inbox" } });
+    await settled(project, res.json.id, ["succeeded"]);
+    const wake = await until(() => received.find((r) => r.url === "https://receiver.example.com/wake"));
+    assert.equal(wake.method, "POST");
+    assert.equal(wake.headers.authorization, "Bearer trig");
+    assert.deepEqual(JSON.parse(wake.body), { event: "inbox.unread", project_id: project, unread: 1 });
+    const ts = wake.headers["runlater-timestamp"];
+    const id = wake.headers["runlater-task-id"];
+    const mac = createHmac("sha256", signing_secret).update(`${ts}.${id}.1.${wake.body}`).digest("hex");
+    assert.equal(wake.headers["runlater-signature"], `v1=${mac}`);
+
+    const after = (await api("GET", "/v1/projects/self", { project })).json.wake;
+    assert.equal(after.last_wake_task_id, id);
+    assert.equal((await api("POST", "/v1/wake/delete", { project, body: {} })).json.url, "https://receiver.example.com/wake");
+    assert.equal((await api("GET", "/v1/projects/self", { project })).json.wake, null);
+  });
+
   test("runs a lane one task at a time, in order", async () => {
     replies.set("/lane-1", [503]);
     const ids = [];

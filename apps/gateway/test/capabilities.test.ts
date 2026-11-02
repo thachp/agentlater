@@ -21,6 +21,8 @@ describe("capabilities", () => {
       "watch_http",
       "read_inbox",
       "ack_inbox",
+      "set_wake",
+      "delete_wake",
     ]);
     for (const c of capabilities) {
       expect(c.description.length).toBeGreaterThan(20);
@@ -47,6 +49,9 @@ describe("capabilities", () => {
     expect(route("watch_http", { url: "https://a.example.com/" })).toMatchObject({ method: "POST", path: "/v1/watches", scope: "schedule" });
     expect(route("read_inbox", { ack: true })).toEqual({ method: "POST", path: "/v1/inbox/read", scope: "read", body: { ack: true } });
     expect(route("ack_inbox", { up_to: 3 })).toEqual({ method: "POST", path: "/v1/inbox/ack", scope: "read", body: { up_to: 3 } });
+    expect(route("set_wake", { url: "https://a.example.com/" })).toMatchObject({ method: "POST", path: "/v1/wake", scope: "schedule" });
+    expect(route("delete_wake", {})).toEqual({ method: "POST", path: "/v1/wake/delete", scope: "cancel", body: {} });
+    expect(() => route("delete_wake", { url: "x" })).toThrow(ArgumentError);
   });
 
   it("build list queries", () => {

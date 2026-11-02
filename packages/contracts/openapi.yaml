@@ -243,6 +243,38 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/InboxCursor" }
         default: { $ref: "#/components/responses/Error" }
+  /v1/wake:
+    post:
+      operationId: setWake
+      description: >
+        Sets where wakes go, replacing any earlier setting and turning a disabled wake back on.
+        A wake not yet sent is canceled; if the inbox has unread events, a new one is queued.
+        Scope: schedule.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WakeRequest" }
+      responses:
+        "200":
+          description: The wake.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Wake" }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/wake/delete:
+    post:
+      operationId: deleteWake
+      description: >
+        Stops wakes and returns the wake as it was. One being sent finishes; one not yet sent is
+        canceled. 404 wake_not_set. Scope: cancel.
+      responses:
+        "200":
+          description: The wake as it was.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Wake" }
+        default: { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     assertion:
@@ -284,8 +316,8 @@ components:
     Error:
       description: >
         400 invalid_request / ack_beyond_inbox, 401 unauthorized, 402 budget_exhausted, 403 forbidden or
-        trial_expired, 404 not_found / project_not_found / task_not_found / cron_not_found,
-        409 idempotency_conflict / task_finished / task_not_failed / watch_not_redrivable,
+        trial_expired, 404 not_found / project_not_found / task_not_found / cron_not_found / wake_not_set,
+        409 idempotency_conflict / task_finished / task_not_failed / watch_not_redrivable / wake_not_redrivable,
         429 task_limit (1,000 tasks held, finished ones included until purged) / cron_limit,
         500 internal_error.
       content:
@@ -393,7 +425,7 @@ components:
       enum: [GET, POST, PUT, PATCH, DELETE]
     Project:
       type: object
-      required: [id, created_ms, expires_ms, attempt_budget, attempts_used, attempts_remaining, paid, signing_secret, inbox_unread]
+      required: [id, created_ms, expires_ms, attempt_budget, attempts_used, attempts_remaining, paid, signing_secret, inbox_unread, wake]
       properties:
         id: { type: string }
         created_ms: { type: integer }
@@ -404,6 +436,9 @@ components:
         paid: { type: boolean, description: Whether attempts have ever been bought for this project. }
         signing_secret: { type: string, description: Verifies RunLater-Signature on deliveries. }
         inbox_unread: { type: integer, description: Inbox events after the acked cursor. }
+        wake:
+          oneOf: [{ $ref: "#/components/schemas/Wake" }, { type: "null" }]
+          description: Set by setWake.
     ScheduleRequest:
       type: object
       additionalProperties: false
@@ -450,7 +485,7 @@ components:
         http_status: { type: [integer, "null"] }
     Task:
       type: object
-      required: [id, status, method, url, header_names, body_bytes, run_at_ms, next_attempt_ms, max_attempts, attempt_count, idempotency_key, callback_url, callback_task_id, callback_for, inbox_seq, capture, response, lane, cron, alert_for, watch, created_ms, updated_ms, finished_ms]
+      required: [id, status, method, url, header_names, body_bytes, run_at_ms, next_attempt_ms, max_attempts, attempt_count, idempotency_key, callback_url, callback_task_id, callback_for, inbox_seq, capture, response, wake_call, lane, cron, alert_for, watch, created_ms, updated_ms, finished_ms]
       description: Header values and the body are never returned; they may hold credentials.
       properties:
         id: { type: string }
@@ -469,6 +504,7 @@ components:
         callback_for: { type: [string, "null"], description: "Set on callback tasks: the task being reported on." }
         inbox_seq: { type: [integer, "null"], description: 'With callback_url "inbox": the event for the most recent time it finished.' }
         capture: { type: boolean }
+        wake_call: { type: boolean, description: Set on wakes. }
         response:
           oneOf: [{ $ref: "#/components/schemas/CapturedResponse" }, { type: "null" }]
           description: With capture, the last response; null until one arrives and once deleted, 7 days after the task finishes.
@@ -514,7 +550,7 @@ components:
             properties:
               seq: { type: integer }
               at_ms: { type: integer }
-              event: { type: string, enum: [task.finished, cron.failing, cron.recovered] }
+              event: { type: string, enum: [task.finished, cron.failing, cron.recovered, wake.disabled] }
         acked_seq: { type: integer }
         unread: { type: integer }
         dropped: { type: integer, description: Unread events removed (by age or a full inbox) since the cursor last moved. }
@@ -524,3 +560,28 @@ components:
       properties:
         acked_seq: { type: integer }
         unread: { type: integer }
+    WakeRequest:
+      type: object
+      additionalProperties: false
+      required: [url]
+      properties:
+        url: { type: string, maxLength: 2048, description: "https:// to a public DNS name: what starts an agent run." }
+        headers: { type: object, maxProperties: 32, additionalProperties: { type: string } }
+        debounce: { type: string, pattern: "^[0-9]{1,7}[smhd]$", default: 15m, description: "At most one wake per this long: 1m to 24h." }
+    Wake:
+      type: object
+      description: >
+        Header values are never returned. Each wake is a signed POST of
+        {"event": "inbox.unread", "project_id", "unread"}, a task with wake_call true.
+      required: [url, header_names, debounce_ms, state, disabled_reason, consecutive_failures, last_wake_ms, last_wake_task_id, created_ms, updated_ms]
+      properties:
+        url: { type: string }
+        header_names: { type: array, items: { type: string } }
+        debounce_ms: { type: integer }
+        state: { type: string, enum: [active, disabled] }
+        disabled_reason: { type: [string, "null"], description: wake_failing after 3 failed wakes in a row. }
+        consecutive_failures: { type: integer }
+        last_wake_ms: { type: [integer, "null"], description: When the last wake was sent; the next goes no sooner than debounce_ms after it. }
+        last_wake_task_id: { type: [string, "null"] }
+        created_ms: { type: integer }
+        updated_ms: { type: integer }
