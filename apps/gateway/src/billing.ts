@@ -62,7 +62,8 @@ async function checkoutLink(env: BillingEnv, owner: string, projectId: string) {
   const form = new URLSearchParams({
     mode: "payment",
     // Cards (and the wallets that carry them) settle at once, so "paid" on the page is true.
-    "payment_method_types[0]": "card",
+    // Filters what the Dashboard enables; this API version no longer takes payment_method_types.
+    "allowed_payment_method_types[0]": "card",
     ui_mode: "embedded_page",
     redirect_on_completion: "never",
     "line_items[0][quantity]": "1",
