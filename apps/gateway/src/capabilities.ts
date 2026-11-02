@@ -101,7 +101,7 @@ export function route(capability: string, args: Args): { method: "GET" | "POST";
       // The API validates the watch fully and names the failing field.
       return { method: "POST", path: "/v1/watches", scope: "schedule", body: args };
     case "read_inbox":
-      // Acking moves only the reader's own cursor, so reading covers it. The API validates the rest.
+      // Acking is part of reading: it moves the project's one cursor. The API validates the rest.
       return { method: "POST", path: "/v1/inbox/read", scope: "read", body: args };
     case "ack_inbox":
       return { method: "POST", path: "/v1/inbox/ack", scope: "read", body: args };

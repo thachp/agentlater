@@ -200,7 +200,8 @@ paths:
       description: >
         Events after `after` (default: the acked cursor), oldest first. Reading does not move
         the cursor unless `ack` is true, which acks up to the last event returned. `dropped`
-        is reported as it was before that ack. Scope: read.
+        is reported as it was before that ack. With ack, an after past the cursor is a 400,
+        since acking would skip unread events. Scope: read.
       requestBody:
         required: true
         content:
@@ -224,7 +225,7 @@ paths:
       operationId: ackInbox
       description: >
         Moves the cursor forward to up_to; an older up_to changes nothing. 400 ack_beyond_inbox
-        when up_to is past the newest event. Scope: read (it moves only the reader's cursor).
+        when up_to is past the newest event. Scope: read (acking is part of reading).
       requestBody:
         required: true
         content:
@@ -495,8 +496,8 @@ components:
           type: object
           additionalProperties: { type: string }
           description: Only content-type, location, etag and retry-after, lowercased.
-        body: { type: [string, "null"], description: "First 16 KiB as UTF-8, invalid bytes replaced. Null in lists." }
-        body_bytes: { type: [integer, "null"], description: Content-Length, when sent. }
+        body: { type: [string, "null"], description: "First 16 KiB as UTF-8, invalid bytes replaced. Null in lists, when it could not be read in time (truncated is then true), and in inbox events after 7 days." }
+        body_bytes: { type: [integer, "null"], description: Content-Length, when sent for an unencoded body. }
         truncated: { type: boolean }
     InboxPage:
       type: object

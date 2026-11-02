@@ -140,10 +140,13 @@ const MIGRATIONS: &[&[&str]] = &[
         "ALTER TABLE project ADD COLUMN inbox_last_seq INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE project ADD COLUMN inbox_acked_seq INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE project ADD COLUMN inbox_dropped INTEGER NOT NULL DEFAULT 0",
+        // response_until_ms: when the captured response body inside the event must go,
+        // in step with the task's own copy.
         "CREATE TABLE IF NOT EXISTS inbox (
             seq INTEGER PRIMARY KEY,
             at_ms INTEGER NOT NULL,
-            event TEXT NOT NULL
+            event TEXT NOT NULL,
+            response_until_ms INTEGER
         )",
     ],
 ];
@@ -332,9 +335,10 @@ pub struct CapturedResponse {
     pub status: u16,
     /// Only [`CAPTURED_HEADERS`], lowercased.
     pub headers: BTreeMap<String, String>,
-    /// Up to 16 KiB, as UTF-8 (invalid bytes replaced). Null in lists.
+    /// Up to 16 KiB, as UTF-8 (invalid bytes replaced). Null in lists, when the body could not
+    /// be read in time (`truncated` is then true), and in inbox events after 7 days.
     pub body: Option<String>,
-    /// The full length, when the destination sent `Content-Length`.
+    /// The full length, when the destination sent `Content-Length` for an unencoded body.
     pub body_bytes: Option<u64>,
     /// Whether `body` is shorter than what the destination sent.
     pub truncated: bool,
@@ -343,8 +347,11 @@ pub struct CapturedResponse {
 /// A response the consumer read for a watch's poll or a task's capture.
 #[derive(Clone, Copy, Debug)]
 pub struct ResponseRead<'a> {
-    pub body: PollBody<'a>,
-    /// Response headers the consumer kept: [`CAPTURED_HEADERS`] and `content-length`.
+    /// None when the body could not be read in time; a capture then keeps the status and
+    /// headers alone.
+    pub body: Option<PollBody<'a>>,
+    /// Response headers the consumer kept: [`CAPTURED_HEADERS`], `content-length` and
+    /// `content-encoding`.
     pub headers: &'a [(String, String)],
 }
 
@@ -1345,7 +1352,7 @@ impl<'a, D: Db> Ledger<'a, D> {
             return Ok(None);
         };
         if row.watch.is_some() {
-            return self.finish_poll(&row, fence, outcome, read.map(|r| r.body), now);
+            return self.finish_poll(&row, fence, outcome, read.and_then(|r| r.body), now);
         }
         let mut task = row.task()?;
         let Ok(status) = task.finish(fence, outcome, now, jitter) else {
@@ -1353,8 +1360,9 @@ impl<'a, D: Db> Ledger<'a, D> {
         };
         self.record_outcome(task_id, fence, &outcome, now)?;
         // Before save_row, so a callback or inbox event for this finish carries the response.
-        if let (true, Outcome::Http { status, .. }, Some(read)) = (row.capture != 0, &outcome, read)
-        {
+        // Any HTTP answer replaces the last capture, even one whose body could not be read:
+        // an older response must never stand in for a newer one.
+        if let (true, Outcome::Http { status, .. }) = (row.capture != 0, &outcome) {
             self.store_response(task_id, fence, *status, read)?;
         }
         self.save_row(&row, &task, now)?;
@@ -1367,27 +1375,39 @@ impl<'a, D: Db> Ledger<'a, D> {
         task_id: &str,
         attempt: u64,
         status: u16,
-        read: ResponseRead<'_>,
+        read: Option<ResponseRead<'_>>,
     ) -> Result<(), DbError> {
         let mut headers = BTreeMap::new();
-        let mut body_bytes = None;
-        for (name, value) in read.headers {
+        let mut length = None;
+        let mut encoded = false;
+        for (name, value) in read.map_or(&[][..], |r| r.headers) {
             let name = name.to_ascii_lowercase();
-            if name == "content-length" {
-                body_bytes = value.trim().parse().ok();
-            } else if CAPTURED_HEADERS.contains(&name.as_str()) {
-                headers.insert(name, value.clone());
+            match name.as_str() {
+                "content-length" => length = value.trim().parse::<u64>().ok(),
+                "content-encoding" => encoded = true,
+                _ if CAPTURED_HEADERS.contains(&name.as_str()) => {
+                    headers.insert(name, value.clone());
+                }
+                _ => {}
             }
         }
-        let body = excerpt(read.body.text, CAPTURE_BODY_BYTES);
-        let truncated = read.body.truncated
-            || body.len() < read.body.text.len()
-            || body_bytes.is_some_and(|n| n > body.len() as u64);
+        // Content-Length of an encoded body is the compressed size, not the body's.
+        let body_bytes = length.filter(|_| !encoded);
+        let read_body = read.and_then(|r| r.body);
+        let body = read_body.map(|b| excerpt(b.text, CAPTURE_BODY_BYTES));
+        let truncated = match (read_body, &body) {
+            (Some(b), Some(kept)) => {
+                b.truncated
+                    || kept.len() < b.text.len()
+                    || body_bytes.is_some_and(|n| n > kept.len() as u64)
+            }
+            _ => true,
+        };
         let response = CapturedResponse {
             attempt: attempt as u32,
             status,
             headers,
-            body: Some(body),
+            body,
             body_bytes,
             truncated,
         };
@@ -1431,6 +1451,7 @@ impl<'a, D: Db> Ledger<'a, D> {
             vec![(now - CAPTURE_RETENTION_MS).into()],
         )?;
         self.purge_inbox(now)?;
+        self.expire_inbox_responses(now)?;
         let cutoff = now - RETENTION_MS;
         let expired: Vec<IdRow> = self.db.query(
             "SELECT id FROM tasks WHERE terminal_ms IS NOT NULL AND terminal_ms <= ?",
@@ -1473,7 +1494,8 @@ impl<'a, D: Db> Ledger<'a, D> {
                  UNION ALL SELECT MIN(at_ms) + {INBOX_ACKED_RETENTION_MS} FROM inbox \
                    WHERE seq <= (SELECT inbox_acked_seq FROM project) \
                  UNION ALL SELECT MIN(at_ms) + {RETENTION_MS} FROM inbox \
-                   WHERE seq > (SELECT inbox_acked_seq FROM project))"
+                   WHERE seq > (SELECT inbox_acked_seq FROM project) \
+                 UNION ALL SELECT MIN(response_until_ms) FROM inbox)"
             ),
             vec![],
         )?;
@@ -1851,6 +1873,17 @@ impl<'a, D: Db> Ledger<'a, D> {
                 ..ApiError::bad_request("after must not be negative")
             });
         }
+        // Acking up to the last event returned would also ack the unread ones skipped over.
+        if ack && after.is_some_and(|a| a > project.inbox_acked_seq) {
+            return Err(ApiError {
+                field: Some("after"),
+                ..ApiError::bad_request(format!(
+                    "with ack, after must not be past the acked cursor ({}); \
+                     read without ack, or call ack_inbox",
+                    project.inbox_acked_seq
+                ))
+            });
+        }
         let limit = limit.unwrap_or(INBOX_DEFAULT_PAGE).clamp(1, INBOX_MAX_PAGE);
         let rows: Vec<InboxRow> = self.db.query(
             "SELECT seq, at_ms, event FROM inbox WHERE seq > ? ORDER BY seq LIMIT ?",
@@ -1940,9 +1973,18 @@ impl<'a, D: Db> Ledger<'a, D> {
     /// Adds an event. A full inbox makes room by removing its oldest acked event, or if every
     /// event is unread, its oldest one, counted in `dropped`.
     fn add_to_inbox(&self, seq: i64, event: &serde_json::Value, now: i64) -> Result<(), DbError> {
+        // A captured body inside the event goes when the task's own copy does.
+        let response_until = event["task"]["response"]["body"]
+            .is_string()
+            .then_some(now + CAPTURE_RETENTION_MS);
         self.db.exec(
-            "INSERT INTO inbox (seq, at_ms, event) VALUES (?, ?, ?)",
-            vec![seq.into(), now.into(), event.to_string().into()],
+            "INSERT INTO inbox (seq, at_ms, event, response_until_ms) VALUES (?, ?, ?, ?)",
+            vec![
+                seq.into(),
+                now.into(),
+                event.to_string().into(),
+                response_until.into(),
+            ],
         )?;
         let held: Vec<Counts> = self
             .db
@@ -1994,6 +2036,26 @@ impl<'a, D: Db> Ledger<'a, D> {
             self.db.exec(
                 "UPDATE project SET inbox_dropped = inbox_dropped + ?",
                 vec![stale.into()],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Removes captured response bodies from inbox events once the task's copy is gone.
+    fn expire_inbox_responses(&self, now: i64) -> Result<(), DbError> {
+        let due: Vec<InboxRow> = self.db.query(
+            "SELECT seq, at_ms, event FROM inbox WHERE response_until_ms <= ?",
+            vec![now.into()],
+        )?;
+        for row in due {
+            let mut event: serde_json::Value =
+                serde_json::from_str(&row.event).map_err(|e| DbError(e.to_string()))?;
+            if let Some(response) = event["task"]["response"].as_object_mut() {
+                response.insert("body".into(), serde_json::Value::Null);
+            }
+            self.db.exec(
+                "UPDATE inbox SET event = ?, response_until_ms = NULL WHERE seq = ?",
+                vec![event.to_string().into(), row.seq.into()],
             )?;
         }
         Ok(())
@@ -3533,10 +3595,10 @@ mod tests {
         let a = deliver(l, &d, now);
         assert!(a.read_body, "polls read the response");
         let read = body.map(|text| ResponseRead {
-            body: PollBody {
+            body: Some(PollBody {
                 text,
                 truncated: false,
-            },
+            }),
             headers: &[],
         });
         l.finish_response(id, a.fence, outcome, read, now, 0.0)
@@ -3837,10 +3899,10 @@ mod tests {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         let read = ResponseRead {
-            body: PollBody {
+            body: Some(PollBody {
                 text: body,
                 truncated: false,
-            },
+            }),
             headers: &headers,
         };
         l.finish_response(id, a.fence, http(status), Some(read), now, 0.0)
@@ -3908,10 +3970,10 @@ mod tests {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         let read = ResponseRead {
-            body: PollBody {
+            body: Some(PollBody {
                 text: body,
                 truncated: false,
-            },
+            }),
             headers: &headers,
         };
         l.finish_response(id, fence, http(status), Some(read), now, 0.0)
@@ -4239,5 +4301,92 @@ mod tests {
         let e = &inbox(&l).events[0];
         assert_eq!(e["task"]["watch"]["reason"], "matched");
         assert_eq!(l.task("w1").unwrap().callback_task_id, None);
+    }
+
+    #[test]
+    fn an_unread_body_still_replaces_the_last_capture() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.schedule(captured(serde_json::json!({})), "t1", T0)
+            .unwrap();
+        answer(&l, "t1", 503, "busy", &[], T0);
+        // The next attempt is answered, but its body never arrives in time.
+        let retry = l.task("t1").unwrap().next_attempt_ms.unwrap();
+        let d = l.publish_due(P, retry).unwrap().remove(0);
+        let a = deliver(&l, &d, retry);
+        let headers = [("content-type".to_string(), "application/json".to_string())];
+        let read = ResponseRead {
+            body: None,
+            headers: &headers,
+        };
+        l.finish_response("t1", a.fence, http(200), Some(read), retry, 0.0)
+            .unwrap();
+        let t = l.task("t1").unwrap();
+        assert_eq!(t.status, Status::Succeeded);
+        let r = t.response.unwrap();
+        assert_eq!((r.attempt, r.status, r.truncated), (2, 200, true));
+        assert_eq!(r.body, None);
+        assert_eq!(r.headers["content-type"], "application/json");
+    }
+
+    #[test]
+    fn content_length_of_an_encoded_body_is_not_its_size() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.schedule(captured(serde_json::json!({})), "t1", T0)
+            .unwrap();
+        answer(
+            &l,
+            "t1",
+            200,
+            "hello, world",
+            &[("Content-Length", "5"), ("Content-Encoding", "gzip")],
+            T0,
+        );
+        let r = l.task("t1").unwrap().response.unwrap();
+        assert_eq!((r.body_bytes, r.truncated), (None, false));
+        assert!(!r.headers.contains_key("content-encoding"));
+    }
+
+    #[test]
+    fn captured_bodies_leave_inbox_events_with_the_task() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.schedule(
+            captured(serde_json::json!({ "callback_url": "inbox" })),
+            "t1",
+            T0,
+        )
+        .unwrap();
+        answer(&l, "t1", 200, "token=abc", &[], T0);
+        assert_eq!(l.next_wake().unwrap(), Some(T0 + CAPTURE_RETENTION_MS));
+        l.purge(T0 + CAPTURE_RETENTION_MS).unwrap();
+        let e = &inbox(&l).events[0];
+        assert_eq!(e["task"]["response"]["status"], 200, "the status stays");
+        assert_eq!(e["task"]["response"]["body"], serde_json::Value::Null);
+        assert_eq!(l.task("t1").unwrap().response, None);
+        assert_eq!(l.next_wake().unwrap(), Some(T0 + RETENTION_MS));
+    }
+
+    #[test]
+    fn ack_never_skips_unread_events() {
+        let db = Memory::new();
+        let l = setup(&db);
+        for _ in 0..6 {
+            let seq = l.next_inbox_seq().unwrap();
+            l.add_to_inbox(seq, &serde_json::json!({ "event": "test" }), T0)
+                .unwrap();
+        }
+        let e = l.read_inbox(Some(4), None, true).unwrap_err();
+        assert_eq!((e.status, e.field), (400, Some("after")));
+        assert_eq!(inbox(&l).acked_seq, 0);
+        assert_eq!(l.read_inbox(Some(4), None, false).unwrap().events.len(), 2);
+        // From at or before the cursor, ack covers only what was returned.
+        l.ack_inbox(2).unwrap();
+        let page = l.read_inbox(Some(1), Some(2), true).unwrap();
+        assert_eq!(
+            (page.events[0]["seq"].as_i64(), page.acked_seq),
+            (Some(2), 3)
+        );
     }
 }

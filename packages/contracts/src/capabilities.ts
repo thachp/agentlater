@@ -280,7 +280,11 @@ export const capabilities: CapabilityDefinition[] = [
           description: "Return events after this seq instead of after the last acked one, to look back at events already acked (kept 7 days).",
         },
         limit: { type: "integer", minimum: 1, maximum: 50, default: 10 },
-        ack: { type: "boolean", default: false, description: "Also ack up to the last event returned." },
+        ack: {
+          type: "boolean",
+          default: false,
+          description: "Also ack up to the last event returned. Not with an after past the acked cursor, which would skip unread events.",
+        },
       },
     },
   },

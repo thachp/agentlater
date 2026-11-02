@@ -34,13 +34,14 @@ Session 2 ──read_inbox { ack: true }──▶ [{ seq: 1, event: "task.finish
 | Where the cursor lives | On RunLater's side, one per project | The agent can't keep one; that's the whole problem. |
 | Read vs ack | Reading doesn't advance; `ack_inbox` does, or `read_inbox(ack: true)` | At-least-once: a session that dies mid-handling leaves events for the next one. `ack: true` keeps the common case to one call. |
 | Ack past the newest event | `400 ack_beyond_inbox` | It means the agent is acking events it has not read: a bug worth surfacing. |
-| Ack scope | `read` | Acking moves only the reader's own cursor. |
+| Ack scope | `read` | Acking is part of reading. There is one cursor per project and one owner per project, so a read grant that acks only hides events from that same owner. |
+| `read_inbox(after, ack: true)` with `after` past the cursor | `400` on `after` | Acking to the last event returned would ack the unread ones skipped over. |
 | Page size | 1–50, default 10 | Every event lands in the agent's context; one with a captured response is ~20 KiB. |
 | Full inbox | Drop the oldest acked event, else the oldest unread, and count it in `dropped` | Never silently lose unread work, never refuse a finish. |
 | Captured body | First 16 KiB, as UTF-8 with invalid bytes replaced; no base64 | Matches `watch.last_body`. Agents read text; binary responses are rare in this use. |
 | Captured headers | `content-type`, `location`, `etag`, `retry-after` | Useful for deciding what to do next; never `set-cookie` or auth. |
-| Capture retention | 7 days after the task finishes, shorter than the task's 30 | Responses can hold credentials (a token exchange returns a token). |
-| A slow or broken captured body | Record the response without the body; never change the outcome | The destination already answered. Turning that into a retry would deliver twice. |
+| Capture retention | 7 days after the task finishes, shorter than the task's 30; inbox events lose their copy of the body at the same time | Responses can hold credentials (a token exchange returns a token). |
+| A slow or broken captured body | Record status and headers with `body: null`, `truncated: true`; never change the outcome | The destination already answered. Turning that into a retry would deliver twice, and keeping the earlier capture would show an old status for a newer answer. |
 | Marking responses untrusted | In tool descriptions and docs, not a field | A field that is always `true` is noise. |
 
 Rejected:

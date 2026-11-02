@@ -122,7 +122,7 @@ fn required_scope(method: &Method, path: &[&str]) -> Option<Scope> {
         (Method::Get, ["v1", "crons"]) => Scope::Read,
         (Method::Get, ["v1", "crons", _]) => Scope::Read,
         (Method::Post, ["v1", "crons", _, "delete"]) => Scope::Cancel,
-        // Acking moves only the reader's own cursor, so reading covers it.
+        // Acking is part of reading: it moves the project's one cursor, nothing else.
         (Method::Post, ["v1", "inbox", "read"]) => Scope::Read,
         (Method::Post, ["v1", "inbox", "ack"]) => Scope::Read,
         _ => return None,
@@ -382,11 +382,11 @@ impl TaskLedger {
                         &f.task_id,
                         f.fence,
                         f.outcome,
-                        f.body.as_deref().map(|text| ResponseRead {
-                            body: PollBody {
+                        Some(ResponseRead {
+                            body: f.body.as_deref().map(|text| PollBody {
                                 text,
                                 truncated: f.truncated,
-                            },
+                            }),
                             headers: &f.headers,
                         }),
                         t,
@@ -504,9 +504,8 @@ async fn process(env: &Env, d: &Dispatch) -> Result<()> {
         return Ok(());
     };
     let (outcome, read) = deliver(&delivery).await;
-    let (body, truncated, headers) = read.map_or((None, false, vec![]), |r| {
-        (Some(r.body), r.truncated, r.headers)
-    });
+    let (body, truncated, headers) =
+        read.map_or((None, false, vec![]), |r| (r.body, r.truncated, r.headers));
     let _: serde_json::Value = call(
         &stub,
         &d.project_id,
@@ -542,10 +541,11 @@ async fn queue(batch: MessageBatch<Dispatch>, env: Env, _ctx: Context) -> Result
 
 /// A response as read for a watch's poll or a task's capture.
 struct ResponseBody {
-    body: String,
+    /// None when a captured body could not be read in time.
+    body: Option<String>,
     /// Whether the body was cut short.
     truncated: bool,
-    /// [`CAPTURED_HEADERS`] and `content-length`, for capture.
+    /// [`CAPTURED_HEADERS`], `content-length` and `content-encoding`, for capture.
     headers: Vec<(String, String)>,
 }
 
@@ -598,7 +598,7 @@ const CAPTURE_READ_MARGIN_MS: i64 = 500;
 fn kept_headers(response: &Response) -> Vec<(String, String)> {
     CAPTURED_HEADERS
         .iter()
-        .chain(&["content-length"])
+        .chain(&["content-length", "content-encoding"])
         .filter_map(|name| {
             let value = response.headers().get(name).ok().flatten()?;
             Some(((*name).to_string(), value))
@@ -658,23 +658,28 @@ async fn send(
         if d.capture {
             // The destination has answered, so a slow or broken body must not turn that answer
             // into a failure (and a retry). Read only while the attempt has time left.
+            let headers = kept_headers(&response);
+            let unread = |headers| ResponseBody {
+                body: None,
+                truncated: true,
+                headers,
+            };
             let left = started + ATTEMPT_TIMEOUT_MS - CAPTURE_READ_MARGIN_MS - now();
             if left <= 0 {
-                return Ok((outcome, None));
+                return Ok((outcome, Some(unread(headers))));
             }
-            let headers = kept_headers(&response);
             let read = read_capped(&mut response, CAPTURE_BODY_BYTES);
             let limit = Delay::from(Duration::from_millis(left as u64));
             futures_util::pin_mut!(read, limit);
             let body = match select(read, limit).await {
-                Either::Left((Ok((body, truncated)), _)) => Some(ResponseBody {
-                    body,
+                Either::Left((Ok((body, truncated)), _)) => ResponseBody {
+                    body: Some(body),
                     truncated,
                     headers,
-                }),
-                _ => None,
+                },
+                _ => unread(headers),
             };
-            return Ok((outcome, body));
+            return Ok((outcome, Some(body)));
         }
         // A body cut off mid-read is a failed poll, not an empty answer.
         Ok(
@@ -682,7 +687,7 @@ async fn send(
                 Ok((body, truncated)) => (
                     outcome,
                     Some(ResponseBody {
-                        body,
+                        body: Some(body),
                         truncated,
                         headers: vec![],
                     }),

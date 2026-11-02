@@ -24,7 +24,7 @@ function assertion(project, scope = "project schedule read cancel") {
 }
 
 /** Requests the Worker sent out, and scripted replies per path: a status, or
- * { status, body, headers } (default 200). */
+ * { status, body, headers, stall } (default 200). */
 const received = [];
 const replies = new Map();
 
@@ -52,7 +52,12 @@ before(async () => {
       });
       const script = replies.get(url.pathname) ?? [];
       const reply = script.length ? script.shift() : 200;
-      const { status, body, headers } = typeof reply === "number" ? { status: reply, body: `status ${reply}` } : reply;
+      const { status, body, headers, stall } = typeof reply === "number" ? { status: reply, body: `status ${reply}` } : reply;
+      // stall: send the status and the start of the body, then never finish it.
+      if (stall) {
+        const start = (c) => c.enqueue(new TextEncoder().encode(body ?? ""));
+        return new Response(new ReadableStream({ start }), { status, headers });
+      }
       return new Response(body, { status, headers });
     },
   }));
@@ -260,6 +265,20 @@ describe("api", () => {
     assert.equal(page.unread, 0);
     const beyond = await api("POST", "/v1/inbox/ack", { body: { up_to: page.acked_seq + 1 }, scope: "read" });
     assert.equal(beyond.json.error.code, "ack_beyond_inbox");
+  });
+
+  test("a captured body that never finishes leaves the outcome alone", async () => {
+    replies.set("/stalls", [{ status: 200, body: "partial", headers: { "Content-Type": "text/plain" }, stall: true }]);
+    const res = await api("POST", "/v1/tasks", { body: { url: "https://receiver.example.com/stalls", capture: true } });
+    const task = await settled("proj_a", res.json.id, ["succeeded", "failed", "retrying"], 30_000);
+    assert.equal(task.status, "succeeded");
+    assert.equal(task.attempt_count, 1, "no retry, so no second delivery");
+    assert.equal(task.attempts[0].outcome, "http_200");
+    assert.deepEqual(
+      { status: task.response.status, body: task.response.body, truncated: task.response.truncated },
+      { status: 200, body: null, truncated: true },
+    );
+    assert.equal(task.response.headers["content-type"], "text/plain");
   });
 
   test("runs a lane one task at a time, in order", async () => {
