@@ -7,7 +7,7 @@
 import { ATTEMPT_PACK } from "@runlater/contracts/billing";
 import { ApiClient, ApiError } from "./api";
 import { readLimited } from "./body";
-import { MPP_ATTEMPTS_KEY, MPP_PROJECT_KEY, mppEnabled, mppLink } from "./mpp";
+import { MPP_ATTEMPTS_KEY, MPP_PROJECT_KEY, PROJECT_ID, mppEnabled, mppLink } from "./mpp";
 import { findProject } from "./projects";
 
 export interface BillingEnv {
@@ -17,7 +17,7 @@ export interface BillingEnv {
   STRIPE_WEBHOOK_SECRET?: string;
   /** The Stripe profile (`profile_…`) MPP charges are made for; unset turns MPP off. */
   STRIPE_PROFILE_ID?: string;
-  /** Stripe's API origin; tests point it at a fake. */
+  /** Stripe's API origin for Checkout; tests point it at a fake. mppx always calls api.stripe.com. */
   STRIPE_API_BASE?: string;
 }
 
@@ -126,6 +126,8 @@ async function credit(env: { API: Fetcher }, key: CryptoKey, projectId: string, 
     await new ApiClient(env.API, key, projectId).call("POST", "/v1/projects/self/credits", "billing", { payment_id: paymentId, attempts });
   } catch (e) {
     console.error(`stripe: crediting ${paymentId} failed: ${e instanceof ApiError ? JSON.stringify(e.body) : String(e)}`);
+    // No such project here (e.g. another environment sharing a test account): retrying cannot help.
+    if (e instanceof ApiError && e.body.error.code === "project_not_found") return Response.json({ received: true, ignored: "unknown_project" });
     return Response.json({ error: "credit_failed" }, { status: 500 });
   }
   return Response.json({ received: true });
@@ -165,7 +167,12 @@ export async function handleStripeWebhook(
     // Only MPP charges carry these; Checkout's PaymentIntents are credited by their session.
     const projectId = object?.metadata?.[MPP_PROJECT_KEY];
     if (!projectId) return Response.json({ received: true });
-    return credit(env, key, projectId, object.id, Number(object.metadata?.[MPP_ATTEMPTS_KEY]));
+    const attempts = Number(object.metadata?.[MPP_ATTEMPTS_KEY]);
+    if (!PROJECT_ID.test(projectId) || !Number.isInteger(attempts) || attempts < 1) {
+      console.error(`stripe: payment intent ${object.id} has malformed RunLater metadata`);
+      return Response.json({ received: true, ignored: "malformed_metadata" });
+    }
+    return credit(env, key, projectId, object.id, attempts);
   }
   const session = object;
   // Card payments are paid on completion; delayed methods arrive later as async_payment_succeeded.

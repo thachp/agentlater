@@ -111,6 +111,7 @@ before(async () => {
           ratelimits: {
             REGISTER_RATE: { namespace_id: "1001", simple: { limit: 100, period: 60 } },
             OAUTH_RATE: { namespace_id: "1003", simple: { limit: 100, period: 60 } },
+            MPP_RATE: { namespace_id: "1005", simple: { limit: 100, period: 60 } },
           },
           kvNamespaces: { OAUTH_KV: "oauth-kv" },
           outboundService: async (req) => {
@@ -681,12 +682,35 @@ describe("hosted MCP at /mcp", () => {
     assert.equal(hook.status, 200);
     assert.equal(value(await client.callTool({ name: "get_project", arguments: {} })).attempts_remaining, after.attempts_remaining);
 
+    // A credential paid for this project's challenge is refused at another project's link.
+    const other = await mcpClient((await connect("MPP Other")).access_token);
+    await other.callTool({ name: "create_project", arguments: {} });
+    const otherUrl = value(await other.callTool({ name: "get_payment_link", arguments: {} })).mpp_url.replace(/^https?:\/\/[^/]+/, origin);
+    const fresh = Challenge.fromResponse(await fetch(mppUrl, { method: "POST", body: "{}" }));
+    const stolen = Credential.serialize(Credential.from({ challenge: fresh, payload: { spt: "spt_test_stolen" } }));
+    const intents = paymentIntents.size;
+    assert.equal((await fetch(otherUrl, { method: "POST", headers: { Authorization: stolen }, body: "{}" })).status, 402);
+    assert.equal(paymentIntents.size, intents, "nothing is charged");
+    await other.close();
+
     // A link for another project, or a tampered one, is not accepted.
     const [, exp, mac] = new URL(mppUrl).pathname.split("/").pop().split(".");
     const forged = await fetch(`${origin}/billing/mpp/prj_ffffffffffffffffffffffff.${exp}.${mac}`, { method: "POST" });
     assert.equal(forged.status, 404);
     assert.equal((await fetch(mppUrl)).status, 405);
     await client.close();
+  });
+
+  test("Stripe's webhook ignores MPP charges it cannot apply, without retries", async () => {
+    const send = async (metadata) => {
+      const event = JSON.stringify({ id: "evt_x", type: "payment_intent.succeeded", data: { object: { id: "pi_test_x", metadata } } });
+      const t = Math.floor(Date.now() / 1000);
+      const sig = createHmac("sha256", STRIPE_WEBHOOK_SECRET).update(`${t}.${event}`).digest("hex");
+      return fetch(`${origin}/billing/webhook`, { method: "POST", headers: { "Stripe-Signature": `t=${t},v1=${sig}` }, body: event });
+    };
+    assert.equal((await send({ runlater_project_id: "prj_ffffffffffffffffffffffff", runlater_attempts: "50000" })).status, 200);
+    assert.equal((await send({ runlater_project_id: "prj_ffffffffffffffffffffffff" })).status, 200);
+    assert.equal((await send({ runlater_project_id: "nope", runlater_attempts: "50000" })).status, 200);
   });
 
   test("Stripe's webhook credits an MPP charge that was not credited when it was made", async () => {

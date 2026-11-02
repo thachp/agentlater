@@ -18,6 +18,8 @@ export interface Env extends AuthEnv, BillingEnv {
   ASSERTION_PRIVATE_KEY: string;
   REGISTER_RATE: RateLimit;
   OAUTH_RATE: RateLimit;
+  /** MPP purchases, per IP and per project. */
+  MPP_RATE: RateLimit;
   /** OAuth clients, grants and tokens for hosted MCP, managed by workers-oauth-provider. */
   OAUTH_KV: KVNamespace;
   /** Set by OAuthProvider before it calls the handlers below. */

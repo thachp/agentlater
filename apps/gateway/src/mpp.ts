@@ -6,7 +6,6 @@
 // payment_intent.succeeded webhook credits the same PaymentIntent instead (billing.ts).
 
 import { ATTEMPT_PACK } from "@runlater/contracts/billing";
-import { Receipt } from "mppx";
 import { Mppx } from "mppx/server/core";
 import { charge } from "mppx/stripe/server";
 import { ApiClient, ApiError } from "./api";
@@ -18,7 +17,7 @@ export const MPP_ATTEMPTS_KEY = "runlater_attempts";
 
 /** How long an mpp_url stays valid. */
 const LINK_TTL_MS = 7 * 24 * 3600 * 1000;
-const PROJECT_ID = /^prj_[0-9a-f]{24}$/;
+export const PROJECT_ID = /^prj_[0-9a-f]{24}$/;
 
 export function mppEnabled(env: BillingEnv): boolean {
   return Boolean(env.STRIPE_SECRET_KEY && env.STRIPE_PROFILE_ID && env.STRIPE_WEBHOOK_SECRET);
@@ -56,6 +55,15 @@ export async function readMppLink(env: BillingEnv, token: string, nowMs = Date.n
   return projectId;
 }
 
+/** The PaymentIntent id in a `Payment-Receipt` header (base64url JSON), read without mppx's root barrel. */
+function receiptReference(response: Response): string {
+  const encoded = response.headers.get("Payment-Receipt") ?? "";
+  const json = atob(encoded.replace(/-/g, "+").replace(/_/g, "/"));
+  const reference = (JSON.parse(json) as { reference?: unknown }).reference;
+  if (typeof reference !== "string" || !reference) throw new Error("no payment reference in the receipt");
+  return reference;
+}
+
 let cache: { key: string; mppx: Promise<ReturnType<typeof build>> } | undefined;
 function build(env: BillingEnv, challengeKey: string) {
   return Mppx.create({
@@ -86,7 +94,7 @@ const problem = (status: number, code: string, message: string) =>
 /** POST /billing/mpp/<token>: 402 with the charge, or charge the credential and add the pack. */
 export async function handleMpp(
   request: Request,
-  env: BillingEnv & { API: Fetcher },
+  env: BillingEnv & { API: Fetcher; MPP_RATE: RateLimit },
   key: CryptoKey,
   token: string,
 ): Promise<Response> {
@@ -94,19 +102,27 @@ export async function handleMpp(
   if (request.method !== "POST") return new Response(null, { status: 405, headers: { Allow: "POST" } });
   const projectId = await readMppLink(env, token);
   if (!projectId) return problem(404, "payment_link_invalid", "this payment link is invalid or expired; get_payment_link returns a new one");
+  // Each paid attempt is a Stripe API call; keep a leaked link from spending the account's budget.
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  for (const k of [`ip:${ip}`, `project:${projectId}`]) {
+    if (!(await env.MPP_RATE.limit({ key: k })).success) return problem(429, "rate_limited", "too many payment attempts; try again shortly");
+  }
 
   const attempts = ATTEMPT_PACK.attempts;
   const result = await (await mppx(env)).charge({
     amount: (ATTEMPT_PACK.priceCents / 100).toFixed(2),
     description: `RunLater: ${attempts.toLocaleString("en-US")} delivery attempts for ${projectId}`,
+    // Pinned on the credential, so one paid for this project's challenge works only here.
+    scope: projectId,
     metadata: { [MPP_PROJECT_KEY]: projectId, [MPP_ATTEMPTS_KEY]: String(attempts) },
   })(request);
   if (result.status === 402) return result.challenge;
 
   // Charged. Read the PaymentIntent id back from the receipt and credit it.
-  const reference = Receipt.fromResponse(result.withReceipt(new Response(null))).reference;
   let project: unknown;
+  let reference = "an unknown payment";
   try {
+    reference = receiptReference(result.withReceipt(new Response(null)));
     project = await new ApiClient(env.API, key, projectId).call("POST", "/v1/projects/self/credits", "billing", {
       payment_id: reference,
       attempts,
