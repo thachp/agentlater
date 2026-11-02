@@ -6,6 +6,7 @@ members = ["crates/core", "crates/egress", "apps/api"]
 edition = "2021"
 rust-version = "1.92"
 publish = false
+license = "MIT"
 
 [workspace.dependencies]
 runlater-core = { path = "crates/core" }

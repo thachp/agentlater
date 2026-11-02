@@ -38,7 +38,8 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           <div className="wrap">
             <span>RunLater — make an HTTP request later, and know whether it happened.</span>
             <span>
-              <Link href="/docs">Docs</Link> · <a href={REPO_URL}>Source</a>
+              <Link href="/docs">Docs</Link> · <Link href="/terms">Terms</Link> · <Link href="/privacy">Privacy</Link> ·{" "}
+              <a href={REPO_URL}>Source</a>
             </span>
           </div>
         </footer>

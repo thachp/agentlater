@@ -1,5 +1,6 @@
 import { ATTEMPT_PACK } from "@runlater/contracts/billing";
 import type { Metadata } from "next";
+import Link from "next/link";
 import Checkout from "./Checkout";
 
 export const metadata: Metadata = { title: "Buy delivery attempts", robots: { index: false } };
@@ -18,7 +19,8 @@ export default function PayPage() {
       <Checkout />
       <p className="pay-note">
         Payment is handled by Stripe; RunLater never sees your card. Links work for 24 hours: if this one has expired, ask your
-        agent for a new one with <code>get_payment_link</code>.
+        agent for a new one with <code>get_payment_link</code>. Buying attempts is covered by the{" "}
+        <Link href="/terms">Terms of Service</Link>, including refunds, and the <Link href="/privacy">Privacy Policy</Link>.
       </p>
     </div>
   );
