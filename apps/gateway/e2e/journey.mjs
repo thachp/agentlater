@@ -1,6 +1,7 @@
 // The agent journey against a deployed (or local) stack: a fresh Agent Auth identity, a
 // project, and real deliveries to the staging receiver, checked end to end including the
-// signature, lanes, delays, callbacks, crons and watches, and hosted MCP. Used by `staging.mjs` after each staging deploy, and by agent.e2e.mjs locally.
+// signature, lanes, delays, callbacks, crons, watches, the inbox with captured responses,
+// wake, and hosted MCP. Used by `staging.mjs` after each staging deploy, and by agent.e2e.mjs locally.
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { AgentAuthClient, MemoryStorage } from "@auth/agent";
@@ -11,6 +12,7 @@ import { connectHosted } from "./oauth.mjs";
 const CAPABILITIES = [
   "create_project", "get_project", "schedule_http", "get_task", "list_tasks", "cancel_task", "redrive_task",
   "create_cron", "get_cron", "list_crons", "delete_cron", "watch_http",
+  "read_inbox", "ack_inbox", "set_wake", "delete_wake",
 ];
 
 class JourneyError extends Error {}
@@ -225,7 +227,42 @@ export async function runJourney(c) {
   check(watched.header_names.join() === "X-Journey", "the watch's header names were not kept");
   log("watch matched on its first poll");
 
-  // 9. Hosted MCP: a client connects through OAuth consent (its own project and trial) and
+  // 9. The inbox and wake, as an agent with no public URL uses them: set a wake, schedule a
+  //    task that captures its response and reports to the inbox, get woken with only a count,
+  //    then read the result and ack it.
+  const wake = await exec("set_wake", { url: hook("wake"), headers: { "X-Journey": run }, debounce: "1m" });
+  check(wake.state === "active" && wake.header_names.join() === "X-Journey", `set_wake returned ${JSON.stringify(wake)}`);
+  const captured = await exec("schedule_http", { url: hook("captured"), method: "GET", capture: true, callback_url: "inbox" });
+  const woken = await until("the wake", async () => (await deliveries()).find((d) => d.name === "wake"));
+  check(woken.method === "POST" && woken.headers["x-journey"] === run, "the wake was not a POST with its headers");
+  check(verify(woken, woken.body), "the wake's RunLater-Signature does not verify");
+  const nudge = JSON.parse(woken.body);
+  check(
+    nudge.event === "inbox.unread" && nudge.project_id === project.id && nudge.unread >= 1 && Object.keys(nudge).length === 3,
+    `unexpected wake body: ${woken.body}`,
+  );
+  const waiting = await exec("get_project");
+  check(waiting.inbox_unread >= 1 && waiting.wake?.last_wake_task_id, `get_project after the wake: ${JSON.stringify(waiting)}`);
+  const page = await exec("read_inbox", { ack: true });
+  const finished = page.events.find((e) => e.event === "task.finished" && e.task?.id === captured.id);
+  check(finished, `read_inbox has no report for the captured task: ${JSON.stringify(page.events.map((e) => e.event))}`);
+  check(finished.task.status === "succeeded" && finished.task.callback_task_id === null, `inbox report: ${JSON.stringify(finished.task)}`);
+  const response = finished.task.response;
+  check(
+    response?.status === 200 && JSON.parse(response.body ?? "null")?.recorded === true && response.headers["content-type"]?.startsWith("application/json"),
+    `captured response: ${JSON.stringify(response)}`,
+  );
+  check(page.unread === 0 && page.acked_seq === finished.seq, `read_inbox ack left ${page.unread} unread at ${page.acked_seq}`);
+  const beyond = await exec("ack_inbox", { up_to: page.acked_seq + 1 }).then(
+    () => null,
+    (e) => e,
+  );
+  check(beyond?.code === "ack_beyond_inbox", `acking past the inbox was not refused: ${beyond?.code ?? "accepted"}`);
+  await exec("delete_wake");
+  check((await exec("get_project")).wake === null, "delete_wake left a wake set");
+  log("woken with a count, read the captured result from the inbox");
+
+  // 10. Hosted MCP: a client connects through OAuth consent (its own project and trial) and
   //    schedules a delivery with the schedule_http tool.
   const tokens = await connectHosted(c.gatewayUrl);
   const mcp = new Client({ name: "runlater-journey", version: "1.0.0" });
@@ -255,6 +292,7 @@ export async function runJourney(c) {
   const all = await deliveries();
   check(!all.some((d) => d.name === "later"), "a canceled task was delivered");
   check(!all.some((d) => d.name === "cron" || d.name === "alert"), "the deleted cron sent something");
+  check(all.filter((d) => d.name === "wake").length === 1, "one inbox event should send exactly one wake");
   const used = (await exec("get_project")).attempts_used;
   log(`done: ${used} delivery attempts used`);
   return { run, projectId: project.id, attemptsUsed: used };

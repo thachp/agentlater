@@ -874,8 +874,8 @@ describe("staging journey, run against the local stack", () => {
       receiverToken,
       timeoutMs: 60_000,
     });
-    // ok + flaky (2) + gone + behind + delayed + its callback + one poll = 8 attempts;
-    // canceled tasks and the deleted cron use none.
-    assert.equal(result.attemptsUsed, 8);
+    // ok + flaky (2) + gone + behind + delayed + its callback + one poll + the captured
+    // task + its wake = 10 attempts; canceled tasks, the deleted cron and the inbox use none.
+    assert.equal(result.attemptsUsed, 10);
   });
 });
