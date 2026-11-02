@@ -769,6 +769,8 @@ impl<'a, D: Db> Ledger<'a, D> {
         } else {
             0
         };
+        // Credit before recording the payment: if recording fails, Stripe's retry credits again,
+        // which costs RunLater a little; the other order could leave a paid pack never credited.
         self.db.exec(
             "UPDATE project SET attempt_budget = ?, expires_ms = ?",
             vec![
@@ -785,7 +787,11 @@ impl<'a, D: Db> Ledger<'a, D> {
             vec![],
         )?;
         for cron in stopped {
-            let schedule = Schedule::parse(&cron.schedule).map_err(|e| DbError(e.to_string()))?;
+            // Schedules were validated when stored; one that no longer parses stays stopped
+            // rather than failing a payment that has already been applied.
+            let Ok(schedule) = Schedule::parse(&cron.schedule) else {
+                continue;
+            };
             self.db.exec(
                 "UPDATE crons SET next_run_ms = ?, updated_ms = ? WHERE name = ?",
                 vec![

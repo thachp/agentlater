@@ -6,6 +6,7 @@ import { OAuthProvider, type OAuthHelpers } from "@cloudflare/workers-oauth-prov
 import { importSigningKey } from "./api";
 import { BASE_PATH, createAuth, type AuthEnv } from "./auth";
 import { handleStripeWebhook, type BillingEnv } from "./billing";
+import { readLimited } from "./body";
 import { handleAuthorize } from "./consent";
 import { handleMcp, type McpProps } from "./mcp";
 
@@ -47,31 +48,6 @@ const JTI_TTL_SECS = 90;
 const json = (body: unknown, status = 200) =>
   Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
 const error = (status: number, code: string, message: string) => json({ error: code, message }, status);
-
-/** The body, or null if it exceeds `limit` bytes. Counts bytes read, not Content-Length. */
-async function readLimited(request: Request, limit: number): Promise<Uint8Array | null> {
-  if (!request.body) return new Uint8Array();
-  const reader = request.body.getReader();
-  const parts: Uint8Array[] = [];
-  let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > limit) {
-      await reader.cancel();
-      return null;
-    }
-    parts.push(value);
-  }
-  const out = new Uint8Array(size);
-  let offset = 0;
-  for (const p of parts) {
-    out.set(p, offset);
-    offset += p.byteLength;
-  }
-  return out;
-}
 
 /**
  * The replay key for a bearer JWT, read without verifying it. Better Auth verifies the

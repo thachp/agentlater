@@ -5,6 +5,7 @@
 
 import { ATTEMPT_PACK } from "@runlater/contracts/billing";
 import { ApiClient, ApiError } from "./api";
+import { readLimited } from "./body";
 import { findProject } from "./projects";
 
 export interface BillingEnv {
@@ -37,6 +38,8 @@ export async function paymentLink(env: BillingEnv, owner: string, projectId: str
   const attempts = ATTEMPT_PACK.attempts.toLocaleString("en-US");
   const form = new URLSearchParams({
     mode: "payment",
+    // Cards (and the wallets that carry them) settle at once, so "paid" on the page is true.
+    "payment_method_types[0]": "card",
     ui_mode: "embedded_page",
     redirect_on_completion: "never",
     "line_items[0][quantity]": "1",
@@ -111,15 +114,22 @@ export async function handleStripeWebhook(
 ): Promise<Response> {
   if (request.method !== "POST") return new Response(null, { status: 405, headers: { Allow: "POST" } });
   if (!env.STRIPE_WEBHOOK_SECRET) return Response.json({ error: "not_found" }, { status: 404 });
-  if (Number(request.headers.get("Content-Length") ?? 0) > MAX_EVENT_BYTES) return Response.json({ error: "too_large" }, { status: 413 });
-  const body = await request.text();
-  if (body.length > MAX_EVENT_BYTES) return Response.json({ error: "too_large" }, { status: 413 });
+  const tooLarge = () => Response.json({ error: "too_large" }, { status: 413 });
+  if (Number(request.headers.get("Content-Length") ?? 0) > MAX_EVENT_BYTES) return tooLarge();
+  const bytes = await readLimited(request, MAX_EVENT_BYTES);
+  if (bytes === null) return tooLarge();
+  const body = new TextDecoder().decode(bytes);
   const now = Math.floor(Date.now() / 1000);
   if (!(await verifyStripeSignature(request.headers.get("Stripe-Signature"), body, env.STRIPE_WEBHOOK_SECRET, now))) {
     return Response.json({ error: "bad_signature" }, { status: 400 });
   }
 
-  const event = JSON.parse(body) as { type: string; data: { object: CheckoutSession } };
+  let event: { type: string; data: { object: CheckoutSession } };
+  try {
+    event = JSON.parse(body);
+  } catch {
+    return Response.json({ error: "bad_json" }, { status: 400 });
+  }
   const session = event.data?.object;
   // Card payments are paid on completion; delayed methods arrive later as async_payment_succeeded.
   if (!PAID_EVENTS.has(event.type) || session?.payment_status !== "paid") return Response.json({ received: true });

@@ -21,13 +21,13 @@ const payHeaders = [
   {
     key: "Content-Security-Policy",
     value:
-      "default-src 'self'; script-src 'self' 'unsafe-inline' https://js.stripe.com https://*.js.stripe.com; " +
-      "style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.stripe.com; font-src 'self'; " +
-      "frame-src https://js.stripe.com https://*.js.stripe.com https://hooks.stripe.com https://checkout.stripe.com; " +
-      "connect-src 'self' https://api.stripe.com https://checkout.stripe.com https://merchant-ui-api.stripe.com; " +
+      "default-src 'self'; script-src 'self' 'unsafe-inline' https://js.stripe.com https://*.js.stripe.com https://checkout.stripe.com; " +
+      "style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.stripe.com https://*.link.com; font-src 'self'; " +
+      "frame-src https://js.stripe.com https://*.js.stripe.com https://hooks.stripe.com https://checkout.stripe.com https://link.com https://*.link.com; " +
+      "connect-src 'self' https://api.stripe.com https://checkout.stripe.com https://merchant-ui-api.stripe.com https://link.com https://*.link.com; " +
       "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
   },
-  { key: "Permissions-Policy", value: 'camera=(), microphone=(), geolocation=(), payment=(self "https://js.stripe.com")' },
+  { key: "Permissions-Policy", value: 'camera=(), microphone=(), geolocation=(), payment=(self "https://js.stripe.com" "https://*.js.stripe.com" "https://checkout.stripe.com")' },
   { key: "Referrer-Policy", value: "no-referrer" },
 ];
 

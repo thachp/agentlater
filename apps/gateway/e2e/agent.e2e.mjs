@@ -578,6 +578,7 @@ describe("hosted MCP at /mcp", () => {
     const session = stripeSessions.at(-1);
     assert.equal(fragment.get("secret"), `${session.id}_secret_e2e`);
     assert.equal(session.fields.ui_mode, "embedded_page");
+    assert.equal(session.fields["payment_method_types[0]"], "card");
     assert.equal(session.fields["line_items[0][price_data][unit_amount]"], "500");
     assert.equal(session.fields["metadata[project_id]"], project.id);
 
@@ -595,6 +596,13 @@ describe("hosted MCP at /mcp", () => {
     const remaining = async () => value(await client.callTool({ name: "get_project", arguments: {} }));
 
     assert.equal((await webhook("checkout.session.completed", "paid", { secret: "whsec_wrong" })).status, 400);
+    const t = Math.floor(Date.now() / 1000);
+    const junk = await fetch(`${origin}/billing/webhook`, {
+      method: "POST",
+      headers: { "Stripe-Signature": `t=${t},v1=${createHmac("sha256", STRIPE_WEBHOOK_SECRET).update(`${t}.not json`).digest("hex")}` },
+      body: "not json",
+    });
+    assert.equal(junk.status, 400);
     assert.equal((await webhook("checkout.session.completed", "unpaid")).status, 200);
     assert.equal((await remaining()).paid, false, "an unpaid session adds nothing");
     const forged = await webhook("checkout.session.completed", "paid", { meta: { ...metadata, project_id: "prj_000000000000000000000000" } });

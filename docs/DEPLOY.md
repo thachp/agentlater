@@ -126,7 +126,14 @@ the link, so a test-mode link shows Stripe's test form.
 
 A payment that Stripe reports but the webhook could not apply shows as a failed delivery under the
 endpoint in the Stripe Dashboard; Stripe retries it for three days, and the gateway logs
-`stripe: …` in Workers Logs. Each Checkout Session is applied at most once.
+`stripe: …` in Workers Logs. Each Checkout Session is applied once. If Stripe gives up (three days
+of failures), the customer has paid and has no attempts: credit them by hand or refund in the
+Dashboard. Refunds and disputes do not take attempts back.
+
+- **Apple Pay** on `runlater.io` needs it registered under Settings → Payment method domains.
+- **Turning billing off:** deleting the GitHub values is not enough, because deploys keep Worker
+  secrets that are left out. Also run `npx wrangler secret delete STRIPE_SECRET_KEY --env <env>`
+  in `apps/gateway`.
 
 ## Hostnames
 
