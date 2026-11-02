@@ -132,7 +132,11 @@ the link, so a test-mode link shows Stripe's test form.
 
 3. Redeploy. To test on staging: ask for a link with `get_payment_link`, pay with card
    `4242 4242 4242 4242`, then check `get_project` shows `paid: true` and 50,000 more attempts.
-   For MPP: `npx @stripe/link-cli auth login`, then `npx @stripe/link-cli mpp pay <mpp_url> -X POST -d '{}'`.
+   For MPP in test mode, Link's wallet refuses test profiles; use Stripe's validator with a test key
+   instead: `MPPX_STRIPE_SECRET_KEY=sk_test_… npx mppx@0.13.5 validate <gateway origin> --endpoint "POST:/billing/mpp/<link>" --body '{}'`.
+   It checks the challenge, pays $5.00 in test mode and expects a 200. In live mode,
+   `npx @stripe/link-cli mpp pay <mpp_url> -X POST -d '{}' --context "<at least 100 characters>"`.
+   The gateway serves `/openapi.json` (the MPP endpoint with `x-payment-info`) and `/llms.txt` for discovery.
 
 A payment that Stripe reports but the webhook could not apply shows as a failed delivery under the
 endpoint in the Stripe Dashboard; Stripe retries it for three days, and the gateway logs
