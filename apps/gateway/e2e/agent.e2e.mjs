@@ -230,7 +230,7 @@ describe("agent journey through the gateway", () => {
 
   test("discovery advertises only the served endpoints", async () => {
     const config = await (await fetch(`${origin}/.well-known/agent-configuration`)).json();
-    assert.equal(config.provider_name, "RunLater");
+    assert.equal(config.provider_name, "runlater");
     const paths = Object.values(config.endpoints).map((u) => new URL(u).pathname);
     assert.ok(paths.includes("/api/auth/capability/execute"));
     assert.ok(paths.includes("/api/auth/agent/request-capability"));

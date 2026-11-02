@@ -44,7 +44,8 @@ export function authOptions(input: {
       // The plugin pins its own better-call, so its endpoint types don't unify with
       // Better Auth's; the runtime contract is the same.
       agentAuth({
-        providerName: "RunLater",
+        // A slug: directories such as agent-auth.directory reject anything else.
+        providerName: "runlater",
         providerDescription: "Make an HTTP request later, and check whether it happened.",
         modes: ["autonomous"],
         allowedKeyAlgorithms: ["Ed25519"],
