@@ -19,8 +19,7 @@ claude mcp add --transport http runlater ${GATEWAY_URL}/mcp
 Settings → Connectors → Add custom connector
   URL: ${GATEWAY_URL}/mcp`;
 
-export const mcpChatGpt = `Settings → Apps & Connectors → Advanced → Developer mode: on
-Create connector
+export const mcpChatGpt = `chatgpt.com/plugins → + → Add custom MCP server
   URL:            ${GATEWAY_URL}/mcp
   Authentication: OAuth`;
 

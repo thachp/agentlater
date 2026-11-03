@@ -50,7 +50,7 @@ export default function Quickstart() {
         that connection gets its own project and free trial, and the client keeps it signed in.
       </p>
       <Code label="Claude Code">{mcpClaudeCode}</Code>
-      <Code label="ChatGPT (custom connector, developer mode)">{mcpChatGpt}</Code>
+      <Code label="ChatGPT (Plugins → Add custom MCP server)">{mcpChatGpt}</Code>
       <Code label="OpenAI Codex">{mcpCodex}</Code>
       <Code label="Grok">{mcpGrok}</Code>
       <Code label="clients that take a JSON config (Cursor, Claude Desktop and others)">{mcpRemoteConfig}</Code>
