@@ -14,7 +14,7 @@ const CAPABILITIES = [
   "create_cron", "get_cron", "list_crons", "delete_cron", "watch_http",
   "read_inbox", "ack_inbox", "set_wake", "delete_wake",
   "set_secret", "list_secrets", "delete_secret",
-  "create_hook", "list_hooks", "delete_hook",
+  "create_hook", "list_hooks", "update_hook", "delete_hook",
 ];
 
 class JourneyError extends Error {}
@@ -337,9 +337,21 @@ export async function runJourney(c) {
   );
   const hookListed = (await exec("list_hooks")).hooks?.find((h) => h.name === "journey");
   check(hookListed?.received === 1 && hookListed.refused.signature_invalid === 1, `list_hooks returned ${JSON.stringify(hookListed)}`);
+  // A filter, set without changing the URL: a non-matching request is answered and dropped.
+  await exec("update_hook", { name: "journey", accept: [{ path: "/action", in: ["failed"] }] });
+  check((await toHook(hookBody, `journey-${run}-noise`)).status === 202, "a filtered webhook was not answered 202");
+  const failedBody = JSON.stringify({ action: "failed", run });
+  check((await toHook(failedBody, `journey-${run}-failed`)).status === 202, "a matching webhook was not accepted");
+  const afterFilter = (await exec("read_inbox", { ack: true })).events.filter((e) => e.event === "hook.received" && e.hook === "journey");
+  check(
+    afterFilter.length === 1 && afterFilter[0].request.body === failedBody,
+    `the filter kept ${JSON.stringify(afterFilter.map((e) => e.request.body))}`,
+  );
+  const filteredListed = (await exec("list_hooks")).hooks?.find((h) => h.name === "journey");
+  check(filteredListed?.filtered === 1 && filteredListed.received === 2, `list_hooks after the filter: ${JSON.stringify(filteredListed)}`);
   await exec("delete_hook", { name: "journey" });
   check((await toHook(hookBody, `journey-${run}-2`)).status === 404, "a deleted hook still accepted requests");
-  log("hook received a signed webhook once, refused the rest");
+  log("hook received a signed webhook once, refused the rest, filtered what it was told to");
 
   // 12. Hosted MCP: a client connects through OAuth consent (its own project and trial) and
   //    schedules a delivery with the schedule_http tool.

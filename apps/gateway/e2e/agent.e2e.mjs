@@ -31,7 +31,7 @@ const CAPABILITIES = [
   "create_project", "get_project", "get_payment_link", "schedule_http", "get_task", "list_tasks", "cancel_task", "redrive_task",
   "create_cron", "get_cron", "list_crons", "delete_cron", "watch_http", "read_inbox", "ack_inbox", "set_wake", "delete_wake",
   "set_secret", "list_secrets", "delete_secret",
-  "create_hook", "list_hooks", "delete_hook",
+  "create_hook", "list_hooks", "update_hook", "delete_hook",
 ];
 
 // Gateway → API assertion keys, fresh per run.
@@ -480,6 +480,22 @@ describe("agent journey through the gateway", () => {
     assert.equal(listed.received, 1);
     assert.equal(listed.refused.signature_invalid, 1);
     assert.equal(JSON.stringify(listed).includes("hk_"), false, "list_hooks never shows the URL");
+    // A filter keeps only failed runs, and changing it keeps the URL.
+    const updated = await exec("update_hook", {
+      name: "gh-ci",
+      accept: [{ headers: { "X-GitHub-Event": ["workflow_run"] }, path: "/workflow_run/conclusion", in: ["failure"] }],
+    });
+    assert.equal(updated.url, undefined);
+    assert.equal(updated.accept[0].headers["x-github-event"][0], "workflow_run");
+    const failed = JSON.stringify({ action: "completed", workflow_run: { conclusion: "failure" } });
+    assert.equal((await fetch(hook.url, signed(body, "d-3"))).status, 202, "a success is answered like the rest");
+    assert.equal((await fetch(hook.url, signed(failed, "d-4"))).status, 202);
+    const kept = (await exec("read_inbox", { after: event.seq })).events.filter((e) => e.event === "hook.received");
+    assert.deepEqual(kept.map((e) => e.delivery_id), ["d-4"], "only the failure is kept");
+    const [filtered] = (await exec("list_hooks")).hooks;
+    assert.equal(filtered.filtered, 1);
+    assert.equal(filtered.received, 2);
+
     await exec("delete_hook", { name: "gh-ci" });
     assert.equal((await fetch(hook.url, signed(body, "d-2"))).status, 404);
   });

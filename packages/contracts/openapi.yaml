@@ -375,6 +375,31 @@ paths:
         "202": { description: Written to the inbox. }
         "200": { description: A retry of a delivery already written. }
         default: { description: "Refused; see the description for the statuses." }
+  /v1/hooks/{name}:
+    post:
+      operationId: updateHook
+      description: >
+        Changes verify, accept or keep_headers, keeping the hook's URL, counts and the delivery
+        ids it has seen. Fields left out stay; verify or accept null clears it. A new verify
+        re-seals the secret. 404 hook_not_found. Scope: schedule.
+      parameters:
+        - { $ref: "#/components/parameters/CronName" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                verify:
+                  oneOf: [{ $ref: "#/components/schemas/HookVerify" }, { type: "null" }]
+                accept:
+                  oneOf: [{ $ref: "#/components/schemas/HookAccept" }, { type: "null" }]
+                keep_headers: { $ref: "#/components/schemas/HookKeepHeaders" }
+      responses:
+        "200": { $ref: "#/components/responses/Hook" }
+        default: { $ref: "#/components/responses/Error" }
   /v1/hooks/{name}/delete:
     post:
       operationId: deleteHook
@@ -774,23 +799,45 @@ components:
       required: [name]
       properties:
         name: { type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$" }
-        verify:
-          type: object
-          additionalProperties: false
-          required: [scheme, secret]
-          properties:
-            scheme: { type: string, enum: [github, stripe, hmac_sha256] }
-            secret: { type: string, minLength: 16, maxLength: 1024, description: Printable ASCII; sealed and never returned. }
-            header: { type: string, maxLength: 64, description: hmac_sha256 only (required there). }
-            prefix: { type: string, maxLength: 32, description: hmac_sha256 only. }
-        keep_headers:
-          type: array
-          maxItems: 10
-          items: { type: string, maxLength: 64 }
-          description: Never authorization, cookie, proxy-authorization, set-cookie, x-api-key, x-auth-token, x-access-token, x-gitlab-token or a signature header.
+        verify: { $ref: "#/components/schemas/HookVerify" }
+        keep_headers: { $ref: "#/components/schemas/HookKeepHeaders" }
+        accept: { $ref: "#/components/schemas/HookAccept" }
+    HookVerify:
+      type: object
+      additionalProperties: false
+      required: [scheme, secret]
+      properties:
+        scheme: { type: string, enum: [github, stripe, hmac_sha256] }
+        secret: { type: string, minLength: 16, maxLength: 1024, description: Printable ASCII; sealed and never returned. }
+        header: { type: string, maxLength: 64, description: hmac_sha256 only (required there). }
+        prefix: { type: string, maxLength: 32, description: hmac_sha256 only. }
+    HookKeepHeaders:
+      type: array
+      maxItems: 10
+      items: { type: string, maxLength: 64 }
+      description: Never authorization, cookie, proxy-authorization, set-cookie, x-api-key, x-auth-token, x-access-token, x-gitlab-token or a signature header.
+    HookAccept:
+      type: array
+      minItems: 1
+      maxItems: 5
+      description: >
+        Keep a request only if it matches one of these rules. Within a rule, every part given
+        holds: each header (name case-insensitive, stored lowercase) has one of its values,
+        exactly; the JSON body has one of in at path. Others are answered 202 and dropped.
+      items:
+        type: object
+        additionalProperties: false
+        minProperties: 1
+        properties:
+          headers:
+            type: object
+            maxProperties: 5
+            additionalProperties: { type: array, minItems: 1, maxItems: 20, items: { type: string, maxLength: 256 } }
+          path: { type: string, maxLength: 256 }
+          in: { type: array, minItems: 1, maxItems: 20, items: { type: [string, number, boolean, "null"] } }
     Hook:
       type: object
-      required: [name, verify, keep_headers, created_ms, last_received_ms, received, refused]
+      required: [name, verify, keep_headers, accept, created_ms, last_received_ms, received, refused, filtered]
       properties:
         name: { type: string }
         verify:
@@ -800,6 +847,8 @@ components:
             header: { type: string }
             prefix: { type: string }
         keep_headers: { type: array, items: { type: string } }
+        accept:
+          oneOf: [{ $ref: "#/components/schemas/HookAccept" }, { type: "null" }]
         created_ms: { type: integer }
         last_received_ms: { type: [integer, "null"] }
         received: { type: integer, description: Requests written to the inbox. }
@@ -807,6 +856,7 @@ components:
           type: object
           additionalProperties: { type: integer }
           description: "Refusals by reason: signature_missing, signature_invalid, signature_stale, rate_limited, daily_limit, inbox_full, project_expired."
+        filtered: { type: integer, description: "Requests that matched no accept rule: answered 202 and dropped." }
     Secret:
       type: object
       description: Never includes the value.
