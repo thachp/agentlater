@@ -26,7 +26,10 @@ const CONNECT = [
   ],
   [
     "ChatGPT",
-    <>Add RunLater as a custom connector (developer mode), then sign in when ChatGPT asks.</>,
+    <>
+      On <a href="https://chatgpt.com/plugins">chatgpt.com/plugins</a>, add a custom MCP server with this URL, then
+      sign in when ChatGPT asks.
+    </>,
     mcpChatGpt,
   ],
   [
