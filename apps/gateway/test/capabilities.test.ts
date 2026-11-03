@@ -28,6 +28,7 @@ describe("capabilities", () => {
       "delete_secret",
       "create_hook",
       "list_hooks",
+      "update_hook",
       "delete_hook",
     ]);
     for (const c of capabilities) {
@@ -66,6 +67,8 @@ describe("capabilities", () => {
     for (const name of ["gh", "../x", "GH/delete", 7]) expect(() => route("delete_secret", { name })).toThrow(ArgumentError);
     expect(route("create_hook", { name: "gh-ci" })).toMatchObject({ method: "POST", path: "/v1/hooks", scope: "schedule", body: { name: "gh-ci" } });
     expect(route("list_hooks", {})).toEqual({ method: "GET", path: "/v1/hooks", scope: "read" });
+    expect(route("update_hook", { name: "gh-ci", accept: null })).toEqual({ method: "POST", path: "/v1/hooks/gh-ci", scope: "schedule", body: { accept: null } });
+    for (const name of ["_receive", "a/b", undefined]) expect(() => route("update_hook", { name, accept: null })).toThrow(ArgumentError);
     expect(route("delete_hook", { name: "gh-ci" })).toEqual({ method: "POST", path: "/v1/hooks/gh-ci/delete", scope: "cancel", body: {} });
     for (const name of ["_receive", "../x", "a/b", 7]) expect(() => route("delete_hook", { name })).toThrow(ArgumentError);
   });

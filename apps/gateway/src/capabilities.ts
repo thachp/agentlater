@@ -141,6 +141,11 @@ export function route(capability: string, args: Args): { method: "GET" | "POST";
     case "list_hooks":
       only(args, []);
       return { method: "GET", path: "/v1/hooks", scope: "read" };
+    case "update_hook": {
+      const { name, ...changes } = args;
+      // The API validates the changes fully and names the failing field.
+      return { method: "POST", path: `/v1/hooks/${hookName({ name })}`, scope: "schedule", body: changes };
+    }
     case "delete_hook":
       return { method: "POST", path: `/v1/hooks/${hookName(args)}/delete`, scope: "cancel", body: {} };
     default:
