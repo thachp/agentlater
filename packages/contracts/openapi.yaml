@@ -354,10 +354,10 @@ paths:
       description: >
         A request a sender made to a hook, forwarded by the gateway's public /h/ route. Checks the
         signature, the rate limits (per hook, and per project per UTC day) and the sender's
-        delivery id, then writes a hook.received inbox event. Answers with a status and an empty
-        body: 202 written, 200 a retry already written, 401 signature_missing / signature_invalid
+        delivery id, then writes a hook.received inbox event. Answers with a status, and an error
+        code when refused (the gateway sends senders only the status and {}): 202 written, 200 a retry already written, 401 signature_missing / signature_invalid
         / signature_stale, 404 hook_not_found, 410 project_expired, 413 too_large, 429
-        rate_limited / daily_limit (with Retry-After), 503 secrets_unavailable. Scope:
+        rate_limited / daily_limit / inbox_full (with Retry-After), 503 secrets_unavailable. Scope:
         hooks.receive, which only the gateway uses.
       requestBody:
         required: true
@@ -787,7 +787,7 @@ components:
           type: array
           maxItems: 10
           items: { type: string, maxLength: 64 }
-          description: Never authorization, cookie, proxy-authorization, set-cookie or a signature header.
+          description: Never authorization, cookie, proxy-authorization, set-cookie, x-api-key, x-auth-token, x-access-token, x-gitlab-token or a signature header.
     Hook:
       type: object
       required: [name, verify, keep_headers, created_ms, last_received_ms, received, refused]
@@ -806,7 +806,7 @@ components:
         refused:
           type: object
           additionalProperties: { type: integer }
-          description: "Refusals by reason: signature_missing, signature_invalid, signature_stale, rate_limited, daily_limit, project_expired."
+          description: "Refusals by reason: signature_missing, signature_invalid, signature_stale, rate_limited, daily_limit, inbox_full, project_expired."
     Secret:
       type: object
       description: Never includes the value.

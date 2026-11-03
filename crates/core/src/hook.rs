@@ -19,12 +19,17 @@ use std::fmt;
 
 /// Kept on every event: they say what sent it and what the body is.
 const ALWAYS_KEPT: [&str; 2] = ["content-type", "user-agent"];
-/// Never kept, whatever `keep_headers` says: they carry credentials.
-const NEVER_KEPT: [&str; 4] = [
+/// Never kept, whatever `keep_headers` says: they carry credentials (GitLab, for one, sends
+/// its shared secret as `X-Gitlab-Token`).
+const NEVER_KEPT: [&str; 8] = [
     "authorization",
     "cookie",
     "proxy-authorization",
     "set-cookie",
+    "x-api-key",
+    "x-auth-token",
+    "x-access-token",
+    "x-gitlab-token",
 ];
 const MAX_KEPT_VALUE_BYTES: usize = 1024;
 const MAX_HEADER_NAME_BYTES: usize = 64;
@@ -367,7 +372,8 @@ pub fn verify(
                 return Err(VerifyError::Invalid);
             }
             // Checked after the signature, so only a genuine but old request is called stale.
-            if (now_ms - t.saturating_mul(1_000)).abs() > HOOK_SIGNATURE_TOLERANCE_MS {
+            let signed_ms = t.checked_mul(1_000).ok_or(VerifyError::Stale)?;
+            if now_ms.abs_diff(signed_ms) > HOOK_SIGNATURE_TOLERANCE_MS.unsigned_abs() {
                 return Err(VerifyError::Stale);
             }
             Ok(())
@@ -565,6 +571,10 @@ mod tests {
                 "keep_headers",
             ),
             (
+                json!({ "name": "h", "keep_headers": ["X-Gitlab-Token"] }),
+                "keep_headers",
+            ),
+            (
                 json!({ "name": "h", "keep_headers": ["X-Hub-Signature-256"] }),
                 "keep_headers",
             ),
@@ -670,6 +680,12 @@ mod tests {
         );
         assert_eq!(
             check(format!("t={t},v1={}", sig(t)), NOW + 5 * 60_000 + 1_000),
+            Err(VerifyError::Stale)
+        );
+        // A signed but absurd timestamp is stale, not a wrapped-around "now".
+        let far = i64::MAX / 10;
+        assert_eq!(
+            check(format!("t={far},v1={}", sig(far)), NOW),
             Err(VerifyError::Stale)
         );
     }

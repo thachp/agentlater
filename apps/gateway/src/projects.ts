@@ -51,7 +51,8 @@ export async function runCapability(
     const result = await execute(new ApiClient(env.API, key, projectId), capability, args);
     if (capability === "create_hook") {
       // The API knows only the path; the URL is shown this once and never stored.
-      const { url_path, ...hook } = result as { url_path: string } & Record<string, unknown>;
+      const { url_path, ...hook } = result as { url_path?: unknown } & Record<string, unknown>;
+      if (typeof url_path !== "string") throw new ApiError(503, { error: { code: "api_unavailable", message: "the API did not return the hook's URL" } });
       return { ...hook, url: `${env.HOOKS_URL ?? env.PUBLIC_URL}${url_path}` };
     }
     return result;

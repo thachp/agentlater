@@ -375,12 +375,14 @@ impl TaskLedger {
         }
         let keep = hook.keep_headers().map_err(failed)?;
         let text = String::from_utf8_lossy(&raw);
+        let body = cut(&text, HOOK_BODY_KEPT_BYTES);
         let received = Received {
             verified: check.is_some(),
             delivery_id: delivery_id(check.as_ref(), &headers, &raw),
             headers: hook_headers(check.as_ref(), &keep, &headers),
-            body: cut(&text, HOOK_BODY_KEPT_BYTES),
+            body,
             body_bytes: raw.len(),
+            truncated: body.len() < text.len(),
         };
         match ledger.receive_hook(&hook, received, t).map_err(failed)? {
             HookOutcome::Accepted(_) => hook_answer(202, None, None),

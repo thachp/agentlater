@@ -10,8 +10,13 @@ import { readLimited } from "./body";
 export interface HooksEnv {
   DB: D1Database;
   API: Fetcher;
-  /** A cheap front door per hook URL; the ledger enforces the real per-hook limit. */
+  /**
+   * Cheap front doors, before D1 or a ledger is touched: per client IP, and per project. Keyed
+   * per URL they would do nothing, since anyone who has seen one URL can invent tokens for its
+   * project. The ledger enforces the real per-hook limit.
+   */
   HOOK_RATE: RateLimit;
+  HOOK_PROJECT_RATE: RateLimit;
 }
 
 const PATH_RE = /^\/h\/(prj_[0-9a-f]{24})\/(hk_[0-9a-f]{64})$/;
@@ -37,7 +42,10 @@ export async function handleHook(request: Request, env: HooksEnv, key: CryptoKey
   const [, projectId, token] = match as [string, string, string];
   // Any other method, HEAD and GET included, so a URL can't be probed without sending a body.
   if (request.method !== "POST") return answer(405, { Allow: "POST" });
-  if (!(await env.HOOK_RATE.limit({ key: `${projectId}/${token}` })).success) return answer(429, { "Retry-After": "60" });
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  const limited =
+    !(await env.HOOK_RATE.limit({ key: `ip:${ip}` })).success || !(await env.HOOK_PROJECT_RATE.limit({ key: projectId })).success;
+  if (limited) return answer(429, { "Retry-After": "60" });
   if (Number(request.headers.get("Content-Length") ?? 0) > MAX_HOOK_BYTES) return answer(413);
   const body = await readLimited(request, MAX_HOOK_BYTES);
   if (body === null) return answer(413);

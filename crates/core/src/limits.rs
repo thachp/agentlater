@@ -80,6 +80,9 @@ pub const HOOK_BURST: i64 = 20;
 /// attempts.
 pub const HOOK_EVENTS_PER_DAY: i64 = 1_000;
 pub const HOOK_EVENTS_PER_DAY_PAID: i64 = 10_000;
+/// A hook without `verify` takes anyone's requests, so it gets a small cap of its own: one
+/// leaked URL can't use up the project's day.
+pub const HOOK_UNVERIFIED_EVENTS_PER_DAY: i64 = 100;
 /// A sender's delivery id seen this recently is a retry, not a new event.
 pub const HOOK_DEDUPE_MS: i64 = DAY_MS;
 /// How far a signed timestamp (Stripe's `t=`) may be from now.

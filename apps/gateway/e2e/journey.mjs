@@ -322,7 +322,8 @@ export async function runJourney(c) {
     const res = await toHook(hookBody).catch(() => null);
     return res && res.status < 500 ? res : null;
   });
-  check(firstHook.status === 202, `the signed webhook got ${firstHook.status}`);
+  // 200 too: if a first try was written but its answer was lost, the retry is a duplicate.
+  check(firstHook.status === 202 || firstHook.status === 200, `the signed webhook got ${firstHook.status}`);
   check((await toHook(hookBody)).status === 200, "the webhook's retry was not recognized");
   const forgedHook = await fetch(inbound.url, { method: "POST", headers: { "X-Hub-Signature-256": "sha256=00" }, body: hookBody });
   check(forgedHook.status === 401, `a forged webhook got ${forgedHook.status}`);

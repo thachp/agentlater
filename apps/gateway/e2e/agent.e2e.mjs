@@ -115,6 +115,7 @@ before(async () => {
             OAUTH_RATE: { namespace_id: "1003", simple: { limit: 100, period: 60 } },
             MPP_RATE: { namespace_id: "1005", simple: { limit: 100, period: 60 } },
             HOOK_RATE: { namespace_id: "1007", simple: { limit: 100, period: 60 } },
+            HOOK_PROJECT_RATE: { namespace_id: "1009", simple: { limit: 100, period: 60 } },
           },
           kvNamespaces: { OAUTH_KV: "oauth-kv" },
           outboundService: async (req) => {

@@ -44,7 +44,7 @@ Session 2 ──read_inbox──▶ [{ event: "hook.received", hook: "gh-ci", ve
 
 `https://hooks.runlater.io/h/{project_id}/{token}`
 
-- **The token** is `hk_` followed by 32 random bytes, hex-encoded. RunLater stores only its SHA-256, so even a copy of the database can't recreate the URL. Lookup is by hash, so there is no timing-sensitive string comparison.
+- **The token** is `hk_` followed by 32 random bytes, hex-encoded. RunLater stores only its SHA-256, so even a copy of the database can't recreate the URL. (The URL does appear in the gateway's request logs, Workers Logs, which only operators can read and which expire.) Lookup is by hash, so there is no timing-sensitive string comparison.
 - **The project id** is in the path so the gateway can route to the right ledger without a global index. It isn't a secret: it already appears in every signed delivery.
 - **A separate host** (`hooks.`), served by the gateway Worker on its own route. Agent traffic and the open internet stay on different names, so each can be rate-limited, logged and, if need be, shut off on its own.
 
@@ -60,7 +60,7 @@ Session 2 ──read_inbox──▶ [{ event: "hook.received", hook: "gh-ci", ve
 
 - **`verify.secret` is the value itself, given at creation.** It is sealed with the secrets key, using AES-GCM with its own name in the associated data, and is never shown again.
   - It does **not** come from `set_secret`. A stored secret means "send this only to these hosts", and verification sends nothing, so reusing one would blur that rule.
-- **A verified hook refuses a bad or missing signature** with `401`, and writes nothing. Senders show this in their delivery logs, which is where a person debugging the setup looks.
+- **A verified hook refuses a bad or missing signature** with `401`, and writes nothing to the inbox (only the hook's `refused` count). Senders show this in their delivery logs, which is where a person debugging the setup looks.
 - **An unverified hook accepts any POST** to its URL. Its events are marked `verified: false`, so anyone who learns the URL can put text in the agent's inbox. The capability description and `read_inbox` say so plainly.
 
 ### What a delivery becomes
@@ -108,9 +108,9 @@ The response body is always empty JSON (`{}`), and RunLater never sends back any
 
 ### Limits and cost
 
-- **Rate:** per hook, at most 60 requests a minute (token bucket, burst 20); per project, 1,000 hook events a day during the trial.
+- **Rate:** per hook, at most 60 requests a minute (GCRA, burst 20); per project, 1,000 hook events a day, 10,000 once a pack is bought; per unverified hook, 100 a day.
   - Both are checked in the ledger, so they hold across gateway instances.
-  - Refusals are counted on the hook (`refused_rate_limited`), so `list_hooks` can show a noisy sender.
+  - Refusals are counted on the hook (`refused: { rate_limited: n, … }`), so `list_hooks` can show a noisy sender.
 - **Cost:** receiving a hook **costs no delivery attempts**. Attempts pay for outbound requests; an inbox write is what `callback_url: "inbox"` already gives for free. The daily cap and the inbox's existing cap of 10,000 events, which drops the oldest acked event first, keep storage bounded.
 - **Stats:** `list_hooks` shows, per hook: `created_ms`, `verify.scheme`, `keep_headers`, `last_received_ms`, `received` and `refused` (counted by reason). It never shows the URL or the secret.
 
@@ -151,10 +151,13 @@ The response body is always empty JSON (`{}`), and RunLater never sends back any
 
 ## Found while building
 
-- **A made-up project id must not create a ledger.** Durable Objects are created on first use, so the gateway checks the project exists (the `runlater_project` table, unique on `project_id`) before forwarding, and answers 404 otherwise. A Workers rate limit per URL (120 a minute) sits in front, so a flood is turned away before D1 or the ledger.
+- **A made-up project id must not create a ledger.** Durable Objects are created on first use, so the gateway checks the project exists (the `runlater_project` table, unique on `project_id`) before forwarding, and answers 404 otherwise. Workers rate limits per client IP (120 a minute) and per project (600 a minute) sit in front, so a flood is turned away before D1 or the ledger. Keyed per URL they would do nothing: anyone who has seen one URL knows the project id and can invent tokens.
 - **Missing key.** A verified hook needs `SECRETS_KEY` to open its secret. Without it, creating one is `503 secrets_unavailable`, and a request to one is `503` rather than accepted unchecked, so the sender retries.
 - **Credential headers in `keep_headers` are a 400, not silently dropped**, so the agent learns why they are missing.
 - **Delivery ids only count when verified.** An unsigned request could claim any id and get a real one dropped as a "retry".
+- **One leaked URL must not cost the project its hooks or its inbox.** A hook without `verify` takes anyone's requests, so it has its own cap of 100 events a day, and the project's other hooks keep theirs. A full inbox drops its oldest hook event before any other unread event, and refuses a hook request (`429 inbox_full`) rather than push out an unread task report.
+- **Bodies that aren't UTF-8** are kept lossily (each bad byte becomes U+FFFD), so `truncated` is computed on the text, not from `body_bytes`.
+- **GitHub signs only the body.** Its delivery id and event headers aren't covered, and there is no timestamp, so someone holding one genuine request (a repo admin reading delivery logs) can replay it under new delivery ids. Stripe's scheme has a timestamp and is not affected. Agents should treat events as untrusted and dedupe on content where it matters.
 - **The rate limit is GCRA in one integer column** (`rate_tat_ms`): it needs no timer and no floating point, and a refused request doesn't use up the burst.
 
 ## Work involved

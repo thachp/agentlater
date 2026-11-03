@@ -8,7 +8,7 @@
 use super::*;
 use runlater_core::limits::{
     DAY_MS, HOOK_BURST, HOOK_DEDUPE_MS, HOOK_EVENTS_PER_DAY, HOOK_EVENTS_PER_DAY_PAID,
-    HOOK_INTERVAL_MS, MAX_HOOKS,
+    HOOK_INTERVAL_MS, HOOK_UNVERIFIED_EVENTS_PER_DAY, HOUR_MS, MAX_HOOKS, MAX_INBOX_EVENTS,
 };
 use runlater_core::{HookSpec, VerifySpec};
 
@@ -23,7 +23,7 @@ pub struct HookView {
     /// Requests written to the inbox.
     pub received: i64,
     /// Requests refused, by reason: signature_missing, signature_invalid, signature_stale,
-    /// rate_limited, daily_limit or project_expired.
+    /// rate_limited, daily_limit, inbox_full or project_expired.
     pub refused: BTreeMap<String, i64>,
 }
 
@@ -54,10 +54,13 @@ pub struct HookRow {
     refused: String,
     /// When the rate limit's next request is due on average (GCRA).
     rate_tat_ms: i64,
+    /// Events this hook wrote on UTC day `day`; capped when the hook is unverified.
+    day: i64,
+    day_count: i64,
 }
 
 const HOOK_COLUMNS: &str = "name, verify, sealed_secret, keep_headers, created_ms, \
-    last_received_ms, received, refused, rate_tat_ms";
+    last_received_ms, received, refused, rate_tat_ms, day, day_count";
 
 impl HookRow {
     pub fn verify(&self) -> Result<Option<VerifySpec>, DbError> {
@@ -95,6 +98,9 @@ pub struct Received<'r> {
     /// At most `HOOK_BODY_KEPT_BYTES`, as text.
     pub body: &'r str,
     pub body_bytes: usize,
+    /// Whether `body` is less than the whole request. Not `body.len() < body_bytes`: bytes
+    /// that aren't UTF-8 become three bytes each as text.
+    pub truncated: bool,
 }
 
 /// How a request to a hook was answered.
@@ -306,12 +312,39 @@ impl<D: Db> Ledger<'_, D> {
             .first()
             .filter(|t| t.hook_day == day)
             .map_or(0, |t| t.hook_day_count);
+        let tomorrow = Some((day + 1) * DAY_MS - now);
         if count >= cap {
-            return refuse(429, "daily_limit", Some((day + 1) * DAY_MS - now));
+            return refuse(429, "daily_limit", tomorrow);
+        }
+        // Anyone with an unverified hook's URL can send to it, so it has a small day of its own.
+        let hook_count = if hook.day == day { hook.day_count } else { 0 };
+        if hook.verify.is_none() && hook_count >= HOOK_UNVERIFIED_EVENTS_PER_DAY {
+            return refuse(429, "daily_limit", tomorrow);
+        }
+        // A hook event may push out an acked event or an older hook event, never an unread
+        // result of the project's own work.
+        let inbox: Vec<Counts> = self.db.query(
+            "SELECT COUNT(*) AS total, COALESCE(SUM(seq <= (SELECT inbox_acked_seq FROM project) \
+             OR json_extract(event, '$.event') = 'hook.received'), 0) AS waiting FROM inbox",
+            vec![],
+        )?;
+        if inbox
+            .first()
+            .is_some_and(|c| c.total >= MAX_INBOX_EVENTS && c.waiting == 0)
+        {
+            return refuse(429, "inbox_full", Some(HOUR_MS));
         }
         self.db.exec(
             "UPDATE project SET hook_day = ?, hook_day_count = ?",
             vec![day.into(), (count + 1).into()],
+        )?;
+        self.db.exec(
+            "UPDATE hooks SET day = ?, day_count = ? WHERE name = ?",
+            vec![
+                day.into(),
+                (hook_count + 1).into(),
+                hook.name.as_str().into(),
+            ],
         )?;
 
         if let Some(id) = &r.delivery_id {
@@ -335,7 +368,7 @@ impl<D: Db> Ledger<'_, D> {
                 "headers": r.headers,
                 "body": r.body,
                 "body_bytes": r.body_bytes,
-                "truncated": r.body.len() < r.body_bytes,
+                "truncated": r.truncated,
             },
         });
         self.add_to_inbox(seq, &event, now)?;
@@ -391,6 +424,7 @@ mod tests {
             headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
             body: r#"{"action":"completed"}"#,
             body_bytes: 22,
+            truncated: false,
         }
     }
 
@@ -645,6 +679,115 @@ mod tests {
         let e = &events(&l)[0];
         assert_eq!(e["request"]["body"], serde_json::Value::Null);
         assert_eq!(e["request"]["body_bytes"], 22, "what it was is still said");
+    }
+
+    fn verified_hook(l: &Ledger<'_, Memory>, name: &str, token: &str) {
+        let s = spec(serde_json::json!({
+            "name": name,
+            "verify": { "scheme": "github", "secret": "whsec_0123456789abcdef" },
+        }));
+        l.put_hook(&s, token, Some("v1:sealed"), T0).unwrap();
+    }
+
+    #[test]
+    fn an_unverified_hook_has_a_small_day_of_its_own() {
+        let db = Memory::new();
+        let l = setup(&db);
+        hook(&l, "open", TOKEN);
+        verified_hook(&l, "signed", "hk_signed");
+        db.exec(
+            "UPDATE hooks SET day = ?, day_count = ? WHERE name = 'open'",
+            vec![
+                T0.div_euclid(DAY_MS).into(),
+                HOOK_UNVERIFIED_EVENTS_PER_DAY.into(),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            send(&l, TOKEN, None, T0),
+            HookOutcome::Refused {
+                reason: "daily_limit",
+                ..
+            }
+        ));
+        // A leaked open URL doesn't use up the project's day for the signed hook.
+        assert!(matches!(
+            send(&l, "hk_signed", Some("d-1"), T0),
+            HookOutcome::Accepted(_)
+        ));
+        let next_day = (T0.div_euclid(DAY_MS) + 1) * DAY_MS;
+        assert!(matches!(
+            send(&l, TOKEN, None, next_day),
+            HookOutcome::Accepted(_)
+        ));
+    }
+
+    #[test]
+    fn hook_events_never_push_out_unread_results() {
+        let db = Memory::new();
+        let l = setup(&db);
+        verified_hook(&l, "h", TOKEN);
+        let fill = |event: &str, n: i64| {
+            for _ in 0..n {
+                let seq = l.next_inbox_seq().unwrap();
+                l.add_to_inbox(seq, &serde_json::json!({ "event": event }), T0)
+                    .unwrap();
+            }
+        };
+        // Full of unread task reports: a hook request is refused rather than evicting one.
+        fill("task.finished", MAX_INBOX_EVENTS);
+        assert!(matches!(
+            send(&l, TOKEN, Some("d-1"), T0),
+            HookOutcome::Refused {
+                status: 429,
+                reason: "inbox_full",
+                ..
+            }
+        ));
+        // Once there is a hook event to drop, the oldest hook event goes first.
+        db.exec("DELETE FROM inbox WHERE seq = 1", vec![]).unwrap();
+        fill("hook.received", 1);
+        let first_hook: Vec<SeqRow> = db
+            .query("SELECT MAX(seq) AS seq FROM inbox", vec![])
+            .unwrap();
+        assert!(matches!(
+            send(&l, TOKEN, Some("d-2"), T0),
+            HookOutcome::Accepted(_)
+        ));
+        let gone: Vec<Counts> = db
+            .query(
+                "SELECT COUNT(*) AS total, 0 AS waiting FROM inbox WHERE seq = ?",
+                vec![first_hook[0].seq.into()],
+            )
+            .unwrap();
+        assert_eq!(gone[0].total, 0, "the older hook event made room");
+        let tasks: Vec<Counts> = db
+            .query(
+                "SELECT COUNT(*) AS total, 0 AS waiting FROM inbox \
+                 WHERE json_extract(event, '$.event') = 'task.finished'",
+                vec![],
+            )
+            .unwrap();
+        assert_eq!(
+            tasks[0].total,
+            MAX_INBOX_EVENTS - 1,
+            "no task report was dropped"
+        );
+    }
+
+    #[test]
+    fn reports_truncation_as_the_api_saw_it() {
+        let db = Memory::new();
+        let l = setup(&db);
+        hook(&l, "h", TOKEN);
+        let row = l.hook_for_token(TOKEN).unwrap().unwrap();
+        let r = Received {
+            truncated: true,
+            body_bytes: 10,
+            ..received(None)
+        };
+        l.receive_hook(&row, r, T0).unwrap();
+        assert_eq!(events(&l)[0]["request"]["truncated"], true);
     }
 
     #[test]
