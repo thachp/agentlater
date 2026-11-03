@@ -1,0 +1,18 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.thachp/runlater",
+  "title": "RunLater",
+  "description": "Let agents make HTTP requests later: schedule, retry, cron, watch jobs, receive webhooks.",
+  "repository": {
+    "url": "https://github.com/thachp/runlater",
+    "source": "github"
+  },
+  "websiteUrl": "https://runlater.io",
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://gateway.runlater.io/mcp"
+    }
+  ]
+}
