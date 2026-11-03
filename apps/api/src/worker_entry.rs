@@ -16,8 +16,9 @@ use runlater_core::limits::{
     MAX_HOOK_REQUEST_BYTES, MAX_WATCH_RESPONSE_BYTES,
 };
 use runlater_core::{
-    cut, delivery_id, fill, kept_headers as hook_headers, redact, verify, CronRequest, HookRequest,
-    Outcome, PollBody, ScheduleRequest, SecretRequest, Status, WakeRequest, WatchRequest,
+    accepts, cut, delivery_id, fill, kept_headers as hook_headers, redact, verify, CronRequest,
+    HookRequest, HookUpdate, Outcome, PollBody, ScheduleRequest, SecretRequest, Status,
+    WakeRequest, WatchRequest,
 };
 use runlater_egress::{sign, Destination};
 use serde::de::DeserializeOwned;
@@ -145,6 +146,8 @@ fn required_scope(method: &Method, path: &[&str]) -> Option<Scope> {
         (Method::Get, ["v1", "hooks"]) => Scope::Read,
         (Method::Post, ["v1", "hooks", "_receive"]) => Scope::HooksReceive,
         (Method::Post, ["v1", "hooks", _, "delete"]) => Scope::Cancel,
+        // After _receive: a hook name never starts with "_".
+        (Method::Post, ["v1", "hooks", _]) => Scope::Schedule,
         _ => return None,
     })
 }
@@ -374,6 +377,10 @@ impl TaskLedger {
             }
         }
         let keep = hook.keep_headers().map_err(failed)?;
+        let matched = hook
+            .accept()
+            .map_err(failed)?
+            .is_none_or(|rules| accepts(&rules, &headers, &raw));
         let text = String::from_utf8_lossy(&raw);
         let body = cut(&text, HOOK_BODY_KEPT_BYTES);
         let received = Received {
@@ -382,10 +389,11 @@ impl TaskLedger {
             headers: hook_headers(check.as_ref(), &keep, &headers),
             body,
             body_bytes: raw.len(),
+            matched,
             truncated: body.len() < text.len(),
         };
         match ledger.receive_hook(&hook, received, t).map_err(failed)? {
-            HookOutcome::Accepted(_) => hook_answer(202, None, None),
+            HookOutcome::Accepted(_) | HookOutcome::Filtered => hook_answer(202, None, None),
             HookOutcome::Duplicate => hook_answer(200, None, None),
             HookOutcome::Refused {
                 status,
@@ -573,6 +581,36 @@ impl TaskLedger {
             (Method::Post, ["v1", "hooks", name, "delete"]) => {
                 ledger.delete_hook(name).map(|v| json(&v, 200))
             }
+            (Method::Post, ["v1", "hooks", name]) => match body::<HookUpdate>(req).await {
+                Ok(u) => match u.validate() {
+                    Err(e) => Err(ApiError {
+                        field: Some(e.field()),
+                        ..ApiError::bad_request(e.to_string())
+                    }),
+                    Ok(patch) => {
+                        let sealed = match (&patch.verify, sealing_key(&self.env)) {
+                            (Some(Some(_)), None) => {
+                                return simple_error(
+                                    503,
+                                    "secrets_unavailable",
+                                    "verified hooks are not configured on this deployment",
+                                )
+                            }
+                            (Some(Some((_, secret))), Some(key)) => {
+                                let nonce: [u8; NONCE_BYTES] = random_bytes(NONCE_BYTES as u32)?
+                                    .try_into()
+                                    .map_err(|_| Error::RustError("short nonce".into()))?;
+                                Some(key.seal(&project_id, &hook_secret_name(name), secret, nonce))
+                            }
+                            _ => None,
+                        };
+                        ledger
+                            .update_hook(name, patch, sealed.as_deref())
+                            .map(|v| json(&v, 200))
+                    }
+                },
+                Err(e) => Err(e),
+            },
             (Method::Post, ["v1", "secrets", name, "delete"]) => {
                 ledger.delete_secret(name).map(|v| json(&v, 200))
             }

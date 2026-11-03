@@ -9,10 +9,12 @@ use crate::cron::valid_cron_name;
 use crate::limits::{
     HOOK_SIGNATURE_TOLERANCE_MS, MAX_HOOK_SECRET_BYTES, MAX_KEEP_HEADERS, MIN_HOOK_SECRET_BYTES,
 };
+use crate::watch::Until;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
 use hmac::{Hmac, Mac};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -35,6 +37,10 @@ const MAX_KEPT_VALUE_BYTES: usize = 1024;
 const MAX_HEADER_NAME_BYTES: usize = 64;
 const MAX_PREFIX_BYTES: usize = 32;
 const MAX_DELIVERY_ID_BYTES: usize = 128;
+const MAX_ACCEPT_RULES: usize = 5;
+const MAX_RULE_HEADERS: usize = 5;
+const MAX_RULE_VALUES: usize = 20;
+const MAX_RULE_VALUE_BYTES: usize = 256;
 
 /// How a sender signs its requests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +91,67 @@ pub struct HookRequest {
     /// More request headers to keep on each event, e.g. `"x-gitlab-event"`.
     #[serde(default)]
     pub keep_headers: Vec<String>,
+    /// Keep only requests that match one of these rules; the rest are answered and dropped.
+    #[serde(default)]
+    pub accept: Option<Vec<AcceptRule>>,
+}
+
+/// One way a request can be worth keeping. Every part given must hold.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptRule {
+    /// Header name to the values that match it, compared exactly. Names are stored lowercase.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, Vec<String>>,
+    /// With `in`: a JSON Pointer into the body, as a watch's `until`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, rename = "in", skip_serializing_if = "Option::is_none")]
+    pub one_of: Option<Vec<Value>>,
+}
+
+/// `update_hook` input: what to change; anything left out stays. `null` clears `verify` or
+/// `accept`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookUpdate {
+    #[serde(default, deserialize_with = "present")]
+    pub verify: Option<Option<VerifyRequest>>,
+    #[serde(default, deserialize_with = "present")]
+    pub accept: Option<Option<Vec<AcceptRule>>>,
+    #[serde(default)]
+    pub keep_headers: Option<Vec<String>>,
+}
+
+/// Tells a field given as `null` (`Some(None)`) from one left out (`None`).
+fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
+}
+
+/// A validated `update_hook`. `keep_headers` is checked against the hook's signature header
+/// by [`check_keep`] once the ledger knows which `verify` applies.
+#[derive(Clone, PartialEq, Eq)]
+pub struct HookPatch {
+    pub verify: Option<Option<(VerifySpec, String)>>,
+    pub accept: Option<Option<Vec<AcceptRule>>>,
+    pub keep_headers: Option<Vec<String>>,
+}
+
+impl fmt::Debug for HookPatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HookPatch")
+            .field(
+                "verify",
+                &self.verify.as_ref().map(|v| v.as_ref().map(|(s, _)| s)),
+            )
+            .field("accept", &self.accept)
+            .field("keep_headers", &self.keep_headers)
+            .finish()
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +208,7 @@ pub struct HookSpec {
     pub verify: Option<(VerifySpec, String)>,
     /// Lowercase, sorted, without duplicates.
     pub keep_headers: Vec<String>,
+    pub accept: Option<Vec<AcceptRule>>,
 }
 
 impl fmt::Debug for HookSpec {
@@ -149,6 +217,7 @@ impl fmt::Debug for HookSpec {
             .field("name", &self.name)
             .field("verify", &self.verify.as_ref().map(|(v, _)| v))
             .field("keep_headers", &self.keep_headers)
+            .field("accept", &self.accept)
             .finish()
     }
 }
@@ -166,6 +235,7 @@ pub enum HookError {
     TooManyKept,
     /// Not a header name, or one that is never kept.
     Kept(String),
+    Accept(String),
 }
 
 impl HookError {
@@ -179,6 +249,7 @@ impl HookError {
             | Self::PrefixUse
             | Self::Prefix => "verify",
             Self::TooManyKept | Self::Kept(_) => "keep_headers",
+            Self::Accept(_) => "accept",
         }
     }
 }
@@ -214,6 +285,7 @@ impl fmt::Display for HookError {
                 f,
                 "keep_headers: {h:?} is not a header name, or carries credentials and is never kept"
             ),
+            Self::Accept(why) => write!(f, "accept: {why}"),
         }
     }
 }
@@ -239,30 +311,126 @@ impl HookRequest {
             return Err(HookError::Name);
         }
         let verify = self.verify.map(VerifyRequest::validate).transpose()?;
-        if self.keep_headers.len() > MAX_KEEP_HEADERS {
-            return Err(HookError::TooManyKept);
-        }
-        let signature = verify.as_ref().map(|(v, _)| v.header().to_string());
-        let mut keep = Vec::with_capacity(self.keep_headers.len());
-        for name in self.keep_headers {
-            let lower = name.to_ascii_lowercase();
-            let forbidden = NEVER_KEPT.contains(&lower.as_str())
-                || signature.as_deref() == Some(lower.as_str())
-                || ["x-hub-signature-256", "x-hub-signature", "stripe-signature"]
-                    .contains(&lower.as_str());
-            if !header_name(&name) || forbidden {
-                return Err(HookError::Kept(name));
-            }
-            keep.push(lower);
-        }
-        keep.sort();
-        keep.dedup();
+        let keep_headers = check_keep(verify.as_ref().map(|(v, _)| v), self.keep_headers)?;
         Ok(HookSpec {
             name: self.name,
             verify,
-            keep_headers: keep,
+            keep_headers,
+            accept: self.accept.map(check_accept).transpose()?,
         })
     }
+}
+
+impl HookUpdate {
+    pub fn validate(self) -> Result<HookPatch, HookError> {
+        Ok(HookPatch {
+            verify: self
+                .verify
+                .map(|v| v.map(VerifyRequest::validate).transpose())
+                .transpose()?,
+            accept: self
+                .accept
+                .map(|a| a.map(check_accept).transpose())
+                .transpose()?,
+            keep_headers: self.keep_headers,
+        })
+    }
+}
+
+/// `keep_headers`, lowercase, sorted and deduplicated: never credentials, nor the header
+/// `verify` reads the signature from.
+pub fn check_keep(
+    verify: Option<&VerifySpec>,
+    names: Vec<String>,
+) -> Result<Vec<String>, HookError> {
+    if names.len() > MAX_KEEP_HEADERS {
+        return Err(HookError::TooManyKept);
+    }
+    let signature = verify.map(VerifySpec::header);
+    let mut keep = Vec::with_capacity(names.len());
+    for name in names {
+        let lower = name.to_ascii_lowercase();
+        let forbidden = NEVER_KEPT.contains(&lower.as_str())
+            || signature == Some(lower.as_str())
+            || ["x-hub-signature-256", "x-hub-signature", "stripe-signature"]
+                .contains(&lower.as_str());
+        if !header_name(&name) || forbidden {
+            return Err(HookError::Kept(name));
+        }
+        keep.push(lower);
+    }
+    keep.sort();
+    keep.dedup();
+    Ok(keep)
+}
+
+/// Checks `accept` and stores header names lowercase.
+fn check_accept(rules: Vec<AcceptRule>) -> Result<Vec<AcceptRule>, HookError> {
+    let bad = |why: &str| HookError::Accept(why.into());
+    if rules.is_empty() || rules.len() > MAX_ACCEPT_RULES {
+        return Err(bad(
+            "give 1-5 rules, or leave accept out to keep everything",
+        ));
+    }
+    rules
+        .into_iter()
+        .map(|rule| {
+            if rule.headers.is_empty() && rule.path.is_none() && rule.one_of.is_none() {
+                return Err(bad("a rule needs headers, or path and in"));
+            }
+            if rule.headers.len() > MAX_RULE_HEADERS {
+                return Err(bad("a rule names at most 5 headers"));
+            }
+            let mut headers = BTreeMap::new();
+            for (name, values) in rule.headers {
+                if !header_name(&name) {
+                    return Err(HookError::Accept(format!("{name:?} is not a header name")));
+                }
+                if values.is_empty()
+                    || values.len() > MAX_RULE_VALUES
+                    || values.iter().any(|v| v.len() > MAX_RULE_VALUE_BYTES)
+                {
+                    return Err(bad("each header lists 1-20 values of at most 256 bytes"));
+                }
+                if headers.insert(name.to_ascii_lowercase(), values).is_some() {
+                    return Err(HookError::Accept(format!("header {name:?} is given twice")));
+                }
+            }
+            if rule.path.is_some() || rule.one_of.is_some() {
+                let until = Until {
+                    path: rule.path.clone(),
+                    one_of: rule.one_of.clone(),
+                    status: None,
+                };
+                until.check().map_err(|why| HookError::Accept(why.into()))?;
+            }
+            Ok(AcceptRule { headers, ..rule })
+        })
+        .collect()
+}
+
+/// Whether a request matches one of `rules`: every header listed has one of its values, and
+/// a `path` finds one of `in` in the body, read as JSON.
+pub fn accepts(rules: &[AcceptRule], headers: &[(String, String)], body: &[u8]) -> bool {
+    let text = std::str::from_utf8(body).ok();
+    rules.iter().any(|rule| {
+        let headers_match = rule.headers.iter().all(|(name, values)| {
+            header(headers, name).is_some_and(|v| values.iter().any(|want| want == v))
+        });
+        let body_matches = match (&rule.path, &rule.one_of) {
+            (Some(path), Some(values)) => {
+                let until = Until {
+                    path: Some(path.clone()),
+                    one_of: Some(values.clone()),
+                    status: None,
+                };
+                // Any 2xx status lets `until` look at the body alone.
+                text.is_some_and(|t| until.matches(200, Some(t)).is_some())
+            }
+            _ => true,
+        };
+        headers_match && body_matches
+    })
 }
 
 impl VerifyRequest {
@@ -784,6 +952,115 @@ mod tests {
                 b""
             ),
             None
+        );
+    }
+
+    fn rules(v: serde_json::Value) -> Result<Vec<AcceptRule>, HookError> {
+        request(json!({ "name": "h", "accept": v }))
+            .validate()
+            .map(|s| s.accept.unwrap())
+    }
+
+    #[test]
+    fn checks_accept_rules() {
+        let ok = rules(json!([
+            { "headers": { "X-GitHub-Event": ["workflow_run"] }, "path": "/workflow_run/conclusion", "in": ["failure"] },
+            { "headers": { "x-github-event": ["pull_request_review"] } },
+        ]))
+        .unwrap();
+        assert_eq!(
+            ok[0].headers.keys().collect::<Vec<_>>(),
+            ["x-github-event"],
+            "names lowercase"
+        );
+        for bad in [
+            json!([]),
+            json!([{}]),
+            json!([{ "path": "/a" }]),
+            json!([{ "path": "a", "in": ["x"] }]),
+            json!([{ "path": "/a", "in": [{ "nested": 1 }] }]),
+            json!([{ "headers": { "bad name": ["x"] } }]),
+            json!([{ "headers": { "x-a": [] } }]),
+            json!([{ "headers": { "x-a": ["x".repeat(257)] } }]),
+            json!([{ "headers": { "X-A": ["1"], "x-a": ["2"] } }]),
+            json!([{ "headers": { "a": ["1"], "b": ["1"], "c": ["1"], "d": ["1"], "e": ["1"], "f": ["1"] } }]),
+            json!((0..6)
+                .map(|_| json!({ "headers": { "x": ["1"] } }))
+                .collect::<Vec<_>>()),
+        ] {
+            let err = rules(bad.clone()).unwrap_err();
+            assert_eq!(err.field(), "accept", "{bad}: {err}");
+        }
+        assert!(serde_json::from_value::<HookRequest>(
+            json!({ "name": "h", "accept": [{ "regex": "x" }] })
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn matches_any_rule_with_all_its_parts() {
+        let r = rules(json!([
+            { "headers": { "x-github-event": ["workflow_run"] }, "path": "/workflow_run/conclusion", "in": ["failure", "timed_out"] },
+            { "headers": { "x-github-event": ["pull_request_review"] } },
+        ]))
+        .unwrap();
+        let event = |e: &str| headers(&[("x-github-event", e)]);
+        let run = |c: &str| format!(r#"{{"workflow_run":{{"conclusion":"{c}"}}}}"#);
+        assert!(accepts(
+            &r,
+            &event("workflow_run"),
+            run("failure").as_bytes()
+        ));
+        assert!(!accepts(
+            &r,
+            &event("workflow_run"),
+            run("success").as_bytes()
+        ));
+        assert!(!accepts(&r, &event("check_run"), run("failure").as_bytes()));
+        assert!(accepts(&r, &event("pull_request_review"), b"not json"));
+        assert!(
+            !accepts(&r, &event("workflow_run"), b"not json"),
+            "no JSON, no path"
+        );
+        assert!(
+            !accepts(&r, &[], run("failure").as_bytes()),
+            "a missing header doesn't match"
+        );
+        assert!(
+            !accepts(&r, &event("Workflow_Run"), run("failure").as_bytes()),
+            "values are exact"
+        );
+    }
+
+    #[test]
+    fn validates_updates_and_tells_null_from_absent() {
+        let patch = |v| serde_json::from_value::<HookUpdate>(v).unwrap().validate();
+        let p = patch(json!({})).unwrap();
+        assert_eq!(
+            (
+                p.verify.is_none(),
+                p.accept.is_none(),
+                p.keep_headers.is_none()
+            ),
+            (true, true, true)
+        );
+        let p = patch(json!({ "verify": null, "accept": null })).unwrap();
+        assert_eq!((p.verify, p.accept), (Some(None), Some(None)));
+        let p = patch(json!({ "accept": [{ "headers": { "X-A": ["1"] } }] })).unwrap();
+        assert!(p.accept.unwrap().unwrap()[0].headers.contains_key("x-a"));
+        assert_eq!(
+            patch(json!({ "accept": [] })).unwrap_err().field(),
+            "accept"
+        );
+        let p = patch(json!({ "verify": { "scheme": "github", "secret": SECRET } })).unwrap();
+        assert!(!format!("{p:?}").contains(SECRET));
+        assert!(serde_json::from_value::<HookUpdate>(json!({ "name": "h" })).is_err());
+        let github = spec(Scheme::Github);
+        assert_eq!(
+            check_keep(Some(&github), vec!["X-Hub-Signature-256".into()])
+                .unwrap_err()
+                .field(),
+            "keep_headers"
         );
     }
 

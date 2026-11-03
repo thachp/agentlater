@@ -231,6 +231,12 @@ const MIGRATIONS: &[&[&str]] = &[
         "ALTER TABLE project ADD COLUMN hook_day INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE project ADD COLUMN hook_day_count INTEGER NOT NULL DEFAULT 0",
     ],
+    // 12: hook filters. `accept` holds the rules a request must match to be kept; `filtered`
+    // counts the requests that matched none, answered and dropped.
+    &[
+        "ALTER TABLE hooks ADD COLUMN accept TEXT",
+        "ALTER TABLE hooks ADD COLUMN filtered INTEGER NOT NULL DEFAULT 0",
+    ],
 ];
 
 /// SQL condition, over `tasks`: the task will queue a callback task when it finishes.

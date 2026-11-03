@@ -251,6 +251,16 @@ create_cron({
           GitHub or Stripe marks with the same delivery id is written once.
         </li>
         <li>
+          Pass <code>accept</code> to keep only what matters, e.g.{" "}
+          <code>
+            [{"{"} headers: {"{"} &quot;X-GitHub-Event&quot;: [&quot;workflow_run&quot;] {"}"}, path:
+            &quot;/workflow_run/conclusion&quot;, in: [&quot;failure&quot;] {"}"}]
+          </code>
+          . Anything else is answered the same way but writes nothing and wakes nothing. Change{" "}
+          <code>accept</code>, <code>verify</code> or <code>keep_headers</code> later with <code>update_hook</code>
+          , which keeps the URL.
+        </li>
+        <li>
           Receiving costs no delivery attempts. Each hook takes 60 requests a minute; a project, 1,000 hook events a
           day (10,000 once it has bought attempts); a hook without <code>verify</code>, 100 a day. Hook events never
           push an unread task report out of a full inbox. Senders get a status and <code>{"{}"}</code>, never

@@ -10,7 +10,7 @@ use runlater_core::limits::{
     DAY_MS, HOOK_BURST, HOOK_DEDUPE_MS, HOOK_EVENTS_PER_DAY, HOOK_EVENTS_PER_DAY_PAID,
     HOOK_INTERVAL_MS, HOOK_UNVERIFIED_EVENTS_PER_DAY, HOUR_MS, MAX_HOOKS, MAX_INBOX_EVENTS,
 };
-use runlater_core::{HookSpec, VerifySpec};
+use runlater_core::{check_keep, AcceptRule, HookPatch, HookSpec, VerifySpec};
 
 /// A hook as callers see it: never its URL or secret.
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -18,6 +18,8 @@ pub struct HookView {
     pub name: String,
     pub verify: Option<VerifySpec>,
     pub keep_headers: Vec<String>,
+    /// The rules a request must match to be kept; none means every request is.
+    pub accept: Option<Vec<AcceptRule>>,
     pub created_ms: i64,
     pub last_received_ms: Option<i64>,
     /// Requests written to the inbox.
@@ -25,6 +27,8 @@ pub struct HookView {
     /// Requests refused, by reason: signature_missing, signature_invalid, signature_stale,
     /// rate_limited, daily_limit, inbox_full or project_expired.
     pub refused: BTreeMap<String, i64>,
+    /// Requests that matched no `accept` rule: answered 202 and dropped.
+    pub filtered: i64,
 }
 
 /// `create_hook`'s answer: the hook, and the path of its URL, shown this once.
@@ -57,14 +61,24 @@ pub struct HookRow {
     /// Events this hook wrote on UTC day `day`; capped when the hook is unverified.
     day: i64,
     day_count: i64,
+    accept: Option<String>,
+    filtered: i64,
 }
 
 const HOOK_COLUMNS: &str = "name, verify, sealed_secret, keep_headers, created_ms, \
-    last_received_ms, received, refused, rate_tat_ms, day, day_count";
+    last_received_ms, received, refused, rate_tat_ms, day, day_count, accept, filtered";
 
 impl HookRow {
     pub fn verify(&self) -> Result<Option<VerifySpec>, DbError> {
         self.verify
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| DbError(e.to_string()))
+    }
+
+    pub fn accept(&self) -> Result<Option<Vec<AcceptRule>>, DbError> {
+        self.accept
             .as_deref()
             .map(serde_json::from_str)
             .transpose()
@@ -80,10 +94,12 @@ impl HookRow {
             name: self.name.clone(),
             verify: self.verify()?,
             keep_headers: self.keep_headers()?,
+            accept: self.accept()?,
             created_ms: self.created_ms,
             last_received_ms: self.last_received_ms,
             received: self.received,
             refused: serde_json::from_str(&self.refused).map_err(|e| DbError(e.to_string()))?,
+            filtered: self.filtered,
         })
     }
 }
@@ -98,6 +114,8 @@ pub struct Received<'r> {
     /// At most `HOOK_BODY_KEPT_BYTES`, as text.
     pub body: &'r str,
     pub body_bytes: usize,
+    /// Whether the request matched the hook's `accept` rules (true if it has none).
+    pub matched: bool,
     /// Whether `body` is less than the whole request. Not `body.len() < body_bytes`: bytes
     /// that aren't UTF-8 become three bytes each as text.
     pub truncated: bool,
@@ -108,6 +126,8 @@ pub struct Received<'r> {
 pub enum HookOutcome {
     /// Written to the inbox as this event.
     Accepted(i64),
+    /// Matched no `accept` rule: answered as if accepted, and dropped.
+    Filtered,
     /// A delivery id seen in the last day: a retry, already in the inbox.
     Duplicate,
     /// Not written: the status to answer, why, and when to try again.
@@ -171,6 +191,12 @@ impl<D: Db> Ledger<'_, D> {
             .transpose()
             .map_err(|e| DbError(e.to_string()))?;
         let keep = serde_json::to_string(&spec.keep_headers).map_err(|e| DbError(e.to_string()))?;
+        let accept = spec
+            .accept
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| DbError(e.to_string()))?;
         self.db.exec(
             "DELETE FROM hooks WHERE name = ?",
             vec![spec.name.as_str().into()],
@@ -180,14 +206,15 @@ impl<D: Db> Ledger<'_, D> {
             vec![spec.name.as_str().into()],
         )?;
         self.db.exec(
-            "INSERT INTO hooks (name, token_hash, verify, sealed_secret, keep_headers, \
-             created_ms, received, refused, rate_tat_ms) VALUES (?, ?, ?, ?, ?, ?, 0, '{}', 0)",
+            "INSERT INTO hooks (name, token_hash, verify, sealed_secret, keep_headers, accept, \
+             created_ms, received, refused, rate_tat_ms) VALUES (?, ?, ?, ?, ?, ?, ?, 0, '{}', 0)",
             vec![
                 spec.name.as_str().into(),
                 token_hash(token).into(),
                 verify.into(),
                 sealed_secret.into(),
                 keep.into(),
+                accept.into(),
                 now.into(),
             ],
         )?;
@@ -209,6 +236,65 @@ impl<D: Db> Ledger<'_, D> {
         )?;
         let hooks = rows.iter().map(HookRow::view).collect::<Result<_, _>>()?;
         Ok(HookList { hooks })
+    }
+
+    /// Changes a hook's `verify`, `accept` or `keep_headers`, keeping its URL, counts and the
+    /// delivery ids it has seen. `sealed_secret` is the new `verify`'s secret, sealed by the
+    /// API; it is only read when `patch.verify` is given.
+    pub fn update_hook(
+        &self,
+        name: &str,
+        patch: HookPatch,
+        sealed_secret: Option<&str>,
+    ) -> Result<HookView, ApiError> {
+        self.project_row()?.ok_or_else(no_project)?;
+        let row = self.hook_row(name)?.ok_or_else(|| {
+            ApiError::not_found("hook_not_found", "no hook with that name in this project")
+        })?;
+        let (verify, sealed) = match patch.verify {
+            None => (row.verify()?, row.sealed_secret.clone()),
+            Some(None) => (None, None),
+            Some(Some((spec, _))) => (Some(spec), sealed_secret.map(String::from)),
+        };
+        // The headers kept must still pass with the verify that now applies.
+        let keep = check_keep(
+            verify.as_ref(),
+            patch.keep_headers.unwrap_or(row.keep_headers()?),
+        )
+        .map_err(|e| ApiError {
+            field: Some(e.field()),
+            ..ApiError::bad_request(e.to_string())
+        })?;
+        let accept = match patch.accept {
+            None => row.accept()?,
+            Some(a) => a,
+        };
+        let to_json = |e: serde_json::Error| DbError(e.to_string());
+        self.db.exec(
+            "UPDATE hooks SET verify = ?, sealed_secret = ?, keep_headers = ?, accept = ? \
+             WHERE name = ?",
+            vec![
+                verify
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .map_err(to_json)?
+                    .into(),
+                sealed.into(),
+                serde_json::to_string(&keep).map_err(to_json)?.into(),
+                accept
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .map_err(to_json)?
+                    .into(),
+                name.into(),
+            ],
+        )?;
+        Ok(self
+            .hook_row(name)?
+            .ok_or_else(|| DbError("hook vanished".into()))?
+            .view()?)
     }
 
     /// Removes a hook; its URL answers 404 from now on. Events it wrote stay in the inbox.
@@ -283,6 +369,15 @@ impl<D: Db> Ledger<'_, D> {
             "UPDATE hooks SET rate_tat_ms = ? WHERE name = ?",
             vec![(tat + HOOK_INTERVAL_MS).into(), hook.name.as_str().into()],
         )?;
+        // Not what the agent asked for: answered like the rest, so the sender doesn't retry and
+        // a prober can't tell, but nothing is written or woken, and no day is used.
+        if !r.matched {
+            self.db.exec(
+                "UPDATE hooks SET filtered = filtered + 1 WHERE name = ?",
+                vec![hook.name.as_str().into()],
+            )?;
+            return Ok(HookOutcome::Filtered);
+        }
 
         if let Some(id) = &r.delivery_id {
             self.db.exec(
@@ -424,6 +519,7 @@ mod tests {
             headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
             body: r#"{"action":"completed"}"#,
             body_bytes: 22,
+            matched: true,
             truncated: false,
         }
     }
@@ -788,6 +884,149 @@ mod tests {
         };
         l.receive_hook(&row, r, T0).unwrap();
         assert_eq!(events(&l)[0]["request"]["truncated"], true);
+    }
+
+    fn filtered_hook(l: &Ledger<'_, Memory>) {
+        let s = spec(serde_json::json!({
+            "name": "ci",
+            "accept": [{ "headers": { "x-github-event": ["workflow_run"] } }],
+        }));
+        l.put_hook(&s, TOKEN, None, T0).unwrap();
+    }
+
+    #[test]
+    fn a_filtered_request_is_answered_and_dropped() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.set_wake(
+            serde_json::from_value::<WakeRequest>(serde_json::json!({
+                "url": "https://agent.example.com/wake",
+            }))
+            .unwrap(),
+            T0,
+        )
+        .unwrap();
+        filtered_hook(&l);
+        let row = l.hook_for_token(TOKEN).unwrap().unwrap();
+        let noise = Received {
+            matched: false,
+            ..received(None)
+        };
+        assert_eq!(
+            l.receive_hook(&row, noise, T0).unwrap(),
+            HookOutcome::Filtered
+        );
+        assert!(events(&l).is_empty(), "nothing written");
+        let wakes: Vec<IdRow> = db
+            .query("SELECT id FROM tasks WHERE wake_call = 1", vec![])
+            .unwrap();
+        assert!(wakes.is_empty(), "nothing woken");
+        let day: Vec<DayRow> = db
+            .query("SELECT hook_day, hook_day_count FROM project", vec![])
+            .unwrap();
+        assert_eq!(day[0].hook_day_count, 0, "no day used");
+        let h = &l.hooks().unwrap().hooks[0];
+        assert_eq!((h.filtered, h.received), (1, 0));
+        assert_eq!(
+            h.accept.as_ref().unwrap()[0].headers["x-github-event"],
+            ["workflow_run"]
+        );
+        // It still spends the hook's rate limit.
+        let tat: Vec<Counts> = db
+            .query(
+                "SELECT rate_tat_ms AS total, 0 AS waiting FROM hooks",
+                vec![],
+            )
+            .unwrap();
+        assert_eq!(tat[0].total, T0 + HOOK_INTERVAL_MS);
+        assert!(matches!(
+            send(&l, TOKEN, None, T0),
+            HookOutcome::Accepted(_)
+        ));
+    }
+
+    fn patch(v: serde_json::Value) -> HookPatch {
+        serde_json::from_value::<runlater_core::HookUpdate>(v)
+            .unwrap()
+            .validate()
+            .unwrap()
+    }
+
+    #[test]
+    fn updating_a_hook_keeps_its_url_counts_and_deliveries() {
+        let db = Memory::new();
+        let l = setup(&db);
+        verified_hook(&l, "h", TOKEN);
+        send(&l, TOKEN, Some("d-1"), T0);
+        let v = l
+            .update_hook(
+                "h",
+                patch(serde_json::json!({ "accept": [{ "headers": { "X-Event": ["push"] } }] })),
+                None,
+            )
+            .unwrap();
+        assert_eq!(v.received, 1, "counts kept");
+        assert!(v.verify.is_some(), "verify untouched");
+        assert!(v.accept.is_some());
+        assert!(l.hook_for_token(TOKEN).unwrap().is_some(), "same URL");
+        assert_eq!(
+            send(&l, TOKEN, Some("d-1"), T0 + 1_000),
+            HookOutcome::Duplicate
+        );
+        let sealed: Vec<IdRow> = db
+            .query("SELECT sealed_secret AS id FROM hooks", vec![])
+            .unwrap();
+        assert_eq!(sealed[0].id, "v1:sealed", "secret untouched");
+
+        let v = l
+            .update_hook(
+                "h",
+                patch(serde_json::json!({ "accept": null, "verify": null })),
+                None,
+            )
+            .unwrap();
+        assert_eq!((v.accept, v.verify), (None, None));
+        let sealed: Vec<Counts> = db
+            .query(
+                "SELECT COUNT(*) AS total, 0 AS waiting FROM hooks WHERE sealed_secret IS NULL",
+                vec![],
+            )
+            .unwrap();
+        assert_eq!(sealed[0].total, 1, "the old secret is gone with verify");
+
+        let v = l
+            .update_hook(
+                "h",
+                patch(serde_json::json!({ "verify": { "scheme": "github", "secret": "whsec_new_0123456789" } })),
+                Some("v1:new"),
+            )
+            .unwrap();
+        assert_eq!(v.verify.unwrap().scheme.as_str(), "github");
+        assert_eq!(
+            l.update_hook("gone", patch(serde_json::json!({})), None)
+                .unwrap_err()
+                .code,
+            "hook_not_found"
+        );
+    }
+
+    #[test]
+    fn an_update_cant_keep_the_signature_header() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let s = spec(serde_json::json!({
+            "name": "h",
+            "verify": { "scheme": "hmac_sha256", "secret": "whsec_0123456789abcdef", "header": "X-Sig" },
+        }));
+        l.put_hook(&s, TOKEN, Some("v1:sealed"), T0).unwrap();
+        let e = l
+            .update_hook(
+                "h",
+                patch(serde_json::json!({ "keep_headers": ["X-Sig"] })),
+                None,
+            )
+            .unwrap_err();
+        assert_eq!((e.status, e.field), (400, Some("keep_headers")));
     }
 
     #[test]

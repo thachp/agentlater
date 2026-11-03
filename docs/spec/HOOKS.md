@@ -140,7 +140,7 @@ The response body is always empty JSON (`{}`), and RunLater never sends back any
 
 - Turning a hook into an outbound action (a hook → `on_match`-style request). Possible later, but it would let anyone with the URL spend attempts.
 - Answering the sender with anything other than a status code.
-- Filters, transforms or templating on what is kept.
+- Transforms or templating on what is kept. (Filters came next: [HOOK_FILTERS.md](HOOK_FILTERS.md).)
 - Hooks that outlive their project.
 
 ## Settled

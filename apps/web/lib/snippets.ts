@@ -39,7 +39,7 @@ const { agentId } = await client.connectAgent({
                  "create_cron", "get_cron", "list_crons", "delete_cron", "watch_http",
                  "read_inbox", "ack_inbox", "set_wake", "delete_wake",
                  "set_secret", "list_secrets", "delete_secret",
-                 "create_hook", "list_hooks", "delete_hook"],
+                 "create_hook", "list_hooks", "update_hook", "delete_hook"],
 });
 const run = (capability, args = {}) =>
   client.executeCapability({ agentId, capability, arguments: args }).then((r) => r.data);

@@ -269,7 +269,7 @@ impl WatchRequest {
 }
 
 impl Until {
-    fn check(&self) -> Result<(), &'static str> {
+    pub(crate) fn check(&self) -> Result<(), &'static str> {
         match (&self.path, &self.one_of) {
             (Some(path), Some(values)) => {
                 if !valid_pointer(path) {

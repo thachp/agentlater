@@ -18,8 +18,8 @@ pub use cron::{
     valid_cron_name, CronError, CronRequest, CronRequestError, CronSpec, Report, Schedule,
 };
 pub use hook::{
-    cut, delivery_id, kept_headers, verify, HookError, HookRequest, HookSpec, Scheme, VerifyError,
-    VerifyRequest, VerifySpec,
+    accepts, check_keep, cut, delivery_id, kept_headers, verify, AcceptRule, HookError, HookPatch,
+    HookRequest, HookSpec, HookUpdate, Scheme, VerifyError, VerifyRequest, VerifySpec,
 };
 pub use request::{
     valid_lane, Callback, Method, ScheduleRequest, TaskSpec, ValidationError, INBOX,
