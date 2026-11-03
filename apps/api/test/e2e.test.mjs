@@ -438,6 +438,45 @@ describe("api", () => {
     assert.equal(JSON.parse(report.task.watch.last_body).output, "s3://out");
   });
 
+  test("a watch that matches sends its on_match request once", async () => {
+    replies.set("/deploy-status", [{ status: 200, body: JSON.stringify({ status: "SUCCEEDED" }) }]);
+    const { status, json } = await api("POST", "/v1/watches", {
+      body: {
+        url: "https://receiver.example.com/deploy-status",
+        every: "5m",
+        until: { path: "/status", in: ["SUCCEEDED"] },
+        deadline: "1h",
+        on_match: {
+          url: "https://receiver.example.com/smoke-tests",
+          headers: { Authorization: "Bearer ci-token" },
+          body: '{"deploymentId":"123"}',
+          callback_url: "inbox",
+        },
+      },
+    });
+    assert.equal(status, 201, JSON.stringify(json));
+    assert.equal(json.watch.on_match.url, "https://receiver.example.com/smoke-tests");
+    assert.deepEqual(json.watch.on_match.header_names, ["Authorization"]);
+    const done = await settled("proj_a", json.id, ["succeeded", "failed"]);
+    assert.equal(done.watch.reason, "matched");
+    const actionId = done.watch.action_task_id;
+    assert.match(actionId, /^task_[0-9a-f]{20}$/);
+    const action = await settled("proj_a", actionId, ["succeeded", "failed"]);
+    assert.equal(action.status, "succeeded");
+    assert.equal(action.triggered_by, json.id);
+    const sent = received.filter((r) => r.headers["runlater-task-id"] === actionId);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].method, "POST");
+    assert.equal(sent[0].headers.authorization, "Bearer ci-token");
+    assert.equal(sent[0].body, '{"deploymentId":"123"}');
+
+    const bad = await api("POST", "/v1/watches", {
+      body: { url: "https://receiver.example.com/x", every: "5m", until: { status: [200] }, deadline: "1h", on_match: { url: "http://receiver.example.com/" } },
+    });
+    assert.equal(bad.status, 400);
+    assert.equal(bad.json.error.field, "on_match");
+  });
+
   test("a watch ends when the body it needs is over 64 KiB", async () => {
     const big = JSON.stringify({ state: "done", log: "x".repeat(100 * 1024) });
     replies.set("/big-job", [{ status: 200, body: big }]);

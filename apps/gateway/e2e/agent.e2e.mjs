@@ -920,9 +920,9 @@ describe("staging journey, run against the local stack", () => {
       receiverToken,
       timeoutMs: 60_000,
     });
-    // ok + flaky (2) + gone + behind + delayed + its callback + one poll + the captured
-    // task + its wake + the secret's delivery = 11 attempts; canceled tasks, the deleted cron,
-    // the inbox and the refused leak use none.
-    assert.equal(result.attemptsUsed, 11);
+    // ok + flaky (2) + gone + behind + delayed + its callback + one poll + its on_match action
+    // + the captured task + its wake + the secret's delivery = 12 attempts; canceled tasks, the
+    // deleted cron, the inbox and the refused leak use none.
+    assert.equal(result.attemptsUsed, 12);
   });
 });

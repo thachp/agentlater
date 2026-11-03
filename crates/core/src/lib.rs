@@ -27,5 +27,6 @@ pub use secret::{
 pub use task::{Attempt, CancelError, Cancelled, ClaimError, RedriveError, Stale, Status, Task};
 pub use wake::{WakeRequest, WakeRequestError, WakeSpec};
 pub use watch::{
-    judge, next_poll, Poll, PollBody, Until, Watch, WatchRequest, WatchRequestError, WatchSpec,
+    judge, next_poll, OnMatch, Poll, PollBody, Until, Watch, WatchRequest, WatchRequestError,
+    WatchSpec,
 };

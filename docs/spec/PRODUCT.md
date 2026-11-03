@@ -105,7 +105,7 @@ The bridge keeps the agent's keys in `~/.agent-auth`. Losing them loses access t
 | `get_cron` | `name` | cron, with health |
 | `list_crons` | — | crons |
 | `delete_cron` | `name` | cron as it was |
-| `watch_http` | `url`, `every`, `until`, `deadline`, `method?`, `headers?`, `body?`, `callback_url?`, `idempotency_key?` | task, with `watch` |
+| `watch_http` | `url`, `every`, `until`, `deadline`, `method?`, `headers?`, `body?`, `callback_url?`, `idempotency_key?`, `on_match?` | task, with `watch` |
 | `read_inbox` | `after?`, `limit?`, `ack?` | `events`, `acked_seq`, `unread`, `dropped` |
 | `ack_inbox` | `up_to` | `acked_seq`, `unread` |
 | `set_wake` | `url`, `headers?`, `debounce?` | wake |
@@ -185,6 +185,32 @@ A watch hands off waiting on someone else's long-running job: RunLater polls a s
 - **Each poll costs one delivery attempt.** Admission reserves one, like any task; the rest come from the trial as polls run, so a long watch can use up attempts that tasks already scheduled were counting on (they then fail with `budget_exhausted`). Polling every 5 minutes for 6 hours is 73 attempts, most of the trial.
 - **What is kept:** `watch.last_status` and up to 16 KiB of the last response body (`watch.last_body`, in `get_task` and the callback but not in `list_tasks`). Header values and the body are deleted when the watch ends, since they often hold an API token; header names stay.
 - `deadline` is at most 7 days and must fall before the trial ends. A watch cannot be redriven (`409 watch_not_redrivable`); start a new one.
+
+### Acting on a match
+
+`on_match` lets a watch take the next step itself, without waiting for the agent's next turn: when the deploy reports `SUCCEEDED`, start the smoke tests.
+
+```json
+{
+  "url": "https://deploy.example.com/deployments/123", "every": "5m", "deadline": "6h",
+  "until": { "path": "/status", "in": ["SUCCEEDED"] },
+  "on_match": {
+    "url": "https://ci.example.com/smoke-tests",
+    "headers": { "Authorization": "Bearer {{secret:CI_TOKEN}}" },
+    "body": "{\"deploymentId\":\"123\"}",
+    "callback_url": "inbox"
+  },
+  "callback_url": "inbox"
+}
+```
+
+- **What it is.** One request, given when the watch is created: `schedule_http`'s `url`, `method` (POST by default), `headers`, `body`, `max_attempts`, `callback_url` and `capture`. No delay, lane or idempotency key (it goes as soon as the watch matches), and it cannot be a watch, so one watch sets off at most one request and nothing chains. RunLater never makes up a request at match time.
+- **Checked up front.** It is validated with the watch (`400`, field `on_match`, message naming the inner field). A secret it refers to must exist and allow the action's own host; allowing the watched host is not enough.
+- **When it is sent.** Only on `matched`. A timeout, `poll_failing`, `poll_rejected`, `budget_exhausted` or a cancel sends nothing. A cancel asked for while the matching poll was out still records the match, but sends nothing (`watch.action_skipped: "canceled"`).
+- **Once.** The action is queued in the same ledger transaction that records the match, under an id derived from the watch's. Only the poll holding the watch's lease can finish it, so a late or duplicate poll result changes nothing, and queueing the same action twice is a no-op. After that it is an ordinary task: signed, retried, delivered **at least once**, so the receiver should dedupe on `RunLater-Task-Id`.
+- **Budget.** Admission reserves the action's attempt (and its callback's, for a URL) and task slots when the watch is created, alongside the watch's own. A project that cannot afford them gets `402` then, not hours later. Its first attempt is guaranteed, even past the trial, as a callback's is; retries come from the normal budget.
+- **Linking.** The watch shows `watch.on_match` (method, URL, header names, `callback_url`, `capture`) and, once it matched, `watch.action_task_id`; the watch's own report carries both. The action shows `triggered_by`. The watch and its action report separately, each to its own `callback_url`.
+- **What is kept.** As with the watch, the action's header values and body are deleted from the watch when it ends; the action task keeps its own until it finishes, like any task.
 
 ## Buying attempts
 

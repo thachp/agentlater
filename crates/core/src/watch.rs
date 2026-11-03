@@ -46,6 +46,31 @@ pub struct WatchRequest {
     pub callback_url: Option<String>,
     #[serde(default)]
     pub idempotency_key: Option<String>,
+    /// Sent once, as an ordinary task, when `until` matches.
+    #[serde(default)]
+    pub on_match: Option<OnMatch>,
+}
+
+/// The request a watch sends when it matches: `schedule_http`'s fields, less the ones about
+/// when (it goes as soon as the watch matches) and ordering. It can't start another watch,
+/// so a watch triggers one request at most.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OnMatch {
+    pub url: String,
+    #[serde(default)]
+    pub method: Method,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub max_attempts: Option<u32>,
+    /// Where the action reports when it finishes, or `"inbox"`.
+    #[serde(default)]
+    pub callback_url: Option<String>,
+    #[serde(default)]
+    pub capture: bool,
 }
 
 /// When a poll's response counts as done. With `path` and `in`, a 2xx response whose JSON
@@ -75,6 +100,8 @@ pub struct Watch {
 pub struct WatchSpec {
     pub request: TaskSpec,
     pub watch: Watch,
+    /// The task to queue when the watch matches. Its `run_at_ms` is meaningless here.
+    pub on_match: Option<TaskSpec>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,6 +112,7 @@ pub enum WatchRequestError {
     DeadlineRange,
     Until(&'static str),
     Request(ValidationError),
+    OnMatch(ValidationError),
 }
 
 impl WatchRequestError {
@@ -94,6 +122,7 @@ impl WatchRequestError {
             Self::Deadline | Self::DeadlineRange => "deadline",
             Self::Until(_) => "until",
             Self::Request(e) => e.field(),
+            Self::OnMatch(_) => "on_match",
         }
     }
 }
@@ -117,6 +146,17 @@ impl fmt::Display for WatchRequestError {
             }
             Self::Until(why) => write!(f, "until: {why}"),
             Self::Request(e) => e.fmt(f),
+            Self::OnMatch(e) => {
+                // Some messages already start with their field; don't say it twice.
+                let (field, message) = (e.field(), e.to_string());
+                match message
+                    .strip_prefix(field)
+                    .and_then(|m| m.strip_prefix(": "))
+                {
+                    Some(rest) => write!(f, "on_match.{field}: {rest}"),
+                    None => write!(f, "on_match.{field}: {message}"),
+                }
+            }
         }
     }
 }
@@ -134,6 +174,24 @@ impl WatchRequest {
             return Err(WatchRequestError::DeadlineRange);
         }
         self.until.check().map_err(WatchRequestError::Until)?;
+        let on_match = self
+            .on_match
+            .clone()
+            .map(|a| {
+                ScheduleRequest {
+                    url: a.url,
+                    method: a.method,
+                    headers: a.headers,
+                    body: a.body,
+                    max_attempts: a.max_attempts,
+                    callback_url: a.callback_url,
+                    capture: a.capture,
+                    ..Default::default()
+                }
+                .validate(now_ms)
+            })
+            .transpose()
+            .map_err(WatchRequestError::OnMatch)?;
 
         let mut request = ScheduleRequest {
             url: self.url.clone(),
@@ -147,7 +205,11 @@ impl WatchRequest {
         .validate(now_ms)
         .map_err(WatchRequestError::Request)?;
         request.max_attempts = 1;
-        request.fingerprint = self.fingerprint(&request.destination, request.callback.as_ref());
+        request.fingerprint = self.fingerprint(
+            &request.destination,
+            request.callback.as_ref(),
+            on_match.as_ref(),
+        );
         Ok(WatchSpec {
             request,
             watch: Watch {
@@ -155,18 +217,26 @@ impl WatchRequest {
                 deadline_ms: now_ms.saturating_add(deadline),
                 until: self.until,
             },
+            on_match,
         })
     }
 
     /// Like `schedule_http`'s: normalized URLs and lowercased header names, and the
-    /// *submitted* durations, so a retried call replays.
-    fn fingerprint(&self, destination: &Destination, callback: Option<&Callback>) -> String {
-        let headers: BTreeMap<_, _> = self
-            .headers
-            .iter()
-            .map(|(k, v)| (k.to_ascii_lowercase(), v))
-            .collect();
-        let canonical = serde_json::to_vec(&(
+    /// *submitted* durations, so a retried call replays. `on_match` counts as validated, so
+    /// spelling out a default or a header name's case doesn't make it a different request.
+    fn fingerprint(
+        &self,
+        destination: &Destination,
+        callback: Option<&Callback>,
+        on_match: Option<&TaskSpec>,
+    ) -> String {
+        let lowercase = |headers: &mut dyn Iterator<Item = (&String, &String)>| -> BTreeMap<_, _> {
+            headers
+                .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
+                .collect()
+        };
+        let headers = lowercase(&mut self.headers.iter());
+        let watch = (
             "watch_http/v1",
             destination.as_str(),
             self.method,
@@ -176,7 +246,23 @@ impl WatchRequest {
             &self.until,
             &self.deadline,
             callback.map(Callback::as_str),
-        ))
+        );
+        // Watches without on_match keep the fingerprint they always had.
+        let canonical = match on_match {
+            None => serde_json::to_vec(&watch),
+            Some(a) => serde_json::to_vec(&(
+                watch,
+                (
+                    a.destination.as_str(),
+                    a.method,
+                    lowercase(&mut a.headers.iter().map(|(k, v)| (k, v))),
+                    &a.body,
+                    a.max_attempts,
+                    a.callback.as_ref().map(Callback::as_str),
+                    a.capture,
+                ),
+            )),
+        }
         .expect("plain data always serializes");
         hex::encode(Sha256::digest(canonical))
     }
@@ -421,6 +507,98 @@ mod tests {
         let mut r = req();
         r.body = Some("x".into());
         assert_eq!(r.validate(T0).unwrap_err().field(), "body");
+    }
+
+    fn with_on_match(action: Value) -> WatchRequest {
+        let mut r = req();
+        r.on_match = Some(serde_json::from_value(action).unwrap());
+        r
+    }
+
+    #[test]
+    fn validates_on_match_as_an_ordinary_request() {
+        assert_eq!(req().validate(T0).unwrap().on_match, None);
+        let spec = with_on_match(json!({
+            "url": "https://ci.example.com/smoke",
+            "headers": { "Authorization": "{{secret:CI_TOKEN}}" },
+            "body": "{\"deployment\":1}",
+            "callback_url": "inbox",
+            "capture": true,
+        }))
+        .validate(T0)
+        .unwrap();
+        let action = spec.on_match.unwrap();
+        assert_eq!(action.method, Method::Post, "POST, as schedule_http");
+        assert_eq!(action.destination.as_str(), "https://ci.example.com/smoke");
+        assert_eq!(action.callback, Some(Callback::Inbox));
+        assert!(action.capture);
+        assert_eq!(
+            spec.request.callback, None,
+            "the watch's own callback is apart"
+        );
+    }
+
+    #[test]
+    fn rejects_bad_on_match() {
+        for action in [
+            json!({ "url": "http://ci.example.com/" }),
+            json!({ "url": "https://ci.example.com/", "method": "GET", "body": "x" }),
+            json!({ "url": "https://ci.example.com/", "body": "{{secret:CI_TOKEN}}" }),
+            json!({ "url": "https://ci.example.com/", "max_attempts": 0 }),
+            json!({ "url": "https://ci.example.com/", "callback_url": "http://x.example.com/" }),
+        ] {
+            let err = with_on_match(action.clone()).validate(T0).unwrap_err();
+            assert_eq!(err.field(), "on_match", "{action}");
+            let message = err.to_string();
+            assert!(message.starts_with("on_match."), "{message}");
+            let inner = message.split_once(": ").unwrap().1;
+            assert!(
+                !inner.starts_with("callback_url:") && !inner.starts_with("body:"),
+                "{message}"
+            );
+        }
+        // Timing, ordering and nesting are not on_match's to set.
+        for extra in [
+            "delay",
+            "run_at_ms",
+            "lane",
+            "idempotency_key",
+            "on_match",
+            "every",
+        ] {
+            let mut action = json!({ "url": "https://ci.example.com/" });
+            action[extra] = json!("x");
+            assert!(
+                serde_json::from_value::<OnMatch>(action).is_err(),
+                "{extra}"
+            );
+        }
+    }
+
+    #[test]
+    fn on_match_is_part_of_the_fingerprint() {
+        let plain = req().validate(T0).unwrap().request.fingerprint;
+        let a = with_on_match(json!({ "url": "https://ci.example.com/a" }));
+        let b = with_on_match(json!({ "url": "https://ci.example.com/b" }));
+        let fa = a.clone().validate(T0).unwrap().request.fingerprint;
+        assert_ne!(plain, fa);
+        assert_ne!(fa, b.validate(T0).unwrap().request.fingerprint);
+        assert_eq!(fa, a.validate(T0 + 1_000).unwrap().request.fingerprint);
+        // The same action, spelled out differently, is the same request.
+        let spelled = with_on_match(json!({
+            "url": "https://CI.example.com/a",
+            "method": "POST",
+            "max_attempts": 5,
+        }));
+        assert_eq!(fa, spelled.validate(T0).unwrap().request.fingerprint);
+        let header = |name: &str| {
+            with_on_match(json!({ "url": "https://ci.example.com/a", "headers": { name: "x" } }))
+                .validate(T0)
+                .unwrap()
+                .request
+                .fingerprint
+        };
+        assert_eq!(header("Authorization"), header("authorization"));
     }
 
     #[test]

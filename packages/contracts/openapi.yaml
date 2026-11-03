@@ -139,7 +139,9 @@ paths:
       description: >
         Starts a watch: a task whose attempts poll `url` (now, then every `every`) until the
         response matches `until`, the deadline passes, or three polls in a row fail. Each poll
-        costs one delivery attempt. 201 created, 200 for an idempotent replay. Scope: schedule.
+        costs one delivery attempt. With on_match, a match also queues that request as an
+        ordinary task (its attempt, and its callback's, reserved now). 201 created, 200 for an
+        idempotent replay. Scope: schedule.
       requestBody:
         required: true
         content:
@@ -392,6 +394,32 @@ components:
         deadline: { type: string, pattern: "^[0-9]{1,7}[smhd]$", description: "At least one interval, at most 7d, and before the trial ends." }
         callback_url: { type: string, maxLength: 2048, description: 'https:// URL, or "inbox".' }
         idempotency_key: { type: string, pattern: "^[A-Za-z0-9_-]{1,128}$" }
+        on_match: { $ref: "#/components/schemas/OnMatch" }
+    OnMatch:
+      type: object
+      additionalProperties: false
+      required: [url]
+      description: >
+        Sent once, as an ordinary task (triggered_by the watch), when until matches; never on
+        a timeout, failure or cancel. Same rules as ScheduleRequest, without timing, lanes or
+        idempotency keys. A secret it refers to must allow its own host.
+      properties:
+        url: { type: string, maxLength: 2048 }
+        method: { $ref: "#/components/schemas/Method", default: POST }
+        headers: { type: object, maxProperties: 32, additionalProperties: { type: string } }
+        body: { type: string, maxLength: 65536 }
+        max_attempts: { type: integer, minimum: 1, maximum: 5, default: 5 }
+        callback_url: { type: string, maxLength: 2048, description: 'https:// URL, or "inbox".' }
+        capture: { type: boolean, default: false }
+    OnMatchView:
+      type: object
+      required: [method, url, header_names, callback_url, capture]
+      properties:
+        method: { $ref: "#/components/schemas/Method" }
+        url: { type: string }
+        header_names: { type: array, items: { type: string } }
+        callback_url: { type: [string, "null"] }
+        capture: { type: boolean }
     Until:
       type: object
       additionalProperties: false
@@ -404,7 +432,7 @@ components:
         status: { type: array, minItems: 1, maxItems: 20, items: { type: integer, minimum: 100, maximum: 599 } }
     Watch:
       type: object
-      required: [every_ms, deadline_ms, until, consecutive_errors, reason, matched, last_status, last_body]
+      required: [every_ms, deadline_ms, until, consecutive_errors, reason, matched, last_status, last_body, on_match, action_task_id, action_skipped]
       properties:
         every_ms: { type: integer }
         deadline_ms: { type: integer }
@@ -419,6 +447,11 @@ components:
         matched: { description: The value that satisfied until (the status code for a status-only condition). }
         last_status: { type: [integer, "null"] }
         last_body: { type: [string, "null"], description: "Up to 16 KiB of the last poll's response body. Null in lists." }
+        on_match:
+          oneOf: [{ $ref: "#/components/schemas/OnMatchView" }, { type: "null" }]
+          description: The request sent on a match; header values and body are not shown.
+        action_task_id: { type: [string, "null"], description: "The task on_match queued, once the watch matched." }
+        action_skipped: { type: [string, "null"], description: 'Why a match sent no action: "canceled" (cancel was asked for during the matching poll).' }
     CronRequest:
       type: object
       additionalProperties: false
@@ -535,7 +568,7 @@ components:
         http_status: { type: [integer, "null"] }
     Task:
       type: object
-      required: [id, status, method, url, header_names, body_bytes, run_at_ms, next_attempt_ms, max_attempts, attempt_count, idempotency_key, callback_url, callback_task_id, callback_for, inbox_seq, capture, response, wake_call, failure, report_failures_only, lane, cron, alert_for, watch, created_ms, updated_ms, finished_ms]
+      required: [id, status, method, url, header_names, body_bytes, run_at_ms, next_attempt_ms, max_attempts, attempt_count, idempotency_key, callback_url, callback_task_id, callback_for, inbox_seq, capture, response, wake_call, failure, report_failures_only, lane, cron, alert_for, watch, triggered_by, created_ms, updated_ms, finished_ms]
       description: Header values and the body are never returned; they may hold credentials.
       properties:
         id: { type: string }
@@ -566,6 +599,7 @@ components:
         watch:
           oneOf: [{ $ref: "#/components/schemas/Watch" }, { type: "null" }]
           description: Set on watches.
+        triggered_by: { type: [string, "null"], description: "Set on a watch's on_match action: the watch that sent it." }
         created_ms: { type: integer }
         updated_ms: { type: integer }
         finished_ms: { type: [integer, "null"] }
