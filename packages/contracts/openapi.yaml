@@ -827,6 +827,7 @@ components:
       items:
         type: object
         additionalProperties: false
+        minProperties: 1
         properties:
           headers:
             type: object

@@ -377,10 +377,8 @@ impl TaskLedger {
             }
         }
         let keep = hook.keep_headers().map_err(failed)?;
-        let matched = hook
-            .accept()
-            .map_err(failed)?
-            .is_none_or(|rules| accepts(&rules, &headers, &raw));
+        let rules = hook.accept().map_err(failed)?;
+        let matches = || rules.as_ref().is_none_or(|r| accepts(r, &headers, &raw));
         let text = String::from_utf8_lossy(&raw);
         let body = cut(&text, HOOK_BODY_KEPT_BYTES);
         let received = Received {
@@ -389,10 +387,12 @@ impl TaskLedger {
             headers: hook_headers(check.as_ref(), &keep, &headers),
             body,
             body_bytes: raw.len(),
-            matched,
             truncated: body.len() < text.len(),
         };
-        match ledger.receive_hook(&hook, received, t).map_err(failed)? {
+        match ledger
+            .receive_hook(&hook, received, matches, t)
+            .map_err(failed)?
+        {
             HookOutcome::Accepted(_) | HookOutcome::Filtered => hook_answer(202, None, None),
             HookOutcome::Duplicate => hook_answer(200, None, None),
             HookOutcome::Refused {

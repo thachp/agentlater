@@ -114,8 +114,6 @@ pub struct Received<'r> {
     /// At most `HOOK_BODY_KEPT_BYTES`, as text.
     pub body: &'r str,
     pub body_bytes: usize,
-    /// Whether the request matched the hook's `accept` rules (true if it has none).
-    pub matched: bool,
     /// Whether `body` is less than the whole request. Not `body.len() < body_bytes`: bytes
     /// that aren't UTF-8 become three bytes each as text.
     pub truncated: bool,
@@ -339,10 +337,15 @@ impl<D: Db> Ledger<'_, D> {
 
     /// Writes a request the API accepted (signature checked, if the hook has one) as an inbox
     /// event, unless the project is over its limits or the sender is retrying.
+    ///
+    /// `matches` says whether the request passes the hook's `accept` rules. It is only asked
+    /// once the request is within the hook's rate limit, so matching (which may parse the body)
+    /// costs nothing for a flood that is turned away anyway.
     pub fn receive_hook(
         &self,
         hook: &HookRow,
         r: Received<'_>,
+        matches: impl FnOnce() -> bool,
         now: i64,
     ) -> Result<HookOutcome, DbError> {
         let project = self
@@ -365,19 +368,21 @@ impl<D: Db> Ledger<'_, D> {
         if tat - now > allowance {
             return refuse(429, "rate_limited", Some(tat - now - allowance));
         }
-        self.db.exec(
-            "UPDATE hooks SET rate_tat_ms = ? WHERE name = ?",
-            vec![(tat + HOOK_INTERVAL_MS).into(), hook.name.as_str().into()],
-        )?;
-        // Not what the agent asked for: answered like the rest, so the sender doesn't retry and
-        // a prober can't tell, but nothing is written or woken, and no day is used.
-        if !r.matched {
+        // Not what the agent asked for: answered 202 like the rest, so the sender doesn't retry,
+        // but nothing is written or woken, and no day is used. Nor is the rate limit: a busy
+        // sender's noise must not crowd out the one request that matters. (The gateway's limits
+        // per IP and per project still bound it.)
+        if !matches() {
             self.db.exec(
                 "UPDATE hooks SET filtered = filtered + 1 WHERE name = ?",
                 vec![hook.name.as_str().into()],
             )?;
             return Ok(HookOutcome::Filtered);
         }
+        self.db.exec(
+            "UPDATE hooks SET rate_tat_ms = ? WHERE name = ?",
+            vec![(tat + HOOK_INTERVAL_MS).into(), hook.name.as_str().into()],
+        )?;
 
         if let Some(id) = &r.delivery_id {
             self.db.exec(
@@ -519,7 +524,6 @@ mod tests {
             headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
             body: r#"{"action":"completed"}"#,
             body_bytes: 22,
-            matched: true,
             truncated: false,
         }
     }
@@ -531,7 +535,8 @@ mod tests {
         now: i64,
     ) -> HookOutcome {
         let row = l.hook_for_token(token).unwrap().expect("a hook");
-        l.receive_hook(&row, received(delivery_id), now).unwrap()
+        l.receive_hook(&row, received(delivery_id), || true, now)
+            .unwrap()
     }
 
     fn events(l: &Ledger<'_, Memory>) -> Vec<serde_json::Value> {
@@ -882,7 +887,7 @@ mod tests {
             body_bytes: 10,
             ..received(None)
         };
-        l.receive_hook(&row, r, T0).unwrap();
+        l.receive_hook(&row, r, || true, T0).unwrap();
         assert_eq!(events(&l)[0]["request"]["truncated"], true);
     }
 
@@ -908,12 +913,8 @@ mod tests {
         .unwrap();
         filtered_hook(&l);
         let row = l.hook_for_token(TOKEN).unwrap().unwrap();
-        let noise = Received {
-            matched: false,
-            ..received(None)
-        };
         assert_eq!(
-            l.receive_hook(&row, noise, T0).unwrap(),
+            l.receive_hook(&row, received(None), || false, T0).unwrap(),
             HookOutcome::Filtered
         );
         assert!(events(&l).is_empty(), "nothing written");
@@ -931,14 +932,37 @@ mod tests {
             h.accept.as_ref().unwrap()[0].headers["x-github-event"],
             ["workflow_run"]
         );
-        // It still spends the hook's rate limit.
+        // Nor does it spend the hook's rate limit, so noise can't crowd out a real event.
         let tat: Vec<Counts> = db
             .query(
                 "SELECT rate_tat_ms AS total, 0 AS waiting FROM hooks",
                 vec![],
             )
             .unwrap();
-        assert_eq!(tat[0].total, T0 + HOOK_INTERVAL_MS);
+        assert_eq!(tat[0].total, 0);
+        // A flood over the limit is turned away before the filter is even asked.
+        db.exec(
+            "UPDATE hooks SET rate_tat_ms = ?",
+            vec![(T0 + 60 * HOOK_INTERVAL_MS).into()],
+        )
+        .unwrap();
+        let row = l.hook_for_token(TOKEN).unwrap().unwrap();
+        let outcome = l
+            .receive_hook(
+                &row,
+                received(None),
+                || panic!("asked before the rate limit"),
+                T0,
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            HookOutcome::Refused {
+                reason: "rate_limited",
+                ..
+            }
+        ));
+        db.exec("UPDATE hooks SET rate_tat_ms = 0", vec![]).unwrap();
         assert!(matches!(
             send(&l, TOKEN, None, T0),
             HookOutcome::Accepted(_)

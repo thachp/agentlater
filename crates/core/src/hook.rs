@@ -119,8 +119,9 @@ pub struct HookUpdate {
     pub verify: Option<Option<VerifyRequest>>,
     #[serde(default, deserialize_with = "present")]
     pub accept: Option<Option<Vec<AcceptRule>>>,
-    #[serde(default)]
-    pub keep_headers: Option<Vec<String>>,
+    /// `null` keeps only the headers always kept, as `[]` does.
+    #[serde(default, deserialize_with = "present")]
+    pub keep_headers: Option<Option<Vec<String>>>,
 }
 
 /// Tells a field given as `null` (`Some(None)`) from one left out (`None`).
@@ -332,7 +333,7 @@ impl HookUpdate {
                 .accept
                 .map(|a| a.map(check_accept).transpose())
                 .transpose()?,
-            keep_headers: self.keep_headers,
+            keep_headers: self.keep_headers.map(Option::unwrap_or_default),
         })
     }
 }
@@ -392,6 +393,12 @@ fn check_accept(rules: Vec<AcceptRule>) -> Result<Vec<AcceptRule>, HookError> {
                 {
                     return Err(bad("each header lists 1-20 values of at most 256 bytes"));
                 }
+                // Request header values are compared trimmed, so an untrimmed one never matches.
+                if values.iter().any(|v| v.trim() != v || v.is_empty()) {
+                    return Err(bad(
+                        "header values can't be empty or start or end with spaces",
+                    ));
+                }
                 if headers.insert(name.to_ascii_lowercase(), values).is_some() {
                     return Err(HookError::Accept(format!("header {name:?} is given twice")));
                 }
@@ -411,25 +418,29 @@ fn check_accept(rules: Vec<AcceptRule>) -> Result<Vec<AcceptRule>, HookError> {
 
 /// Whether a request matches one of `rules`: every header listed has one of its values, and
 /// a `path` finds one of `in` in the body, read as JSON.
+///
+/// Headers are checked first, and the body is parsed at most once, only if a rule whose
+/// headers match needs it: a sender of large bodies can't make every rule parse them again.
 pub fn accepts(rules: &[AcceptRule], headers: &[(String, String)], body: &[u8]) -> bool {
-    let text = std::str::from_utf8(body).ok();
+    let mut doc: Option<Option<Value>> = None;
     rules.iter().any(|rule| {
         let headers_match = rule.headers.iter().all(|(name, values)| {
             header(headers, name).is_some_and(|v| values.iter().any(|want| want == v))
         });
-        let body_matches = match (&rule.path, &rule.one_of) {
-            (Some(path), Some(values)) => {
-                let until = Until {
-                    path: Some(path.clone()),
-                    one_of: Some(values.clone()),
-                    status: None,
-                };
-                // Any 2xx status lets `until` look at the body alone.
-                text.is_some_and(|t| until.matches(200, Some(t)).is_some())
-            }
-            _ => true,
+        if !headers_match {
+            return false;
+        }
+        if rule.path.is_none() {
+            return true;
+        }
+        let doc = doc.get_or_insert_with(|| serde_json::from_slice(body).ok());
+        let until = Until {
+            path: rule.path.clone(),
+            one_of: rule.one_of.clone(),
+            status: None,
         };
-        headers_match && body_matches
+        doc.as_ref()
+            .is_some_and(|d| until.matches_document(d).is_some())
     })
 }
 
@@ -981,6 +992,7 @@ mod tests {
             json!([{ "path": "/a", "in": [{ "nested": 1 }] }]),
             json!([{ "headers": { "bad name": ["x"] } }]),
             json!([{ "headers": { "x-a": [] } }]),
+            json!([{ "headers": { "x-a": [" push"] } }]),
             json!([{ "headers": { "x-a": ["x".repeat(257)] } }]),
             json!([{ "headers": { "X-A": ["1"], "x-a": ["2"] } }]),
             json!([{ "headers": { "a": ["1"], "b": ["1"], "c": ["1"], "d": ["1"], "e": ["1"], "f": ["1"] } }]),

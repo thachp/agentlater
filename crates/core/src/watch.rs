@@ -311,18 +311,25 @@ impl Until {
             return None;
         }
         match (&self.path, &self.one_of) {
-            (Some(path), Some(values)) => {
+            (Some(_), Some(_)) => {
                 let doc: Value = serde_json::from_str(body?).ok()?;
-                let found = doc.pointer(path)?;
-                // Numbers compare by value, so 3 matches 3.0.
-                let same = |v: &Value| match (v.as_f64(), found.as_f64()) {
-                    (Some(a), Some(b)) => a == b,
-                    _ => v == found,
-                };
-                values.iter().any(same).then(|| found.clone())
+                self.matches_document(&doc)
             }
             _ => Some(Value::from(status)),
         }
+    }
+
+    /// For `path` + `in`: the value at `path` in an already parsed document, if it is one of
+    /// `in`.
+    pub(crate) fn matches_document(&self, doc: &Value) -> Option<Value> {
+        let (path, values) = (self.path.as_ref()?, self.one_of.as_ref()?);
+        let found = doc.pointer(path)?;
+        // Numbers compare by value, so 3 matches 3.0.
+        let same = |v: &Value| match (v.as_f64(), found.as_f64()) {
+            (Some(a), Some(b)) => a == b,
+            _ => v == found,
+        };
+        values.iter().any(same).then(|| found.clone())
     }
 }
 

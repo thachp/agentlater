@@ -50,11 +50,11 @@ Within one rule, **every** part given must hold:
 
 ### What happens to a request that's filtered out
 
-- **It gets the same `202` as a kept request.** If the sender saw an error it would retry, and a different status would tell anyone probing the URL what the filter is.
+- **It gets the same `202` as a kept request.** If the sender saw an error it would retry. (Once a cap is reached, a matching request gets `429` while a filtered one still gets `202`, so someone holding an unverified hook's URL could learn its filter by probing. On an unverified hook a filter is no protection anyway.)
 - **Nothing is written:** no inbox event, no wake, and it doesn't count toward any daily cap.
-- **It still counts against the hook's rate limit (60 a minute)**, because the request did reach RunLater.
+- **It doesn't use the hook's rate limit (60 a minute) either.** A busy repo sends bursts of events, and noise must not get the one request that matters refused. A request is only matched once it is within the limit, so a flood turned away costs no matching; the gateway's limits per IP and per project bound the rest.
 - **`list_hooks` counts it** under `filtered`, so an agent can see that the hook works but nothing has matched yet.
-- **Order:** signature, then rate limit, then filter, then dedupe, then the daily caps. A forged request is still refused with `401` before any filter runs. A filtered request records no delivery id, so a later retry of it is checked again from the start.
+- **Order:** signature, then the rate-limit check, then filter, then dedupe, then the daily caps. A forged request is still refused with `401` before any filter runs. A filtered request records no delivery id, so a later retry of it is checked again from the start.
 
 ### Changing a hook without changing its URL: `update_hook`
 
@@ -79,9 +79,9 @@ Within one rule, **every** part given must hold:
 | --- | --- | --- |
 | Match language | `headers` plus watch-style `path` + `in` | Agents already know `until`, and the matcher exists and is tested. Regexes and expressions are slow and easy to get wrong, and they invite a templating language. |
 | How rules combine | AND within a rule, OR across up to 5 rules | That covers "failed workflow runs, or review requests" without nesting. |
-| Answer to the sender when filtered | `202` | A non-2xx makes senders retry and then disable the webhook. A distinct 2xx would reveal the filter to anyone probing. |
+| Answer to the sender when filtered | `202` | A non-2xx makes senders retry and then disable the webhook. |
 | Filter before or after the signature | After | A forged request should get `401` whatever its content. That keeps the `refused` count honest, and the filter can't be used to find out whether a signature was valid. |
-| Daily cap | Filtered requests don't count | The cap protects the inbox, and a filtered request never reaches it. The per-hook rate limit still bounds the work. |
+| Daily cap and rate limit | Filtered requests use neither | The cap protects the inbox, which a filtered request never reaches; the rate limit must not let noise crowd out a match. The gateway's per-IP and per-project limits bound the work. |
 | Unverified hooks | Filters allowed, but they add no security | Anyone with the URL can send whatever matches, so the docs say this and still recommend `verify`. |
 | Changing a filter | `update_hook`, keeping the URL | Re-registering a webhook at every sender because a filter changed would push agents to skip filters. |
 
@@ -95,7 +95,7 @@ Within one rule, **every** part given must hold:
 
 1. **`update_hook` is its own capability.** "Same name gives a new URL" stays the way to rotate a leaked one.
 2. **5 rules of 5 headers** each.
-3. **Filtered requests use no daily cap**; the per-hook rate limit bounds them.
+3. **Filtered requests use no daily cap.** Review found they shouldn't use the per-hook rate limit either (noise could crowd out a match), so they don't; matching is cheap (headers first, the body parsed at most once) and runs only within the limit.
 
 ## Work involved
 
