@@ -2,7 +2,15 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { Code } from "../../components/Code";
 import { GATEWAY_URL } from "../../lib/site";
-import { mcpClaudeCode, mcpConfig, mcpRemoteConfig, sdkExample } from "../../lib/snippets";
+import {
+  mcpChatGpt,
+  mcpClaudeCode,
+  mcpCodex,
+  mcpConfig,
+  mcpGrok,
+  mcpRemoteConfig,
+  sdkExample,
+} from "../../lib/snippets";
 
 export const metadata: Metadata = { title: "Quickstart" };
 
@@ -42,7 +50,14 @@ export default function Quickstart() {
         that connection gets its own project and free trial, and the client keeps it signed in.
       </p>
       <Code label="Claude Code">{mcpClaudeCode}</Code>
-      <Code label="clients that take a JSON config">{mcpRemoteConfig}</Code>
+      <Code label="ChatGPT (custom connector, developer mode)">{mcpChatGpt}</Code>
+      <Code label="OpenAI Codex">{mcpCodex}</Code>
+      <Code label="Grok">{mcpGrok}</Code>
+      <Code label="clients that take a JSON config (Cursor, Claude Desktop and others)">{mcpRemoteConfig}</Code>
+      <p>
+        Menu names move around between releases; what every client needs is the URL above, with OAuth sign-in. Custom
+        connectors may depend on your plan, and on a workspace an admin may have to allow them.
+      </p>
       <p>
         Each RunLater capability is a tool: <code>create_project</code>, then <code>schedule_http</code>,{" "}
         <code>create_cron</code> or <code>watch_http</code>, and later <code>get_task</code>. If the connection is
