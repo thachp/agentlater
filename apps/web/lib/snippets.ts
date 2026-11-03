@@ -60,29 +60,64 @@ const task = await run("schedule_http", {
 const status = await run("get_task", { task_id: task.id });
 console.log(status.status, status.attempts);`;
 
+/** The landing page's short version of sdkExample. */
+export const sdkShort = `import { AgentAuthClient } from "@auth/agent";
+
+const client = new AgentAuthClient({
+  storage, // persistent: losing the keys loses the project
+  directoryUrl: null,
+  allowDirectDiscovery: true,
+});
+const { agentId } = await client.connectAgent({
+  provider: "${GATEWAY_URL}",
+  mode: "autonomous",
+  name: "my agent",
+  // the full list is in the quickstart
+  capabilities: ["create_project", "schedule_http", "watch_http", "read_inbox"],
+});
+const run = (capability, args = {}) =>
+  client.executeCapability({ agentId, capability, arguments: args });
+await run("create_project");`;
+
+export const agentPrompt = `Use RunLater to watch https://deploy.example.com/deployments/123
+every 5 minutes. When status is SUCCEEDED, start the smoke tests at
+https://ci.example.com/smoke and put the result in the inbox.
+Next session, read the inbox first.`;
+
+export const watchActCall = `watch_http({
+  url: "https://deploy.example.com/deployments/123",
+  every: "5m",
+  deadline: "6h",
+  until: { path: "/status", in: ["SUCCEEDED"] },
+  on_match: {
+    url: "https://ci.example.com/smoke",
+    headers: { "Authorization": "Bearer {{secret:CI_TOKEN}}" },
+    callback_url: "inbox"
+  }
+})`;
+
+export const hookCall = `create_hook({
+  name: "ci-failures",
+  verify: { scheme: "github", secret: "…" },
+  accept: [{
+    headers: { "X-GitHub-Event": ["workflow_run"] },
+    path: "/workflow_run/conclusion",
+    in: ["failure"]
+  }]
+})
+// → { url: "https://hooks.runlater.io/h/prj_…/hk_…" }`;
+
+export const inboxCall = `// next session
+get_project()  // → { inbox_unread: 2, … }
+read_inbox({ ack: true })
+// → [{ event: "task.finished", task: { status: "succeeded",
+//      response: { status: 200, body: "{\\"passed\\":42}" } } },
+//    { event: "hook.received", hook: "ci-failures", … }]`;
+
 export const scheduleCall = `schedule_http({
   url: "https://example.com/hooks/reminder",
   body: "{\\"remind\\":\\"invoice #42\\"}",
   delay: "24h"
-})`;
-
-export const delayCall = `schedule_http({
-  url: "https://example.com/follow-up",
-  delay: "24h",
-  idempotency_key: "follow-up-42"
-})`;
-
-export const laneCall = `schedule_http({
-  url: "https://example.com/sync",
-  lane: "user-42",
-  callback_url: "https://example.com/done"
-})`;
-
-export const cronCall = `create_cron({
-  name: "nightly-report",
-  schedule: "0 6 * * *",
-  url: "https://example.com/report",
-  alert_url: "https://example.com/alert"
 })`;
 
 export const taskResult = `{
