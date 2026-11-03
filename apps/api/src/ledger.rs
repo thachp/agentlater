@@ -1545,10 +1545,11 @@ impl<'a, D: Db> Ledger<'a, D> {
 
         // A callback reports on work already done, so it gets one try even when the trial
         // has run out, but no retries.
-        // So does a watch's action: admission reserved its first attempt.
-        let mut last_try =
-            (row.callback_for.is_some() || row.alert_for.is_some() || row.triggered_by.is_some())
-                && task.run_attempts == 0;
+        // So does a watch's action, once: admission reserved its first attempt, and a redrive
+        // of it is admitted like any task's.
+        let mut last_try = ((row.callback_for.is_some() || row.alert_for.is_some())
+            && task.run_attempts == 0)
+            || (row.triggered_by.is_some() && task.total_attempts == 0);
         // A wake was never admitted, so it may only spend attempts no waiting task was promised.
         // With nothing else waiting it gets one more try even past the budget; otherwise it
         // stands down (canceled, not failed: the wake itself is fine). And a wake due after the
@@ -2935,10 +2936,11 @@ impl<'a, D: Db> Ledger<'a, D> {
             .on_match()?
             .ok_or_else(|| DbError(format!("task {} has no action", row.id)))?;
         if task.status == Status::Succeeded {
-            let mut state = self
+            // The poll just stored its verdict; build on that, not on `row`.
+            let current = self
                 .task_row(&row.id)?
-                .ok_or_else(|| DbError(format!("task {} vanished", row.id)))?
-                .watch_state()?;
+                .ok_or_else(|| DbError(format!("task {} vanished", row.id)))?;
+            let mut state = current.watch_state()?;
             if task.cancel_requested {
                 // Asked to stop while the matching poll was out: the match is recorded, but
                 // the agent no longer wants what follows.
@@ -2973,7 +2975,7 @@ impl<'a, D: Db> Ledger<'a, D> {
                 )?;
                 state.action_task_id = Some(id);
             }
-            self.store_watch(&row.id, row.watch_errors, &state)?;
+            self.store_watch(&row.id, current.watch_errors, &state)?;
         }
         let cleared = StoredAction {
             headers: action
@@ -6230,14 +6232,16 @@ mod tests {
         );
         assert_eq!(w.action_task_id, None);
 
-        assert_eq!(poll(&l, "w1", http(200), RUNNING, T0), Status::Scheduled);
+        assert_eq!(poll(&l, "w1", http(503), None, T0), Status::Scheduled);
         assert!(actions_of(&db, "w1").is_empty(), "not until it matches");
         assert_eq!(
             poll(&l, "w1", http(200), DONE, T0 + 5 * MIN),
             Status::Succeeded
         );
 
-        let action_id = watch_view(&l, "w1").action_task_id.expect("action queued");
+        let w = watch_view(&l, "w1");
+        assert_eq!(w.consecutive_errors, 0, "the match reset the count");
+        let action_id = w.action_task_id.expect("action queued");
         assert_eq!(actions_of(&db, "w1"), std::slice::from_ref(&action_id));
         let a = l.task(&action_id).unwrap();
         assert_eq!(
@@ -6441,6 +6445,26 @@ mod tests {
             l.finish(&id, sent.fence, http(503), T0, 0.0).unwrap(),
             Some(Status::Failed),
             "one try past the budget, no retries"
+        );
+        // A redrive is admitted like any task's, and earns no second free try.
+        assert_eq!(l.redrive(&id, T0).unwrap_err().code, "budget_exhausted");
+        db.exec(
+            "UPDATE project SET attempt_budget = attempts_used + 1",
+            vec![],
+        )
+        .unwrap();
+        l.redrive(&id, T0).unwrap();
+        db.exec("UPDATE project SET attempts_used = attempt_budget", vec![])
+            .unwrap();
+        let d = l
+            .publish_due(P, T0)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.task_id == id)
+            .unwrap();
+        assert_eq!(
+            l.claim(&d.task_id, d.generation, T0).unwrap(),
+            Claimed::Skip("budget_exhausted")
         );
     }
 

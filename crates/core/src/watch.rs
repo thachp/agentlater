@@ -146,7 +146,17 @@ impl fmt::Display for WatchRequestError {
             }
             Self::Until(why) => write!(f, "until: {why}"),
             Self::Request(e) => e.fmt(f),
-            Self::OnMatch(e) => write!(f, "on_match.{}: {e}", e.field()),
+            Self::OnMatch(e) => {
+                // Some messages already start with their field; don't say it twice.
+                let (field, message) = (e.field(), e.to_string());
+                match message
+                    .strip_prefix(field)
+                    .and_then(|m| m.strip_prefix(": "))
+                {
+                    Some(rest) => write!(f, "on_match.{field}: {rest}"),
+                    None => write!(f, "on_match.{field}: {message}"),
+                }
+            }
         }
     }
 }
@@ -195,7 +205,11 @@ impl WatchRequest {
         .validate(now_ms)
         .map_err(WatchRequestError::Request)?;
         request.max_attempts = 1;
-        request.fingerprint = self.fingerprint(&request.destination, request.callback.as_ref());
+        request.fingerprint = self.fingerprint(
+            &request.destination,
+            request.callback.as_ref(),
+            on_match.as_ref(),
+        );
         Ok(WatchSpec {
             request,
             watch: Watch {
@@ -208,13 +222,20 @@ impl WatchRequest {
     }
 
     /// Like `schedule_http`'s: normalized URLs and lowercased header names, and the
-    /// *submitted* durations, so a retried call replays.
-    fn fingerprint(&self, destination: &Destination, callback: Option<&Callback>) -> String {
-        let headers: BTreeMap<_, _> = self
-            .headers
-            .iter()
-            .map(|(k, v)| (k.to_ascii_lowercase(), v))
-            .collect();
+    /// *submitted* durations, so a retried call replays. `on_match` counts as validated, so
+    /// spelling out a default or a header name's case doesn't make it a different request.
+    fn fingerprint(
+        &self,
+        destination: &Destination,
+        callback: Option<&Callback>,
+        on_match: Option<&TaskSpec>,
+    ) -> String {
+        let lowercase = |headers: &mut dyn Iterator<Item = (&String, &String)>| -> BTreeMap<_, _> {
+            headers
+                .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
+                .collect()
+        };
+        let headers = lowercase(&mut self.headers.iter());
         let watch = (
             "watch_http/v1",
             destination.as_str(),
@@ -227,9 +248,20 @@ impl WatchRequest {
             callback.map(Callback::as_str),
         );
         // Watches without on_match keep the fingerprint they always had.
-        let canonical = match &self.on_match {
+        let canonical = match on_match {
             None => serde_json::to_vec(&watch),
-            Some(action) => serde_json::to_vec(&(watch, action)),
+            Some(a) => serde_json::to_vec(&(
+                watch,
+                (
+                    a.destination.as_str(),
+                    a.method,
+                    lowercase(&mut a.headers.iter().map(|(k, v)| (k, v))),
+                    &a.body,
+                    a.max_attempts,
+                    a.callback.as_ref().map(Callback::as_str),
+                    a.capture,
+                ),
+            )),
         }
         .expect("plain data always serializes");
         hex::encode(Sha256::digest(canonical))
@@ -517,7 +549,13 @@ mod tests {
         ] {
             let err = with_on_match(action.clone()).validate(T0).unwrap_err();
             assert_eq!(err.field(), "on_match", "{action}");
-            assert!(err.to_string().starts_with("on_match."), "{err}");
+            let message = err.to_string();
+            assert!(message.starts_with("on_match."), "{message}");
+            let inner = message.split_once(": ").unwrap().1;
+            assert!(
+                !inner.starts_with("callback_url:") && !inner.starts_with("body:"),
+                "{message}"
+            );
         }
         // Timing, ordering and nesting are not on_match's to set.
         for extra in [
@@ -546,6 +584,21 @@ mod tests {
         assert_ne!(plain, fa);
         assert_ne!(fa, b.validate(T0).unwrap().request.fingerprint);
         assert_eq!(fa, a.validate(T0 + 1_000).unwrap().request.fingerprint);
+        // The same action, spelled out differently, is the same request.
+        let spelled = with_on_match(json!({
+            "url": "https://CI.example.com/a",
+            "method": "POST",
+            "max_attempts": 5,
+        }));
+        assert_eq!(fa, spelled.validate(T0).unwrap().request.fingerprint);
+        let header = |name: &str| {
+            with_on_match(json!({ "url": "https://ci.example.com/a", "headers": { name: "x" } }))
+                .validate(T0)
+                .unwrap()
+                .request
+                .fingerprint
+        };
+        assert_eq!(header("Authorization"), header("authorization"));
     }
 
     #[test]

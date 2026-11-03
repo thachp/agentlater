@@ -352,8 +352,8 @@ create_cron({
         </li>
         <li>
           It is sent only when <code>until</code> matches: never on a timeout, a failing poll or a cancel. If you cancel
-          while the matching poll is out, the match is recorded but nothing is sent (
-          <code>watch.action_skipped: &quot;canceled&quot;</code>).
+          while the matching poll is out, the match is recorded but nothing is sent{" "}
+          (<code>watch.action_skipped: &quot;canceled&quot;</code>).
         </li>
         <li>
           It is queued once, in the same step that records the match, as an ordinary task: signed, retried and
