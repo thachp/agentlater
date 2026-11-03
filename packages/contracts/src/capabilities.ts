@@ -223,7 +223,10 @@ export const capabilities: CapabilityDefinition[] = [
       "network). Any other 4xx, or a redirect, ends it at once. Each poll costs one delivery attempt, taken as it runs, " +
       "not reserved up front: a long watch can use up attempts other tasks are waiting for. The watch is a task: get_task shows its " +
       "progress under `watch`, cancel_task stops it, and callback_url receives a signed POST with the result, including " +
-      "the matched value and up to 16 KiB of the last response body. Headers (e.g. an API token) are deleted when it ends.",
+      "the matched value and up to 16 KiB of the last response body. Headers (e.g. an API token) are deleted when it ends. " +
+      "Pass on_match to act without waiting for your next turn: when (and only when) `until` matches, RunLater sends that one " +
+      "request as an ordinary task, linked by watch.action_task_id and triggered_by. Its attempt (and its callback's) is reserved " +
+      "when the watch is created; a timeout, failure or cancel sends nothing.",
     input: {
       type: "object",
       additionalProperties: false,
@@ -283,6 +286,38 @@ export const capabilities: CapabilityDefinition[] = [
           type: "string",
           pattern: "^[A-Za-z0-9_-]{1,128}$",
           description: "Repeat a call with the same key and request to get the same watch back.",
+        },
+        on_match: {
+          type: "object",
+          additionalProperties: false,
+          required: ["url"],
+          description:
+            "A request to send once, as soon as the watch matches, e.g. start the smoke tests when a deploy reports SUCCEEDED. " +
+            "It is a task like schedule_http's: signed, retried, shown by get_task, reporting to its own callback_url. It is sent " +
+            "at least once, so the receiver should dedupe on RunLater-Task-Id. Not sent if cancel_task was called while the " +
+            "matching poll was out (watch.action_skipped: \"canceled\"). Its header values and body are deleted from the watch when it ends.",
+          properties: {
+            url: { type: "string", maxLength: 2048, description: "https:// URL on a public domain name." },
+            method: { type: "string", enum: ["GET", "POST", "PUT", "PATCH", "DELETE"], default: "POST" },
+            headers: {
+              type: "object",
+              maxProperties: 32,
+              additionalProperties: { type: "string" },
+              description: "Headers to send. Same rules as schedule_http." + SECRET_HEADERS_NOTE,
+            },
+            body: { type: "string", maxLength: 65536, description: "Request body as text, e.g. JSON. Not allowed with GET." },
+            max_attempts: { type: "integer", minimum: 1, maximum: 5, default: 5 },
+            callback_url: {
+              type: "string",
+              maxLength: 2048,
+              description: "https:// URL that receives a signed POST with the action's final state, or \"inbox\" for read_inbox.",
+            },
+            capture: {
+              type: "boolean",
+              default: false,
+              description: "Keep the action's response on its task, as schedule_http's capture.",
+            },
+          },
         },
       },
     },

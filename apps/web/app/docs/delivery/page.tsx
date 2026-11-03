@@ -327,6 +327,47 @@ create_cron({
         </li>
       </ul>
 
+      <h3 id="on-match">Acting on a match</h3>
+      <p>
+        <code>on_match</code> lets a watch take the next step itself, without waiting for your next turn. When the
+        deploy reports <code>SUCCEEDED</code>, RunLater starts the smoke tests:
+      </p>
+      <Code label="watch_http with on_match">{`watch_http({
+  url: "https://deploy.example.com/deployments/123",
+  every: "5m",
+  until: { path: "/status", in: ["SUCCEEDED"] },
+  deadline: "6h",
+  on_match: {
+    url: "https://ci.example.com/smoke-tests",
+    headers: { "Authorization": "Bearer {{secret:CI_TOKEN}}" },
+    body: '{"deploymentId":"123"}',
+    callback_url: "inbox"
+  },
+  callback_url: "inbox"
+})`}</Code>
+      <ul>
+        <li>
+          The action is one request, fixed when the watch is created, with <code>schedule_http</code>&apos;s fields
+          except timing, lanes and idempotency keys. It can&apos;t be another watch, so nothing chains.
+        </li>
+        <li>
+          It is sent only when <code>until</code> matches: never on a timeout, a failing poll or a cancel. If you cancel
+          while the matching poll is out, the match is recorded but nothing is sent (
+          <code>watch.action_skipped: &quot;canceled&quot;</code>).
+        </li>
+        <li>
+          It is queued once, in the same step that records the match, as an ordinary task: signed, retried and
+          delivered at least once (dedupe on <code>RunLater-Task-Id</code>). <code>watch.action_task_id</code> and
+          the action&apos;s <code>triggered_by</code> link the two, and each reports to its own{" "}
+          <code>callback_url</code>.
+        </li>
+        <li>
+          Its attempt, and its callback&apos;s, are reserved when the watch is created, so a match always gets to send
+          it; a project that can&apos;t afford it gets a 402 up front. A secret it uses must allow the action&apos;s own
+          host.
+        </li>
+      </ul>
+
       <h2 id="retries">Retries</h2>
       <p>
         <strong>Retried:</strong> timeouts, network errors, and HTTP 408, 425, 429 and 5xx. <strong>Not retried:</strong>{" "}

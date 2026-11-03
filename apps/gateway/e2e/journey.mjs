@@ -208,16 +208,19 @@ export async function runJourney(c) {
   check(deleted?.code === "cron_not_found", `deleted cron still readable: ${deleted?.code ?? "found"}`);
   log("cron created, replaced, listed and deleted");
 
-  // 8. A watch: its first poll is immediate, and a 200 satisfies { status: [200] }. Longer
-  //    watches (polls every 5m or more) are covered by the API's tests.
+  // 8. A watch: its first poll is immediate, and a 200 satisfies { status: [200] }; the match
+  //    sends its on_match request once. Longer watches (polls every 5m or more) are covered by
+  //    the API's tests.
   const watch = await exec("watch_http", {
     url: hook("watch"),
     headers: { "X-Journey": run },
     every: "5m",
     until: { status: [200] },
     deadline: "1h",
+    on_match: { url: hook("acted"), headers: { "X-Journey": run }, body: JSON.stringify({ run }) },
   });
   check(watch.watch?.every_ms === 300_000, `watch_http returned ${JSON.stringify(watch)}`);
+  check(watch.watch?.on_match?.url === hook("acted"), `watch_http on_match: ${JSON.stringify(watch.watch?.on_match)}`);
   const polled = await until("the watch's poll", async () => (await deliveries()).find((d) => d.name === "watch"));
   check(polled.method === "GET" && polled.headers["x-journey"] === run, "the poll was not a GET with the watch's headers");
   const watched = await settled(watch, ["succeeded", "failed"]);
@@ -226,7 +229,18 @@ export async function runJourney(c) {
     `watch ended ${watched.status}: ${JSON.stringify(watched.watch)}`,
   );
   check(watched.header_names.join() === "X-Journey", "the watch's header names were not kept");
-  log("watch matched on its first poll");
+  const actionId = watched.watch.action_task_id;
+  check(actionId, `the matched watch queued no action: ${JSON.stringify(watched.watch)}`);
+  const acted = await until("the watch's action", async () => (await deliveries()).find((d) => d.name === "acted"));
+  check(
+    acted.method === "POST" && acted.headers["x-journey"] === run && JSON.parse(acted.body).run === run,
+    "the action was not a POST with its own headers and body",
+  );
+  check(acted.headers["runlater-task-id"] === actionId, "the action arrived under another task id");
+  check(verify(acted, acted.body), "the action's RunLater-Signature does not verify");
+  const action = await settled({ id: actionId }, ["succeeded", "failed"]);
+  check(action.status === "succeeded" && action.triggered_by === watch.id, `action ended ${action.status}, triggered_by ${action.triggered_by}`);
+  log("watch matched on its first poll and sent its on_match request");
 
   // 9. The inbox and wake, as an agent with no public URL uses them: set a wake, schedule a
   //    task that captures its response and reports to the inbox, get woken with only a count,
@@ -314,6 +328,7 @@ export async function runJourney(c) {
   check(!all.some((d) => d.name === "later"), "a canceled task was delivered");
   check(!all.some((d) => d.name === "cron" || d.name === "alert"), "the deleted cron sent something");
   check(all.filter((d) => d.name === "wake").length === 1, "one inbox event should send exactly one wake");
+  check(all.filter((d) => d.name === "acted").length === 1, "a watch's match should send its action exactly once");
   const used = (await exec("get_project")).attempts_used;
   log(`done: ${used} delivery attempts used`);
   return { run, projectId: project.id, attemptsUsed: used };

@@ -193,6 +193,14 @@ const MIGRATIONS: &[&[&str]] = &[
         )",
         "ALTER TABLE tasks ADD COLUMN failure TEXT",
     ],
+    // 10: watches that act. `on_match` is the request a watch sends when it matches;
+    // `action_reserve` the rows and attempts admission set aside for it (the action, and its
+    // callback); `triggered_by` names the watch on the task it sent.
+    &[
+        "ALTER TABLE tasks ADD COLUMN on_match TEXT",
+        "ALTER TABLE tasks ADD COLUMN action_reserve INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE tasks ADD COLUMN triggered_by TEXT",
+    ],
 ];
 
 /// SQL condition, over `tasks`: the task will queue a callback task when it finishes.
@@ -378,6 +386,8 @@ pub struct TaskView {
     pub alert_for: Option<String>,
     /// Set on a watch: what it polls for and how it is going.
     pub watch: Option<WatchView>,
+    /// Set on a watch's `on_match` action: the watch that sent it.
+    pub triggered_by: Option<String>,
     pub created_ms: i64,
     pub updated_ms: i64,
     pub finished_ms: Option<i64>,
@@ -400,6 +410,35 @@ pub struct WatchView {
     /// The last poll's response status, and up to 16 KiB of its body.
     pub last_status: Option<u16>,
     pub last_body: Option<String>,
+    /// The request to send when `until` matches (header values and body not shown).
+    pub on_match: Option<OnMatchView>,
+    /// The task `on_match` queued, once the watch matched.
+    pub action_task_id: Option<String>,
+    /// Why a watch that matched sent no action: `canceled` (cancel was asked for while the
+    /// matching poll was out).
+    pub action_skipped: Option<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct OnMatchView {
+    pub method: Method,
+    pub url: String,
+    pub header_names: Vec<String>,
+    pub callback_url: Option<String>,
+    pub capture: bool,
+}
+
+/// A watch's `on_match` as stored in `tasks.on_match`. Header values and the body are
+/// cleared once the watch ends, as the watch's own are.
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredAction {
+    method: Method,
+    url: String,
+    headers: Vec<(String, String)>,
+    body: Option<String>,
+    max_attempts: u32,
+    callback_url: Option<String>,
+    capture: bool,
 }
 
 /// The last response to a task with `capture`, as stored in `tasks.response`. Comes from the
@@ -454,6 +493,8 @@ struct WatchState {
     matched: Option<serde_json::Value>,
     last_status: Option<u16>,
     last_body: Option<String>,
+    action_task_id: Option<String>,
+    action_skipped: Option<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -629,6 +670,8 @@ struct TaskRow {
     wake_call: i64,
     report_failures_only: i64,
     failure: Option<String>,
+    on_match: Option<String>,
+    triggered_by: Option<String>,
     created_ms: i64,
     updated_ms: i64,
 }
@@ -704,7 +747,24 @@ impl TaskRow {
             matched: state.matched,
             last_status: state.last_status,
             last_body: state.last_body.filter(|_| full),
+            on_match: self.on_match()?.map(|a| OnMatchView {
+                method: a.method,
+                url: a.url,
+                header_names: a.headers.into_iter().map(|(k, _)| k).collect(),
+                callback_url: a.callback_url,
+                capture: a.capture,
+            }),
+            action_task_id: state.action_task_id,
+            action_skipped: state.action_skipped,
         }))
+    }
+
+    fn on_match(&self) -> Result<Option<StoredAction>, DbError> {
+        self.on_match
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| DbError(e.to_string()))
     }
 
     /// `full` includes the body; lists leave it out to stay small.
@@ -748,6 +808,7 @@ impl TaskRow {
             cron: self.cron.clone(),
             alert_for: self.alert_for.clone(),
             watch: self.watch_view(attempts.is_some())?,
+            triggered_by: self.triggered_by.clone(),
             created_ms: self.created_ms,
             updated_ms: self.updated_ms,
             finished_ms: task.terminal_ms,
@@ -760,7 +821,8 @@ const TASK_COLUMNS: &str = "seq, id, status, due_ms, max_attempts, run_attempts,
     total_attempts, generation, fence, lease_until_ms, cancel_requested, terminal_ms, \
     method, url, headers, body, run_at_ms, idempotency_key, callback_url, callback_task_id, \
     callback_for, lane, cron, alert_for, watch, watch_errors, watch_state, capture, response, \
-    inbox_seq, wake_call, report_failures_only, failure, created_ms, updated_ms";
+    inbox_seq, wake_call, report_failures_only, failure, on_match, triggered_by, created_ms, \
+    updated_ms";
 
 /// A row to insert into `tasks`.
 struct NewTask<'s> {
@@ -784,6 +846,11 @@ struct NewTask<'s> {
     report_failures_only: bool,
     /// A watch's settings, as JSON.
     watch: Option<String>,
+    /// A watch's `on_match`, as JSON, and what admission reserved for it.
+    on_match: Option<String>,
+    action_reserve: i64,
+    /// Set on the task a watch's `on_match` queued.
+    triggered_by: Option<&'s str>,
 }
 
 /// Callback task ids are derived, so queueing the same callback twice is harmless. A task's
@@ -1099,10 +1166,11 @@ impl<'a, D: Db> Ledger<'a, D> {
         }
         let counts: Vec<Counts> = self.db.query(
             &format!(
-                "SELECT COUNT(*) + COALESCE(SUM(status IN ('scheduled', 'retrying', 'delivering') \
-                 AND {OWES_CALLBACK}), 0) AS total, \
+                "SELECT COUNT(*) + COALESCE(SUM(CASE WHEN status IN \
+                 ('scheduled', 'retrying', 'delivering') THEN {OWES_CALLBACK} + action_reserve \
+                 ELSE 0 END), 0) AS total, \
                  COALESCE(SUM(CASE WHEN status IN ('scheduled', 'retrying', 'delivering') \
-                 THEN 1 + {OWES_CALLBACK} ELSE 0 END), 0) AS waiting \
+                 THEN 1 + {OWES_CALLBACK} + action_reserve ELSE 0 END), 0) AS waiting \
                  FROM tasks"
             ),
             vec![],
@@ -1179,6 +1247,9 @@ impl<'a, D: Db> Ledger<'a, D> {
                 wake_call: false,
                 report_failures_only: false,
                 watch: None,
+                on_match: None,
+                action_reserve: 0,
+                triggered_by: None,
             },
             now,
         )?;
@@ -1196,6 +1267,13 @@ impl<'a, D: Db> Ledger<'a, D> {
         let project = self.project_row()?.ok_or_else(no_project)?;
         let spec = request.validate(now).map_err(ApiError::invalid_watch)?;
         self.check_secrets(&spec.request.headers, spec.request.destination.host())?;
+        if let Some(action) = &spec.on_match {
+            self.check_secrets(&action.headers, action.destination.host())
+                .map_err(|e| ApiError {
+                    field: Some("on_match"),
+                    ..e
+                })?;
+        }
         let request = spec.request;
         if let Some(existing) =
             self.replay(request.idempotency_key.as_deref(), &request.fingerprint)?
@@ -1208,9 +1286,28 @@ impl<'a, D: Db> Ledger<'a, D> {
                 ..ApiError::bad_request("deadline is after this project's trial ends")
             });
         }
-        let needs = 1 + i64::from(matches!(request.callback, Some(Callback::Url(_))));
+        // The action, and its callback, are reserved now: a watch that matches always gets to
+        // send it, and one that can't afford it is refused here rather than hours later.
+        let owes = |c: &Option<Callback>| i64::from(matches!(c, Some(Callback::Url(_))));
+        let action_reserve = spec.on_match.as_ref().map_or(0, |a| 1 + owes(&a.callback));
+        let needs = 1 + owes(&request.callback) + action_reserve;
         self.admit(&project, needs, needs, now)?;
         let watch = serde_json::to_string(&spec.watch).map_err(|e| DbError(e.to_string()))?;
+        let on_match = spec
+            .on_match
+            .map(|a| {
+                serde_json::to_string(&StoredAction {
+                    method: a.method,
+                    url: a.destination.as_str().into(),
+                    headers: a.headers,
+                    body: a.body,
+                    max_attempts: a.max_attempts,
+                    callback_url: a.callback.as_ref().map(|c| c.as_str().into()),
+                    capture: a.capture,
+                })
+            })
+            .transpose()
+            .map_err(|e| DbError(e.to_string()))?;
         self.insert(
             NewTask {
                 id: task_id,
@@ -1231,6 +1328,9 @@ impl<'a, D: Db> Ledger<'a, D> {
                 wake_call: false,
                 report_failures_only: false,
                 watch: Some(watch),
+                on_match,
+                action_reserve,
+                triggered_by: None,
             },
             now,
         )?;
@@ -1445,8 +1545,10 @@ impl<'a, D: Db> Ledger<'a, D> {
 
         // A callback reports on work already done, so it gets one try even when the trial
         // has run out, but no retries.
+        // So does a watch's action: admission reserved its first attempt.
         let mut last_try =
-            (row.callback_for.is_some() || row.alert_for.is_some()) && task.run_attempts == 0;
+            (row.callback_for.is_some() || row.alert_for.is_some() || row.triggered_by.is_some())
+                && task.run_attempts == 0;
         // A wake was never admitted, so it may only spend attempts no waiting task was promised.
         // With nothing else waiting it gets one more try even past the budget; otherwise it
         // stands down (canceled, not failed: the wake itself is fine). And a wake due after the
@@ -1908,6 +2010,9 @@ impl<'a, D: Db> Ledger<'a, D> {
                     wake_call: false,
                     report_failures_only: cron.report == Report::Failures.as_str(),
                     watch: None,
+                    on_match: None,
+                    action_reserve: 0,
+                    triggered_by: None,
                 },
                 now,
             )?;
@@ -2046,6 +2151,9 @@ impl<'a, D: Db> Ledger<'a, D> {
                 wake_call: false,
                 report_failures_only: false,
                 watch: None,
+                on_match: None,
+                action_reserve: 0,
+                triggered_by: None,
             },
             now,
         )
@@ -2362,13 +2470,15 @@ impl<'a, D: Db> Ledger<'a, D> {
     }
 
     /// Attempts admission promised to work that is waiting: one per task not yet attempted
-    /// (scheduled or retrying) and one per callback still owed. Wakes are not counted.
+    /// (scheduled or retrying), one per callback still owed, and a watch's action (and its
+    /// callback) until the watch ends. Wakes are not counted.
     fn reserved_attempts(&self) -> Result<i64, DbError> {
         let rows: Vec<Counts> = self.db.query(
             &format!(
                 "SELECT COALESCE(SUM(status IN ('scheduled', 'retrying')), 0) \
-                 + COALESCE(SUM(status IN ('scheduled', 'retrying', 'delivering') \
-                 AND {OWES_CALLBACK}), 0) AS total, 0 AS waiting FROM tasks WHERE wake_call = 0"
+                 + COALESCE(SUM(CASE WHEN status IN ('scheduled', 'retrying', 'delivering') \
+                 THEN {OWES_CALLBACK} + action_reserve ELSE 0 END), 0) AS total, \
+                 0 AS waiting FROM tasks WHERE wake_call = 0"
             ),
             vec![],
         )?;
@@ -2431,6 +2541,9 @@ impl<'a, D: Db> Ledger<'a, D> {
                 wake_call: true,
                 report_failures_only: false,
                 watch: None,
+                on_match: None,
+                action_reserve: 0,
+                triggered_by: None,
             },
             now,
         )?;
@@ -2717,7 +2830,10 @@ impl<'a, D: Db> Ledger<'a, D> {
         let NewTask { id, task, .. } = &new;
         let headers = serde_json::to_string(new.headers).map_err(|e| DbError(e.to_string()))?;
         // Callback, run and alert ids are derived, so queueing the same one again is a no-op.
-        let derived = new.callback_for.is_some() || new.cron.is_some() || new.alert_for.is_some();
+        let derived = new.callback_for.is_some()
+            || new.cron.is_some()
+            || new.alert_for.is_some()
+            || new.triggered_by.is_some();
         let verb = if derived {
             "INSERT OR IGNORE"
         } else {
@@ -2729,8 +2845,10 @@ impl<'a, D: Db> Ledger<'a, D> {
              total_attempts, generation, fence, lease_until_ms, cancel_requested, terminal_ms, \
              published_ms, method, url, headers, body, run_at_ms, idempotency_key, fingerprint, \
              callback_url, callback_for, capture, lane, cron, alert_for, wake_call, \
-             report_failures_only, watch, created_ms, updated_ms) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+             report_failures_only, watch, on_match, action_reserve, triggered_by, created_ms, \
+             updated_ms) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
+             ?, ?, ?, ?, ?, ?, ?)"
             ),
             vec![
                 (*id).into(),
@@ -2760,6 +2878,9 @@ impl<'a, D: Db> Ledger<'a, D> {
                 new.wake_call.into(),
                 new.report_failures_only.into(),
                 new.watch.into(),
+                new.on_match.into(),
+                new.action_reserve.into(),
+                new.triggered_by.into(),
                 now.into(),
                 now.into(),
             ],
@@ -2779,6 +2900,9 @@ impl<'a, D: Db> Ledger<'a, D> {
         }
         if row.wake_call != 0 {
             self.wake_finished(&row.id, task.status, now)?;
+        }
+        if row.on_match.is_some() {
+            self.watch_ended(row, task, now)?;
         }
         if row.watch.is_some() || row.wake_call != 0 {
             // Watches and wakes are never sent again, and their headers often carry a token.
@@ -2801,6 +2925,70 @@ impl<'a, D: Db> Ledger<'a, D> {
             Some(url) => self.queue_callback(&row.id, url, task.generation, now),
             None => Ok(()),
         }
+    }
+
+    /// A watch with `on_match` ended. If it matched, its action is queued, in the same
+    /// transaction, under an id derived from the watch's (a watch matches once, so queueing
+    /// it again is a no-op). Either way the action's header values and body are cleared.
+    fn watch_ended(&self, row: &TaskRow, task: &Task, now: i64) -> Result<(), DbError> {
+        let action = row
+            .on_match()?
+            .ok_or_else(|| DbError(format!("task {} has no action", row.id)))?;
+        if task.status == Status::Succeeded {
+            let mut state = self
+                .task_row(&row.id)?
+                .ok_or_else(|| DbError(format!("task {} vanished", row.id)))?
+                .watch_state()?;
+            if task.cancel_requested {
+                // Asked to stop while the matching poll was out: the match is recorded, but
+                // the agent no longer wants what follows.
+                state.action_skipped = Some("canceled".into());
+            } else {
+                let id = derived_id(&format!("action/{}", row.id));
+                self.insert(
+                    NewTask {
+                        id: &id,
+                        task: Task::new(now, action.max_attempts),
+                        method: action.method,
+                        url: &action.url,
+                        headers: &action.headers,
+                        body: action.body.clone(),
+                        run_at_ms: now,
+                        idempotency_key: None,
+                        fingerprint: "on_match",
+                        callback_url: action.callback_url.as_deref(),
+                        callback_for: None,
+                        capture: action.capture,
+                        lane: None,
+                        cron: None,
+                        alert_for: None,
+                        wake_call: false,
+                        report_failures_only: false,
+                        watch: None,
+                        on_match: None,
+                        action_reserve: 0,
+                        triggered_by: Some(&row.id),
+                    },
+                    now,
+                )?;
+                state.action_task_id = Some(id);
+            }
+            self.store_watch(&row.id, row.watch_errors, &state)?;
+        }
+        let cleared = StoredAction {
+            headers: action
+                .headers
+                .into_iter()
+                .map(|(name, _)| (name, String::new()))
+                .collect(),
+            body: None,
+            ..action
+        };
+        let cleared = serde_json::to_string(&cleared).map_err(|e| DbError(e.to_string()))?;
+        self.db.exec(
+            "UPDATE tasks SET on_match = ? WHERE id = ?",
+            vec![cleared.into(), row.id.as_str().into()],
+        )
     }
 
     /// The inbox's version of a callback: the same report, as an event, in this transaction.
@@ -2856,6 +3044,9 @@ impl<'a, D: Db> Ledger<'a, D> {
                 wake_call: false,
                 report_failures_only: false,
                 watch: None,
+                on_match: None,
+                action_reserve: 0,
+                triggered_by: None,
             },
             now,
         )
@@ -5980,5 +6171,332 @@ mod tests {
             (w.status, w.watch.unwrap().reason.as_deref()),
             (Status::Failed, Some("secret_missing"))
         );
+    }
+
+    // -- watches that act ---------------------------------------------------------------
+
+    fn acting(extra: serde_json::Value) -> WatchRequest {
+        let mut on_match = serde_json::json!({
+            "url": "https://ci.example.com/smoke",
+            "headers": { "Authorization": "Bearer ci-token" },
+            "body": "{\"deployment\":123}",
+        });
+        if let Some(more) = extra.get("on_match") {
+            for (k, x) in more.as_object().unwrap() {
+                on_match[k] = x.clone();
+            }
+        }
+        let mut rest = extra.clone();
+        rest.as_object_mut().unwrap().remove("on_match");
+        rest["on_match"] = on_match;
+        watching(rest)
+    }
+
+    fn actions_of(db: &Memory, watch: &str) -> Vec<String> {
+        let rows: Vec<IdRow> = db
+            .query(
+                "SELECT id FROM tasks WHERE triggered_by = ?",
+                vec![watch.into()],
+            )
+            .unwrap();
+        rows.into_iter().map(|r| r.id).collect()
+    }
+
+    const DONE: Option<&str> = Some(r#"{"status":"succeeded"}"#);
+    const RUNNING: Option<&str> = Some(r#"{"status":"running"}"#);
+
+    #[test]
+    fn a_watch_that_matches_sends_its_action_once() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let req = acting(serde_json::json!({
+            "callback_url": "inbox",
+            "on_match": { "callback_url": "https://cb.example.com/smoke" },
+        }));
+        l.watch(req, "w1", T0).unwrap();
+        let w = watch_view(&l, "w1");
+        let on_match = w.on_match.unwrap();
+        assert_eq!(
+            (
+                on_match.method,
+                on_match.url.as_str(),
+                on_match.header_names
+            ),
+            (
+                Method::Post,
+                "https://ci.example.com/smoke",
+                vec!["Authorization".to_string()]
+            )
+        );
+        assert_eq!(w.action_task_id, None);
+
+        assert_eq!(poll(&l, "w1", http(200), RUNNING, T0), Status::Scheduled);
+        assert!(actions_of(&db, "w1").is_empty(), "not until it matches");
+        assert_eq!(
+            poll(&l, "w1", http(200), DONE, T0 + 5 * MIN),
+            Status::Succeeded
+        );
+
+        let action_id = watch_view(&l, "w1").action_task_id.expect("action queued");
+        assert_eq!(actions_of(&db, "w1"), std::slice::from_ref(&action_id));
+        let a = l.task(&action_id).unwrap();
+        assert_eq!(
+            (
+                a.status,
+                a.method,
+                a.url.as_str(),
+                a.triggered_by.as_deref()
+            ),
+            (
+                Status::Scheduled,
+                Method::Post,
+                "https://ci.example.com/smoke",
+                Some("w1")
+            )
+        );
+        assert_eq!(
+            a.callback_url.as_deref(),
+            Some("https://cb.example.com/smoke")
+        );
+        // The watch's report says what it set off.
+        let e = &inbox(&l).events[0];
+        assert_eq!(e["task"]["watch"]["action_task_id"], action_id.as_str());
+
+        // The watch keeps no copy of the action's token or body; the action has them.
+        let stored: Vec<IdRow> = db
+            .query("SELECT on_match AS id FROM tasks WHERE id = 'w1'", vec![])
+            .unwrap();
+        assert!(!stored[0].id.contains("ci-token"), "{}", stored[0].id);
+        assert!(!stored[0].id.contains("deployment"), "{}", stored[0].id);
+        let d = l
+            .publish_due(P, T0 + 5 * MIN)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.task_id == action_id)
+            .expect("the action is due at once");
+        let sent = deliver(&l, &d, T0 + 5 * MIN);
+        assert_eq!(
+            sent.headers,
+            [("Authorization".to_string(), "Bearer ci-token".to_string())]
+        );
+        assert_eq!(sent.body.as_deref(), Some("{\"deployment\":123}"));
+        assert_eq!(
+            l.finish(&action_id, sent.fence, http(200), T0 + 5 * MIN, 0.0)
+                .unwrap(),
+            Some(Status::Succeeded)
+        );
+        let a = l.task(&action_id).unwrap();
+        assert!(a.callback_task_id.is_some(), "reports like any task");
+        assert_eq!(watch_view(&l, "w1").on_match.unwrap().url, a.url);
+    }
+
+    #[test]
+    fn an_action_is_queued_at_most_once() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.watch(acting(serde_json::json!({})), "w1", T0).unwrap();
+        // A poll whose lease ran out comes back late with a match: it no longer holds the
+        // watch, so it changes nothing.
+        let d = l.publish_due(P, T0).unwrap().remove(0);
+        let lost = deliver(&l, &d, T0);
+        l.recover(T0 + LEASE_MS, || 0.0).unwrap();
+        let read = |text| ResponseRead {
+            body: Some(PollBody {
+                text,
+                truncated: false,
+            }),
+            headers: &[],
+        };
+        assert_eq!(
+            l.finish_response(
+                "w1",
+                lost.fence,
+                http(200),
+                Some(read(DONE.unwrap())),
+                T0 + LEASE_MS,
+                0.0
+            )
+            .unwrap(),
+            None
+        );
+        assert!(actions_of(&db, "w1").is_empty());
+
+        let row = l.task_row("w1").unwrap().unwrap();
+        let next = l.task("w1").unwrap().next_attempt_ms.unwrap();
+        assert_eq!(poll(&l, "w1", http(200), DONE, next), Status::Succeeded);
+        assert_eq!(actions_of(&db, "w1").len(), 1);
+        // Finishing the same watch again queues under the same id, which is a no-op.
+        let mut done = row.task().unwrap();
+        done.status = Status::Succeeded;
+        l.watch_ended(&row, &done, next + 1).unwrap();
+        assert_eq!(actions_of(&db, "w1").len(), 1);
+    }
+
+    #[test]
+    fn a_watch_that_does_not_match_sends_nothing() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let req = || acting(serde_json::json!({ "every": "5m", "deadline": "5m" }));
+        l.watch(req(), "timed_out", T0).unwrap();
+        poll(&l, "timed_out", http(200), RUNNING, T0);
+        assert_eq!(
+            poll(&l, "timed_out", http(200), RUNNING, T0 + 5 * MIN),
+            Status::Failed
+        );
+        l.watch(req(), "rejected", T0).unwrap();
+        assert_eq!(poll(&l, "rejected", http(404), None, T0), Status::Failed);
+        l.watch(req(), "canceled", T0).unwrap();
+        assert_eq!(l.cancel("canceled", T0).unwrap().status, Status::Canceled);
+        for id in ["timed_out", "rejected", "canceled"] {
+            assert!(actions_of(&db, id).is_empty(), "{id}");
+            let w = watch_view(&l, id);
+            assert_eq!((w.action_task_id, w.action_skipped), (None, None), "{id}");
+            let stored: Vec<IdRow> = db
+                .query(
+                    "SELECT on_match AS id FROM tasks WHERE id = ?",
+                    vec![id.into()],
+                )
+                .unwrap();
+            assert!(!stored[0].id.contains("ci-token"), "{id}: {}", stored[0].id);
+        }
+    }
+
+    #[test]
+    fn canceling_during_the_matching_poll_skips_the_action() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.watch(acting(serde_json::json!({})), "w1", T0).unwrap();
+        let d = l.publish_due(P, T0).unwrap().remove(0);
+        let a = deliver(&l, &d, T0);
+        l.cancel("w1", T0 + 1).unwrap();
+        let read = ResponseRead {
+            body: Some(PollBody {
+                text: DONE.unwrap(),
+                truncated: false,
+            }),
+            headers: &[],
+        };
+        assert_eq!(
+            l.finish_response("w1", a.fence, http(200), Some(read), T0 + 2, 0.0)
+                .unwrap(),
+            Some(Status::Succeeded)
+        );
+        let w = watch_view(&l, "w1");
+        assert_eq!(w.reason.as_deref(), Some("matched"));
+        assert_eq!(
+            (w.action_task_id, w.action_skipped.as_deref()),
+            (None, Some("canceled"))
+        );
+        assert!(actions_of(&db, "w1").is_empty());
+    }
+
+    #[test]
+    fn admission_reserves_the_action_and_its_callback() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let left = |n: i64| {
+            db.exec(
+                "UPDATE project SET attempt_budget = attempts_used + ?",
+                vec![n.into()],
+            )
+            .unwrap()
+        };
+        let with_callback = || {
+            acting(serde_json::json!({ "on_match": { "callback_url": "https://cb.example.com/" } }))
+        };
+        left(2);
+        let e = l.watch(with_callback(), "w0", T0).unwrap_err();
+        assert_eq!((e.status, e.code), (402, "budget_exhausted"));
+        // An inbox report is not a task, so it needs no attempt.
+        let inboxed = acting(serde_json::json!({ "on_match": { "callback_url": "inbox" } }));
+        l.watch(inboxed, "w1", T0).unwrap();
+        let e = l
+            .schedule(
+                ScheduleRequest {
+                    url: "https://api.example.com/other".into(),
+                    ..Default::default()
+                },
+                "t1",
+                T0,
+            )
+            .unwrap_err();
+        assert_eq!(e.code, "budget_exhausted", "both attempts are promised");
+
+        // The poll spends one; the action's is still there, even once the trial is spent.
+        assert_eq!(poll(&l, "w1", http(200), DONE, T0), Status::Succeeded);
+        db.exec(
+            "UPDATE project SET attempts_used = attempt_budget + 5",
+            vec![],
+        )
+        .unwrap();
+        let id = watch_view(&l, "w1").action_task_id.unwrap();
+        let d = l
+            .publish_due(P, T0)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.task_id == id)
+            .unwrap();
+        let sent = deliver(&l, &d, T0);
+        assert_eq!(
+            l.finish(&id, sent.fence, http(503), T0, 0.0).unwrap(),
+            Some(Status::Failed),
+            "one try past the budget, no retries"
+        );
+    }
+
+    #[test]
+    fn an_action_follows_secret_rules_for_its_own_host() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.put_secret("CI", "v1:sealed-ci", 20, &hosts(&["ci.example.com"]), T0)
+            .unwrap();
+        l.put_secret("API", "v1:sealed-api", 20, &hosts(&["api.example.com"]), T0)
+            .unwrap();
+        let with = |name: &str| {
+            acting(serde_json::json!({
+                "on_match": { "headers": { "Authorization": format!("{{{{secret:{name}}}}}") } }
+            }))
+        };
+        // API's value may go to the watched host, but not to where the action sends it.
+        let e = l.watch(with("API"), "w0", T0).unwrap_err();
+        assert_eq!(
+            (e.status, e.code, e.field),
+            (400, "secret_host_not_allowed", Some("on_match"))
+        );
+        let e = l.watch(with("NOPE"), "w0", T0).unwrap_err();
+        assert_eq!((e.code, e.field), ("secret_not_found", Some("on_match")));
+
+        l.watch(with("CI"), "w1", T0).unwrap();
+        poll(&l, "w1", http(200), DONE, T0);
+        let id = watch_view(&l, "w1").action_task_id.unwrap();
+        let d = l
+            .publish_due(P, T0)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.task_id == id)
+            .unwrap();
+        let sent = deliver(&l, &d, T0);
+        assert_eq!(
+            sent.secrets,
+            [SealedSecret {
+                name: "CI".into(),
+                sealed: "v1:sealed-ci".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn on_match_is_checked_when_the_watch_is_created() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let e = l
+            .watch(
+                acting(serde_json::json!({ "on_match": { "url": "http://ci.example.com/" } })),
+                "w1",
+                T0,
+            )
+            .unwrap_err();
+        assert_eq!((e.status, e.field), (400, Some("on_match")));
+        assert!(e.message.starts_with("on_match.url"), "{}", e.message);
     }
 }
