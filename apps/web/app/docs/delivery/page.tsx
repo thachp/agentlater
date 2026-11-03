@@ -204,14 +204,17 @@ create_cron({
           store the reference; the value is filled in only at the moment of sending.
         </li>
         <li>
-          A request whose host is not in the secret&apos;s <code>allowed_hosts</code> is refused when it is scheduled
+          <code>allowed_hosts</code> lists exact host names, with no wildcards: under shared domains such as{" "}
+          <code>workers.dev</code> anyone can get a name. A value must be at least 16 characters. A request whose
+          host is not in the list is refused when it is scheduled
           (<code>secret_host_not_allowed</code>), and checked again before each attempt. A secret cannot be sent
           anywhere else, however the request was made.
         </li>
         <li>
           Values are encrypted (AES-256-GCM, a key per project) and never returned: <code>list_secrets</code> shows
-          names, hosts and times. If a destination echoes a value back, a captured response shows{" "}
-          <code>[secret:NAME]</code>.
+          names, hosts and times. If a destination echoes a value back, as sent, JSON-escaped or URL-encoded, a
+          captured response shows <code>[secret:NAME]</code>. That is best effort, so bind secrets to hosts that
+          don&apos;t reflect request headers.
         </li>
         <li>
           Calling <code>set_secret</code> again rotates the value: crons, retries and wakes use it from their next

@@ -407,7 +407,13 @@ impl TaskLedger {
                             .map_err(|_| Error::RustError("short nonce".into()))?;
                         let sealed = key.seal(&project_id, &spec.name, &spec.value, nonce);
                         ledger
-                            .put_secret(&spec.name, &sealed, &spec.allowed_hosts, t)
+                            .put_secret(
+                                &spec.name,
+                                &sealed,
+                                spec.value.len(),
+                                &spec.allowed_hosts,
+                                t,
+                            )
                             .map(|(v, c)| created(&v, c))
                     }
                 },
@@ -485,7 +491,8 @@ impl DurableObject for TaskLedger {
     async fn fetch(&self, mut req: Request) -> Result<Response> {
         let sql = self.sql();
         let ledger = match Ledger::open(&sql) {
-            Ok(l) => l,
+            Ok(l) if sealing_key(&self.env).is_some() => l,
+            Ok(l) => l.without_secrets(),
             Err(e) => return error(e.into()),
         };
         let response = self.route(&mut req, &ledger).await?;
@@ -576,11 +583,21 @@ async fn process(env: &Env, d: &Dispatch) -> Result<()> {
             None => (Outcome::Rejected, None),
         }
     };
-    // A response that echoes a credential back must not carry it into the ledger.
+    // A response that echoes a credential back must not carry it into the ledger. The body was
+    // read past its cap, so a value straddling the cap is redacted whole before the cut.
+    let cap = if delivery.capture {
+        CAPTURE_BODY_BYTES
+    } else {
+        MAX_WATCH_RESPONSE_BYTES
+    };
     let (body, truncated, headers) = read.map_or((None, false, vec![]), |r| {
+        let (body, cut) = match r.body.map(|b| redact(&b, &values)) {
+            Some(b) if b.len() > cap => (Some(cut_at(&b, cap)), true),
+            other => (other, false),
+        };
         (
-            r.body.map(|b| redact(&b, &values)),
-            r.truncated,
+            body,
+            r.truncated || cut,
             r.headers
                 .into_iter()
                 .map(|(k, v)| (k, redact(&v, &values)))
@@ -602,6 +619,15 @@ async fn process(env: &Env, d: &Dispatch) -> Result<()> {
     )
     .await?;
     Ok(())
+}
+
+/// The first `max` bytes of `s`, cut at a character boundary.
+fn cut_at(s: &str, max: usize) -> String {
+    let mut end = max.min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
 }
 
 /// The plaintext of each sealed secret, or None if any cannot be opened.
@@ -633,9 +659,9 @@ fn filled(d: &Delivery, values: &[(String, String)]) -> Option<Delivery> {
         .iter()
         .map(|(k, v)| Some((k.clone(), fill(v, lookup)?)))
         .collect::<Option<Vec<_>>>()?;
+    // The sealed secrets stay on it: send() reads a little further when there are some.
     Some(Delivery {
         headers,
-        secrets: vec![],
         ..d.clone()
     })
 }
@@ -723,6 +749,16 @@ fn kept_headers(response: &Response) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Extra bytes to read past a cap when the request carried secrets, so an echoed value that
+/// straddles the cap is still whole when it is redacted.
+fn secret_margin(d: &Delivery) -> usize {
+    if d.secrets.is_empty() {
+        0
+    } else {
+        runlater_core::limits::MAX_SECRET_BYTES
+    }
+}
+
 async fn send(
     destination: &Destination,
     d: &Delivery,
@@ -785,7 +821,7 @@ async fn send(
             if left <= 0 {
                 return Ok((outcome, Some(unread(headers))));
             }
-            let read = read_capped(&mut response, CAPTURE_BODY_BYTES);
+            let read = read_capped(&mut response, CAPTURE_BODY_BYTES + secret_margin(d));
             let limit = Delay::from(Duration::from_millis(left as u64));
             futures_util::pin_mut!(read, limit);
             let body = match select(read, limit).await {
@@ -800,7 +836,7 @@ async fn send(
         }
         // A body cut off mid-read is a failed poll, not an empty answer.
         Ok(
-            match read_capped(&mut response, MAX_WATCH_RESPONSE_BYTES).await {
+            match read_capped(&mut response, MAX_WATCH_RESPONSE_BYTES + secret_margin(d)).await {
                 Ok((body, truncated)) => (
                     outcome,
                     Some(ResponseBody {

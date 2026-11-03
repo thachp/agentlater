@@ -371,7 +371,8 @@ export const capabilities: CapabilityDefinition[] = [
       "schedule_http, create_cron, watch_http or set_wake, e.g. \"Authorization\": \"Bearer {{secret:GITHUB_TOKEN}}\". RunLater " +
       "encrypts the value, fills it in only at the moment it sends, and only to allowed_hosts: a request to any other host is " +
       "refused, so a tricked or mistaken call cannot leak it. The value is never returned by any call, and if a destination echoes " +
-      "it back, a captured response shows [secret:NAME] instead. Calling again with the same name replaces the value and hosts; " +
+      "it back as sent, JSON-escaped or URL-encoded, a captured response shows [secret:NAME] instead (best effort: other " +
+      "encodings are not caught). Calling again with the same name replaces the value and hosts; " +
       "work that refers to it uses the new value from its next attempt. At most 50 secrets.",
     input: {
       type: "object",
@@ -381,16 +382,18 @@ export const capabilities: CapabilityDefinition[] = [
         name: SECRET_NAME,
         value: {
           type: "string",
-          minLength: 1,
+          minLength: 16,
           maxLength: 4096,
-          description: "The credential: printable ASCII, no line breaks (it is sent in a header).",
+          description: "The credential: 16 to 4096 characters of printable ASCII, no line breaks (it is sent in a header).",
         },
         allowed_hosts: {
           type: "array",
           minItems: 1,
           maxItems: 20,
           items: { type: "string", maxLength: 255 },
-          description: "Hosts it may be sent to: \"api.github.com\", or \"*.example.com\" for any subdomain. No scheme, port or path.",
+          description:
+            "The exact host names it may be sent to, e.g. \"api.github.com\". No scheme, port, path or wildcard: under shared " +
+            "domains (workers.dev, amazonaws.com) anyone can get a name, so a wildcard can't be made safe.",
         },
       },
     },

@@ -345,6 +345,29 @@ describe("api", () => {
     const listed = await api("GET", "/v1/secrets", { project });
     assert.deepEqual(listed.json.secrets.map((s) => s.name), ["RECEIVER_TOKEN"]);
     assert.ok(!JSON.stringify(listed.json).includes(token));
+    // An echo that straddles the 16 KiB capture cap is redacted whole, not cut to a prefix.
+    const padding = "p".repeat(16 * 1024 - 10);
+    replies.set("/straddle", [{ status: 200, body: `${padding}${token}tail` }]);
+    const straddle = await api("POST", "/v1/tasks", {
+      project,
+      body: { url: "https://receiver.example.com/straddle", headers: { Authorization: "{{secret:RECEIVER_TOKEN}}" }, capture: true },
+    });
+    const cut = await settled(project, straddle.json.id, ["succeeded", "failed"]);
+    assert.equal(cut.response.truncated, true);
+    assert.ok(!cut.response.body.includes(token.slice(0, 8)), "no prefix of the value survives the cut");
+    assert.ok(cut.response.body.endsWith("[secret:RE") || cut.response.body.length <= 16 * 1024);
+    const short = await api("POST", "/v1/secrets", {
+      project,
+      scope: "secrets",
+      body: { name: "PIN", value: "1234", allowed_hosts: ["receiver.example.com"] },
+    });
+    assert.equal(short.json.error.field, "value", "short secrets are refused");
+    const wildcard = await api("POST", "/v1/secrets", {
+      project,
+      scope: "secrets",
+      body: { name: "WILD", value: "x".repeat(20), allowed_hosts: ["*.workers.dev"] },
+    });
+    assert.equal(wildcard.json.error.field, "allowed_hosts", "no wildcards");
     const gone = await api("POST", "/v1/secrets/RECEIVER_TOKEN/delete", { project, scope: "secrets", body: {} });
     assert.equal(gone.json.name, "RECEIVER_TOKEN");
   });

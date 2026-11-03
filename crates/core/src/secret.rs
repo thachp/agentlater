@@ -4,7 +4,7 @@
 //! Nothing here sees a stored secret: the API seals values before the ledger stores them.
 //! This module checks what callers send, matches hosts, and finds and fills references.
 
-use crate::limits::{MAX_ALLOWED_HOSTS, MAX_SECRET_BYTES, MAX_SECRET_NAME_BYTES};
+use crate::limits::{MAX_ALLOWED_HOSTS, MAX_SECRET_BYTES, MAX_SECRET_NAME_BYTES, MIN_SECRET_BYTES};
 use runlater_egress::Destination;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -18,8 +18,7 @@ const CLOSE: &str = "}}";
 pub struct SecretRequest {
     pub name: String,
     pub value: String,
-    /// Hosts the secret may be sent to: `api.example.com`, or `*.example.com` for any
-    /// subdomain (not `example.com` itself).
+    /// The exact host names the secret may be sent to, e.g. `api.example.com`.
     pub allowed_hosts: Vec<String>,
 }
 
@@ -54,6 +53,7 @@ impl fmt::Debug for SecretSpec {
 pub enum SecretError {
     Name,
     Value,
+    ValueTooShort,
     ValueTooLarge,
     NoHosts,
     TooManyHosts,
@@ -64,7 +64,7 @@ impl SecretError {
     pub fn field(&self) -> &'static str {
         match self {
             Self::Name => "name",
-            Self::Value | Self::ValueTooLarge => "value",
+            Self::Value | Self::ValueTooShort | Self::ValueTooLarge => "value",
             Self::NoHosts | Self::TooManyHosts | Self::Host(_) => "allowed_hosts",
         }
     }
@@ -80,12 +80,17 @@ impl fmt::Display for SecretError {
             Self::Value => f.write_str(
                 "value must be printable ASCII (it is sent in a header), with no line breaks",
             ),
+            Self::ValueTooShort => write!(
+                f,
+                "value must be at least {MIN_SECRET_BYTES} characters; a short secret can be guessed"
+            ),
             Self::ValueTooLarge => write!(f, "value exceeds {MAX_SECRET_BYTES} bytes"),
             Self::NoHosts => f.write_str("allowed_hosts must name at least one host"),
             Self::TooManyHosts => write!(f, "allowed_hosts may name at most {MAX_ALLOWED_HOSTS} hosts"),
             Self::Host(h) => write!(
                 f,
-                "{h:?} is not a public host name or *.domain pattern (no scheme, port or path)"
+                "{h:?} is not a public host name: give exact names such as api.example.com \
+                 (no scheme, port, path or wildcard)"
             ),
         }
     }
@@ -124,6 +129,9 @@ impl SecretRequest {
         if self.value.len() > MAX_SECRET_BYTES {
             return Err(SecretError::ValueTooLarge);
         }
+        if self.value.len() < MIN_SECRET_BYTES {
+            return Err(SecretError::ValueTooShort);
+        }
         // Header-safe: visible ASCII, spaces and tabs. A line break would split the header.
         if self.value.is_empty()
             || !self
@@ -141,13 +149,9 @@ impl SecretRequest {
         }
         let mut hosts = Vec::new();
         for raw in &self.allowed_hosts {
-            let host = match raw.strip_prefix("*.") {
-                // A wildcard needs a registrable-looking base: "*.com" would allow everything.
-                Some(base) if base.contains('.') => public_host(base).map(|b| format!("*.{b}")),
-                Some(_) => None,
-                None => public_host(raw),
-            }
-            .ok_or_else(|| SecretError::Host(raw.clone()))?;
+            // Exact names only. A wildcard can't be made safe: under shared domains such as
+            // amazonaws.com or workers.dev anyone can get a name, and no list says which they are.
+            let host = public_host(raw).ok_or_else(|| SecretError::Host(raw.clone()))?;
             hosts.push(host);
         }
         hosts.sort();
@@ -160,12 +164,9 @@ impl SecretRequest {
     }
 }
 
-/// Whether `host` (lowercase, as `Destination::host` gives it) matches one of the patterns.
-pub fn host_allowed(patterns: &[String], host: &str) -> bool {
-    patterns.iter().any(|p| match p.strip_prefix("*.") {
-        Some(base) => host.len() > base.len() + 1 && host.ends_with(&format!(".{base}")),
-        None => p == host,
-    })
+/// Whether `host` (lowercase, as `Destination::host` gives it) is one of the allowed names.
+pub fn host_allowed(allowed: &[String], host: &str) -> bool {
+    allowed.iter().any(|a| a == host)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -230,16 +231,40 @@ pub fn fill<'v>(text: &str, value: impl Fn(&str) -> Option<&'v str>) -> Option<S
 }
 
 /// `text` with each secret's value replaced by `[secret:NAME]`, for responses that echo a
-/// credential back. Longer values first, so one that contains another is caught whole.
+/// credential back: as sent, JSON-escaped, or percent-encoded. Best effort: a destination that
+/// transforms the value some other way (base64, masking) is not caught. Longer forms first, so
+/// one value that contains another is caught whole.
 pub fn redact(text: &str, secrets: &[(String, String)]) -> String {
-    let mut sorted: Vec<&(String, String)> =
-        secrets.iter().filter(|(_, v)| !v.is_empty()).collect();
-    sorted.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
+    let mut forms: Vec<(String, &str)> = Vec::new();
+    for (name, value) in secrets.iter().filter(|(_, v)| !v.is_empty()) {
+        let json = value.replace('\\', r"\\").replace('"', r#"\""#);
+        let json_slash = json.replace('/', r"\/");
+        for form in [value.clone(), json, json_slash, percent_encode(value)] {
+            if !forms.iter().any(|(f, _)| *f == form) {
+                forms.push((form, name.as_str()));
+            }
+        }
+    }
+    forms.sort_by_key(|(f, _)| std::cmp::Reverse(f.len()));
     let mut out = text.to_string();
-    for (name, value) in sorted {
-        out = out.replace(value.as_str(), &format!("[secret:{name}]"));
+    for (form, name) in forms {
+        out = out.replace(&form, &format!("[secret:{name}]"));
     }
     out
+}
+
+/// Every byte but RFC 3986's unreserved characters as `%XX`.
+fn percent_encode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -249,17 +274,17 @@ mod tests {
     fn secret(hosts: &[&str]) -> SecretRequest {
         SecretRequest {
             name: "GH_TOKEN".into(),
-            value: "ghp_abc123".into(),
+            value: "ghp_abc123abc123abc".into(),
             allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
         }
     }
 
     #[test]
     fn validates_names_values_and_hosts() {
-        let spec = secret(&["API.github.com", "*.Example.com", "api.github.com"])
+        let spec = secret(&["API.github.com", "uploads.github.com", "api.github.com"])
             .validate()
             .unwrap();
-        assert_eq!(spec.allowed_hosts, ["*.example.com", "api.github.com"]);
+        assert_eq!(spec.allowed_hosts, ["api.github.com", "uploads.github.com"]);
         for name in [
             "",
             "gh",
@@ -273,7 +298,13 @@ mod tests {
             };
             assert_eq!(r.validate().unwrap_err(), SecretError::Name, "{name:?}");
         }
-        for value in ["", "line\nbreak", "cr\r", "ünicode"] {
+        for value in [
+            "",
+            "short",
+            "line\nbreak-padded-out",
+            "cr\r-padded-out-to-16",
+            "ünicode-padded-out-16",
+        ] {
             let r = SecretRequest {
                 value: value.into(),
                 ..secret(&["a.example.com"])
@@ -296,6 +327,12 @@ mod tests {
             "*",
             "a.*.example.com",
             "svc.internal",
+            "*.workers.dev",
+            "*.github.io",
+            "*.co.uk",
+            "*.amazonaws.com",
+            "*.pages.dev",
+            "*.example.com",
         ] {
             assert!(
                 matches!(secret(&[bad]).validate(), Err(SecretError::Host(_))),
@@ -313,6 +350,21 @@ mod tests {
     }
 
     #[test]
+    fn redacts_echoes_as_sent_escaped_or_encoded() {
+        let secrets = vec![("T".to_string(), r#"ab"c\d/e f+g=="#.to_string())];
+        assert_eq!(redact(r#"ab"c\d/e f+g=="#, &secrets), "[secret:T]");
+        assert_eq!(
+            redact(r#"{"x":"ab\"c\\d/e f+g=="}"#, &secrets),
+            r#"{"x":"[secret:T]"}"#
+        );
+        assert_eq!(redact(r#"ab\"c\\d\/e f+g=="#, &secrets), "[secret:T]");
+        assert_eq!(
+            redact("next=ab%22c%5Cd%2Fe%20f%2Bg%3D%3D", &secrets),
+            "next=[secret:T]"
+        );
+    }
+
+    #[test]
     fn debug_never_shows_the_value() {
         let shown = format!(
             "{:?} {:?}",
@@ -323,17 +375,15 @@ mod tests {
     }
 
     #[test]
-    fn matches_hosts_exactly_or_by_subdomain() {
-        let p = vec!["api.github.com".to_string(), "*.example.com".to_string()];
+    fn matches_hosts_exactly() {
+        let p = vec!["api.github.com".to_string(), "foo.workers.dev".to_string()];
         assert!(host_allowed(&p, "api.github.com"));
-        assert!(host_allowed(&p, "a.example.com"));
-        assert!(host_allowed(&p, "a.b.example.com"));
+        assert!(host_allowed(&p, "foo.workers.dev"));
         for no in [
             "github.com",
             "evil.api.github.com",
-            "example.com",
-            "badexample.com",
-            "example.com.evil.net",
+            "bar.workers.dev",
+            "api.github.com.evil.net",
         ] {
             assert!(!host_allowed(&p, no), "{no}");
         }
