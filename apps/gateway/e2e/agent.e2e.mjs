@@ -310,6 +310,19 @@ describe("agent journey through the gateway", () => {
     assert.ok(cron.next_run_ms > Date.now());
     assert.equal(new Date(cron.next_run_ms).getUTCHours(), 6);
     assert.equal((await run("get_cron", { name: "daily-backup" })).schedule, "0 6 * * *");
+    const reporting = await run("create_cron", {
+      name: "daily-backup",
+      schedule: "0 6 * * *",
+      url: "https://dest.example.com/backup",
+      callback_url: "inbox",
+      capture: true,
+      report: "failures",
+    });
+    assert.deepEqual([reporting.callback_url, reporting.capture, reporting.report], ["inbox", true, "failures"]);
+    await assert.rejects(
+      client.executeCapability({ agentId, capability: "create_cron", arguments: { name: "y", schedule: "0 6 * * *", url: "https://dest.example.com/", report: "failures" } }),
+      { code: "invalid_request", status: 400 },
+    );
     assert.deepEqual((await run("list_crons", {})).crons.map((c) => c.name), ["daily-backup"]);
     await assert.rejects(
       client.executeCapability({ agentId, capability: "create_cron", arguments: { name: "x", schedule: "* * * * *", url: "https://dest.example.com/" } }),

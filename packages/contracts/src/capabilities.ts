@@ -145,6 +145,10 @@ export const capabilities: CapabilityDefinition[] = [
       "(e.g. \"0 6 * * *\" is daily at 06:00 UTC). Each run is an ordinary task (see get_task) and costs delivery attempts. " +
       "Dead man's switch: if a run fails, or cannot start because the trial's attempts ran out or it ended, " +
       "RunLater POSTs a signed alert to alert_url, and again when a run next succeeds. " +
+      "To hear how runs went, pass callback_url (a URL, or \"inbox\" for read_inbox) and capture: true to keep each run's response; " +
+      "report: \"failures\" sends only failed runs, so a healthy cron stays quiet (and doesn't wake you via set_wake). " +
+      "A run that cannot start at all (attempts ran out, the trial ended) never reports; it turns the cron failing, which goes to " +
+      "alert_url, so set alert_url too (\"inbox\" works). " +
       "Calling again with the same name replaces that cron's schedule and request. At most 10 crons.",
     input: {
       type: "object",
@@ -169,6 +173,24 @@ export const capabilities: CapabilityDefinition[] = [
           description:
             "https:// URL that gets a signed POST when the cron starts failing (cron.failing) and when it recovers (cron.recovered). " +
             "Or \"inbox\" to get those events from read_inbox instead.",
+        },
+        callback_url: {
+          type: "string",
+          maxLength: 2048,
+          description:
+            "Where each run reports when it finishes, as schedule_http's callback_url: a signed POST of task.finished to an https:// " +
+            "URL (one extra delivery attempt per report; one is reserved per run), or \"inbox\" (free).",
+        },
+        capture: {
+          type: "boolean",
+          default: false,
+          description: "Keep each run's response (status, 4 headers, first 16 KiB), as schedule_http's capture. Untrusted data.",
+        },
+        report: {
+          type: "string",
+          enum: ["always", "failures"],
+          default: "always",
+          description: "Which runs report to callback_url: every run, or only failed ones. \"failures\" needs callback_url.",
         },
       },
     },
