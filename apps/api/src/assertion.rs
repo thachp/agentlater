@@ -35,6 +35,9 @@ pub enum Scope {
     Billing,
     /// Set and delete project secrets.
     Secrets,
+    /// Hand the ledger a request a sender made to one of the project's hooks. Only the
+    /// gateway's public hook route asks for it; no agent is granted it.
+    HooksReceive,
 }
 
 impl Scope {
@@ -46,6 +49,7 @@ impl Scope {
             "cancel" => Self::Cancel,
             "billing" => Self::Billing,
             "secrets" => Self::Secrets,
+            "hooks.receive" => Self::HooksReceive,
             _ => return None,
         })
     }

@@ -25,6 +25,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+mod hooks;
+pub use hooks::{token_hash, CreatedHook, HookList, HookOutcome, HookRow, HookView, Received};
+
 /// A published task that has not been claimed after this long is published again.
 pub const REPUBLISH_MS: i64 = 60_000;
 /// Most tasks published per alarm; the alarm re-arms immediately if more are due.
@@ -200,6 +203,33 @@ const MIGRATIONS: &[&[&str]] = &[
         "ALTER TABLE tasks ADD COLUMN on_match TEXT",
         "ALTER TABLE tasks ADD COLUMN action_reserve INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE tasks ADD COLUMN triggered_by TEXT",
+    ],
+    // 11: inbound hooks. A hook is found by the SHA-256 of its token; `sealed_secret` is its
+    // verify secret, sealed by the API. `hook_deliveries` holds senders' delivery ids for a day,
+    // to drop retries; `hook_day`/`hook_day_count` cap the events a project gets per UTC day.
+    &[
+        "CREATE TABLE IF NOT EXISTS hooks (
+            name TEXT PRIMARY KEY,
+            token_hash TEXT NOT NULL UNIQUE,
+            verify TEXT,
+            sealed_secret TEXT,
+            keep_headers TEXT NOT NULL,
+            created_ms INTEGER NOT NULL,
+            last_received_ms INTEGER,
+            received INTEGER NOT NULL DEFAULT 0,
+            refused TEXT NOT NULL DEFAULT '{}',
+            rate_tat_ms INTEGER NOT NULL DEFAULT 0,
+            day INTEGER NOT NULL DEFAULT 0,
+            day_count INTEGER NOT NULL DEFAULT 0
+        )",
+        "CREATE TABLE IF NOT EXISTS hook_deliveries (
+            hook TEXT NOT NULL,
+            delivery_id TEXT NOT NULL,
+            expires_ms INTEGER NOT NULL,
+            PRIMARY KEY (hook, delivery_id)
+        )",
+        "ALTER TABLE project ADD COLUMN hook_day INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE project ADD COLUMN hook_day_count INTEGER NOT NULL DEFAULT 0",
     ],
 ];
 
@@ -2727,12 +2757,12 @@ impl<'a, D: Db> Ledger<'a, D> {
     }
 
     /// Adds an event. A full inbox makes room by removing its oldest acked event, or if every
-    /// event is unread, its oldest one, counted in `dropped`.
+    /// event is unread, its oldest hook event, else its oldest one, counted in `dropped`.
     fn add_to_inbox(&self, seq: i64, event: &serde_json::Value, now: i64) -> Result<(), DbError> {
         // A captured body inside the event goes when the task's own copy does.
-        let response_until = event["task"]["response"]["body"]
-            .is_string()
-            .then_some(now + CAPTURE_RETENTION_MS);
+        let response_until = (event["task"]["response"]["body"].is_string()
+            || event["request"]["body"].is_string())
+        .then_some(now + CAPTURE_RETENTION_MS);
         self.db.exec(
             "INSERT INTO inbox (seq, at_ms, event, response_until_ms) VALUES (?, ?, ?, ?)",
             vec![
@@ -2748,9 +2778,11 @@ impl<'a, D: Db> Ledger<'a, D> {
         if held.first().map_or(0, |c| c.total) <= MAX_INBOX_EVENTS {
             return Ok(());
         }
+        // Unread hook events go before other unread events: they come from outside, and must
+        // not push out the results of the project's own work.
         let oldest: Vec<OldestRow> = self.db.query(
             "SELECT seq, seq > (SELECT inbox_acked_seq FROM project) AS unread FROM inbox \
-             ORDER BY unread, seq LIMIT 1",
+             ORDER BY unread, json_extract(event, '$.event') IS NOT 'hook.received', seq LIMIT 1",
             vec![],
         )?;
         if let Some(oldest) = oldest.first() {
@@ -2797,7 +2829,8 @@ impl<'a, D: Db> Ledger<'a, D> {
         Ok(())
     }
 
-    /// Removes captured response bodies from inbox events once the task's copy is gone.
+    /// Removes captured response bodies (and hook request bodies) from inbox events once the
+    /// task's copy is gone.
     fn expire_inbox_responses(&self, now: i64) -> Result<(), DbError> {
         let due: Vec<InboxRow> = self.db.query(
             "SELECT seq, at_ms, event FROM inbox WHERE response_until_ms <= ?",
@@ -2808,6 +2841,10 @@ impl<'a, D: Db> Ledger<'a, D> {
                 serde_json::from_str(&row.event).map_err(|e| DbError(e.to_string()))?;
             if let Some(response) = event["task"]["response"].as_object_mut() {
                 response.insert("body".into(), serde_json::Value::Null);
+            }
+            // A hook event's body is someone else's request: it goes on the same clock.
+            if let Some(request) = event["request"].as_object_mut() {
+                request.insert("body".into(), serde_json::Value::Null);
             }
             self.db.exec(
                 "UPDATE inbox SET event = ?, response_until_ms = NULL WHERE seq = ?",

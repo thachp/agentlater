@@ -3,16 +3,21 @@
 
 use crate::assertion::{self, Scope};
 use crate::db::{Db, DbError, Param};
-use crate::ledger::{ApiError, Claimed, Delivery, Dispatch, Ledger, ResponseRead, SealedSecret};
+use crate::ledger::{
+    ApiError, Claimed, Delivery, Dispatch, HookOutcome, Ledger, Received, ResponseRead,
+    SealedSecret,
+};
 use crate::sealing::{SealingKey, NONCE_BYTES};
+use base64::Engine;
 use futures_util::future::{join_all, select, Either};
 use futures_util::StreamExt;
 use runlater_core::limits::{
-    ATTEMPT_TIMEOUT_MS, CAPTURED_HEADERS, CAPTURE_BODY_BYTES, MAX_WATCH_RESPONSE_BYTES,
+    ATTEMPT_TIMEOUT_MS, CAPTURED_HEADERS, CAPTURE_BODY_BYTES, HOOK_BODY_KEPT_BYTES,
+    MAX_HOOK_REQUEST_BYTES, MAX_WATCH_RESPONSE_BYTES,
 };
 use runlater_core::{
-    fill, redact, CronRequest, Outcome, PollBody, ScheduleRequest, SecretRequest, Status,
-    WakeRequest, WatchRequest,
+    cut, delivery_id, fill, kept_headers as hook_headers, redact, verify, CronRequest, HookRequest,
+    Outcome, PollBody, ScheduleRequest, SecretRequest, Status, WakeRequest, WatchRequest,
 };
 use runlater_egress::{sign, Destination};
 use serde::de::DeserializeOwned;
@@ -135,6 +140,11 @@ fn required_scope(method: &Method, path: &[&str]) -> Option<Scope> {
         // Names and hosts only; values are never returned.
         (Method::Get, ["v1", "secrets"]) => Scope::Read,
         (Method::Post, ["v1", "secrets", _, "delete"]) => Scope::Secrets,
+        (Method::Post, ["v1", "hooks"]) => Scope::Schedule,
+        // Names, settings and counts only; URLs and secrets are never returned.
+        (Method::Get, ["v1", "hooks"]) => Scope::Read,
+        (Method::Post, ["v1", "hooks", "_receive"]) => Scope::HooksReceive,
+        (Method::Post, ["v1", "hooks", _, "delete"]) => Scope::Cancel,
         _ => return None,
     })
 }
@@ -268,6 +278,36 @@ struct InboxAckBody {
     up_to: i64,
 }
 
+/// A request a sender made to a hook, as the gateway forwards it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HookDelivery {
+    token: String,
+    headers: Vec<(String, String)>,
+    /// The raw body, base64: the signature is over its exact bytes.
+    body: String,
+}
+
+/// The name a hook's verify secret is sealed under. Secret names are `A-Z0-9_`, so it can't
+/// be mistaken for (or opened as) a project secret.
+fn hook_secret_name(hook: &str) -> String {
+    format!("hook:{hook}")
+}
+
+/// What a hook's sender is told: a status and an empty body, never anything it sent.
+fn hook_answer(status: u16, reason: Option<&str>, retry_after_ms: Option<i64>) -> Result<Response> {
+    let body = match reason {
+        Some(r) => serde_json::json!({ "error": { "code": r } }),
+        None => serde_json::json!({}),
+    };
+    let mut r = json(&body, status)?;
+    if let Some(ms) = retry_after_ms {
+        r.headers_mut()
+            .set("Retry-After", &((ms + 999) / 1000).max(1).to_string())?;
+    }
+    Ok(r)
+}
+
 #[derive(Deserialize)]
 struct ListQuery {
     status: Option<Status>,
@@ -289,6 +329,72 @@ fn created<T: Serialize>(value: &T, was_created: bool) -> Result<Response> {
 }
 
 impl TaskLedger {
+    /// Checks a hook request's signature, then lets the ledger write it. Nothing the sender
+    /// wrote goes back to it.
+    fn receive_hook(
+        &self,
+        ledger: &Ledger<'_, Sql>,
+        project_id: &str,
+        d: HookDelivery,
+        t: i64,
+    ) -> Result<Response> {
+        let failed = |e: DbError| Error::RustError(e.to_string());
+        let Some(hook) = ledger.hook_for_token(&d.token).map_err(failed)? else {
+            return hook_answer(404, Some("hook_not_found"), None);
+        };
+        let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(&d.body) else {
+            return hook_answer(400, Some("invalid_request"), None);
+        };
+        if raw.len() > MAX_HOOK_REQUEST_BYTES {
+            return hook_answer(413, Some("too_large"), None);
+        }
+        let headers: Vec<(String, String)> = d
+            .headers
+            .into_iter()
+            .map(|(k, v)| (k.to_ascii_lowercase(), v))
+            .collect();
+        let check = hook.verify().map_err(failed)?;
+        if let Some(spec) = &check {
+            let secret = sealing_key(&self.env).and_then(|key| {
+                key.open(
+                    project_id,
+                    &hook_secret_name(&hook.name),
+                    hook.sealed_secret.as_deref()?,
+                )
+            });
+            // Without the key nothing can be checked; the sender retries a 503 later.
+            let Some(secret) = secret else {
+                return hook_answer(503, Some("secrets_unavailable"), None);
+            };
+            if let Err(why) = verify(spec, secret.as_bytes(), &headers, &raw, t) {
+                ledger
+                    .hook_refused(&hook.name, why.as_str())
+                    .map_err(failed)?;
+                return hook_answer(401, Some(why.as_str()), None);
+            }
+        }
+        let keep = hook.keep_headers().map_err(failed)?;
+        let text = String::from_utf8_lossy(&raw);
+        let body = cut(&text, HOOK_BODY_KEPT_BYTES);
+        let received = Received {
+            verified: check.is_some(),
+            delivery_id: delivery_id(check.as_ref(), &headers, &raw),
+            headers: hook_headers(check.as_ref(), &keep, &headers),
+            body,
+            body_bytes: raw.len(),
+            truncated: body.len() < text.len(),
+        };
+        match ledger.receive_hook(&hook, received, t).map_err(failed)? {
+            HookOutcome::Accepted(_) => hook_answer(202, None, None),
+            HookOutcome::Duplicate => hook_answer(200, None, None),
+            HookOutcome::Refused {
+                status,
+                reason,
+                retry_after_ms,
+            } => hook_answer(status, Some(reason), retry_after_ms),
+        }
+    }
+
     fn sql(&self) -> Sql {
         Sql(self.state.storage().sql())
     }
@@ -420,6 +526,53 @@ impl TaskLedger {
                 Err(e) => Err(e),
             },
             (Method::Get, ["v1", "secrets"]) => ledger.secrets().map(|s| json(&s, 200)),
+            (Method::Post, ["v1", "hooks"]) => match body::<HookRequest>(req).await {
+                Ok(r) => match r.validate() {
+                    Err(e) => Err(ApiError {
+                        field: Some(e.field()),
+                        ..ApiError::bad_request(e.to_string())
+                    }),
+                    Ok(spec) => {
+                        let sealed = match (&spec.verify, sealing_key(&self.env)) {
+                            (None, _) => None,
+                            (Some(_), None) => {
+                                return simple_error(
+                                    503,
+                                    "secrets_unavailable",
+                                    "verified hooks are not configured on this deployment",
+                                )
+                            }
+                            (Some((_, secret)), Some(key)) => {
+                                let nonce: [u8; NONCE_BYTES] = random_bytes(NONCE_BYTES as u32)?
+                                    .try_into()
+                                    .map_err(|_| Error::RustError("short nonce".into()))?;
+                                Some(key.seal(
+                                    &project_id,
+                                    &hook_secret_name(&spec.name),
+                                    secret,
+                                    nonce,
+                                ))
+                            }
+                        };
+                        let token = format!("hk_{}", hex::encode(random_bytes(32)?));
+                        ledger
+                            .put_hook(&spec, &token, sealed.as_deref(), t)
+                            .map(|(h, c)| created(&h, c))
+                    }
+                },
+                Err(e) => Err(e),
+            },
+            (Method::Get, ["v1", "hooks"]) => ledger.hooks().map(|h| json(&h, 200)),
+            (Method::Post, ["v1", "hooks", "_receive"]) => {
+                let d = match body::<HookDelivery>(req).await {
+                    Ok(d) => d,
+                    Err(e) => return error(e),
+                };
+                return self.receive_hook(ledger, &project_id, d, t);
+            }
+            (Method::Post, ["v1", "hooks", name, "delete"]) => {
+                ledger.delete_hook(name).map(|v| json(&v, 200))
+            }
             (Method::Post, ["v1", "secrets", name, "delete"]) => {
                 ledger.delete_secret(name).map(|v| json(&v, 200))
             }

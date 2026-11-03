@@ -316,6 +316,74 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Secret" }
         default: { $ref: "#/components/responses/Error" }
+  /v1/hooks:
+    post:
+      operationId: createHook
+      description: >
+        Creates an inbound hook, or replaces the one with this name with a new token (201 created,
+        200 replaced; the old URL stops working). Returns url_path, /h/{project_id}/{token}, this
+        once: only its SHA-256 is stored. The gateway turns it into the public URL. 403
+        trial_expired, 429 hook_limit past 20, 503 secrets_unavailable for verify without a
+        SECRETS_KEY. Scope: schedule.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HookRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/CreatedHook" }
+        "200": { $ref: "#/components/responses/CreatedHook" }
+        default: { $ref: "#/components/responses/Error" }
+    get:
+      operationId: listHooks
+      description: "Hooks by name, with their counts; never URLs or secrets. Scope: read."
+      responses:
+        "200":
+          description: The project's hooks.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [hooks]
+                properties:
+                  hooks: { type: array, items: { $ref: "#/components/schemas/Hook" } }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/hooks/_receive:
+    post:
+      operationId: receiveHook
+      description: >
+        A request a sender made to a hook, forwarded by the gateway's public /h/ route. Checks the
+        signature, the rate limits (per hook, and per project per UTC day) and the sender's
+        delivery id, then writes a hook.received inbox event. Answers with a status, and an error
+        code when refused (the gateway sends senders only the status and {}): 202 written, 200 a retry already written, 401 signature_missing / signature_invalid
+        / signature_stale, 404 hook_not_found, 410 project_expired, 413 too_large, 429
+        rate_limited / daily_limit / inbox_full (with Retry-After), 503 secrets_unavailable. Scope:
+        hooks.receive, which only the gateway uses.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [token, headers, body]
+              properties:
+                token: { type: string, pattern: "^hk_[0-9a-f]{64}$" }
+                headers: { type: array, items: { type: array, minItems: 2, maxItems: 2, items: { type: string } } }
+                body: { type: string, description: "The raw body, base64; at most 256 KiB decoded." }
+      responses:
+        "202": { description: Written to the inbox. }
+        "200": { description: A retry of a delivery already written. }
+        default: { description: "Refused; see the description for the statuses." }
+  /v1/hooks/{name}/delete:
+    post:
+      operationId: deleteHook
+      description: "Returns the hook as it was; its URL answers 404 from now on. 404 hook_not_found. Scope: cancel."
+      parameters:
+        - { $ref: "#/components/parameters/CronName" }
+      responses:
+        "200": { $ref: "#/components/responses/Hook" }
+        default: { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     assertion:
@@ -325,7 +393,7 @@ components:
       description: >
         base64url(claims JSON) "." base64url(Ed25519 signature over the first segment).
         Claims: aud "runlater-api", sub (project id, [A-Za-z0-9_-]{1,64}), scope
-        (space-separated: project schedule read cancel billing secrets), iat and exp in unix seconds,
+        (space-separated: project schedule read cancel billing secrets hooks.receive), iat and exp in unix seconds,
         lifetime at most 300 s.
   parameters:
     TaskId:
@@ -339,6 +407,22 @@ components:
       required: true
       schema: { type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$" }
   responses:
+    Hook:
+      description: The hook, without its URL or secret.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Hook" }
+    CreatedHook:
+      description: The hook, and its URL's path, shown this once.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - { $ref: "#/components/schemas/Hook" }
+              - type: object
+                required: [url_path]
+                properties:
+                  url_path: { type: string, pattern: "^/h/prj_[0-9a-f]{24}/hk_[0-9a-f]{64}$" }
     Secret:
       description: The secret, without its value.
       content:
@@ -684,6 +768,45 @@ components:
           maxItems: 20
           items: { type: string }
           description: Exact public host names; no wildcards.
+    HookRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$" }
+        verify:
+          type: object
+          additionalProperties: false
+          required: [scheme, secret]
+          properties:
+            scheme: { type: string, enum: [github, stripe, hmac_sha256] }
+            secret: { type: string, minLength: 16, maxLength: 1024, description: Printable ASCII; sealed and never returned. }
+            header: { type: string, maxLength: 64, description: hmac_sha256 only (required there). }
+            prefix: { type: string, maxLength: 32, description: hmac_sha256 only. }
+        keep_headers:
+          type: array
+          maxItems: 10
+          items: { type: string, maxLength: 64 }
+          description: Never authorization, cookie, proxy-authorization, set-cookie, x-api-key, x-auth-token, x-access-token, x-gitlab-token or a signature header.
+    Hook:
+      type: object
+      required: [name, verify, keep_headers, created_ms, last_received_ms, received, refused]
+      properties:
+        name: { type: string }
+        verify:
+          type: [object, "null"]
+          properties:
+            scheme: { type: string, enum: [github, stripe, hmac_sha256] }
+            header: { type: string }
+            prefix: { type: string }
+        keep_headers: { type: array, items: { type: string } }
+        created_ms: { type: integer }
+        last_received_ms: { type: [integer, "null"] }
+        received: { type: integer, description: Requests written to the inbox. }
+        refused:
+          type: object
+          additionalProperties: { type: integer }
+          description: "Refusals by reason: signature_missing, signature_invalid, signature_stale, rate_limited, daily_limit, inbox_full, project_expired."
     Secret:
       type: object
       description: Never includes the value.

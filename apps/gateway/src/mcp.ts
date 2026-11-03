@@ -29,7 +29,8 @@ const INSTRUCTIONS =
   "To learn the result in a later session without a public URL of your own, pass callback_url: \"inbox\" " +
   "(and capture: true to keep the response). At the start of a session, if get_project shows inbox_unread above 0, " +
   "call read_inbox and ack what you handle. If something can start you without a person (a routine or workflow trigger), " +
-  "give its URL to set_wake and RunLater starts you when results arrive. Never paste a credential into a request: store it " +
+  "give its URL to set_wake and RunLater starts you when results arrive. To hear from a service that sends webhooks " +
+  "(GitHub, Stripe, CI), register a create_hook URL with it instead of polling; requests arrive in the inbox. Never paste a credential into a request: store it " +
   "with set_secret (bound to the hosts it is for) and use {{secret:NAME}} in a header. Check a single task with get_task. " +
   "When the project runs out of attempts, get_payment_link gives your user a link to buy more.";
 

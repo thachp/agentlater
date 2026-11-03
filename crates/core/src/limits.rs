@@ -63,6 +63,31 @@ pub const MAX_SECRET_NAME_BYTES: usize = 64;
 /// Host patterns one secret may allow.
 pub const MAX_ALLOWED_HOSTS: usize = 20;
 
+/// Inbound hooks a project may hold.
+pub const MAX_HOOKS: i64 = 20;
+/// The largest request a hook accepts; the signature is checked over all of it.
+pub const MAX_HOOK_REQUEST_BYTES: usize = 256 * 1024;
+/// How much of a hook request's body the inbox event keeps.
+pub const HOOK_BODY_KEPT_BYTES: usize = 16 * 1024;
+/// Headers a hook may keep beyond the ones it always keeps.
+pub const MAX_KEEP_HEADERS: usize = 10;
+pub const MIN_HOOK_SECRET_BYTES: usize = 16;
+pub const MAX_HOOK_SECRET_BYTES: usize = 1024;
+/// Per hook: 60 requests a minute, one a second on average, in bursts of up to 20.
+pub const HOOK_INTERVAL_MS: i64 = SECOND_MS;
+pub const HOOK_BURST: i64 = 20;
+/// Hook events a project may receive per UTC day: trial projects, and projects that bought
+/// attempts.
+pub const HOOK_EVENTS_PER_DAY: i64 = 1_000;
+pub const HOOK_EVENTS_PER_DAY_PAID: i64 = 10_000;
+/// A hook without `verify` takes anyone's requests, so it gets a small cap of its own: one
+/// leaked URL can't use up the project's day.
+pub const HOOK_UNVERIFIED_EVENTS_PER_DAY: i64 = 100;
+/// A sender's delivery id seen this recently is a retry, not a new event.
+pub const HOOK_DEDUPE_MS: i64 = DAY_MS;
+/// How far a signed timestamp (Stripe's `t=`) may be from now.
+pub const HOOK_SIGNATURE_TOLERANCE_MS: i64 = 5 * MINUTE_MS;
+
 pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
 pub const MAX_ATTEMPTS: u32 = 5;
 pub const ATTEMPT_TIMEOUT_MS: i64 = 10 * SECOND_MS;

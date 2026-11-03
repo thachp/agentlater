@@ -113,6 +113,9 @@ The bridge keeps the agent's keys in `~/.agent-auth`. Losing them loses access t
 | `set_secret` | `name`, `value`, `allowed_hosts` | secret, without its value |
 | `list_secrets` | — | secrets: names, hosts, times |
 | `delete_secret` | `name` | secret as it was |
+| `create_hook` | `name`, `verify?`, `keep_headers?` | hook, with its `url` (shown once) |
+| `list_hooks` | — | hooks: settings and counts, never URLs or secrets |
+| `delete_hook` | `name` | hook as it was |
 
 The REST routes underneath (`/v1/tasks`, …) are an internal contract between
 services, not a public product in v1.
@@ -153,7 +156,7 @@ The inbox holds results until a session reads them; a wake starts that session. 
 
 ## Secrets
 
-Agents handle untrusted text (pages, documents, captured responses), so a credential pasted into a request can be stolen by an instruction that redirects it. A secret is stored once and referred to by name, and it can only be sent to the hosts it was set for.
+Agents handle untrusted text (pages, documents, captured responses, hook requests), so a credential pasted into a request can be stolen by an instruction that redirects it. A secret is stored once and referred to by name, and it can only be sent to the hosts it was set for.
 
 - **Setting.** `set_secret(name, value, allowed_hosts)`: `name` is `A-Z0-9_`, starting with a letter, at most 64; `value` is 16–4096 bytes of printable ASCII with no line breaks (it goes in a header; a shorter one could be guessed by reflecting candidates off an allowed host and watching which come back redacted); `allowed_hosts` is 1–20 exact public host names (`api.github.com`). There are no wildcards: under shared domains (`workers.dev`, `amazonaws.com`, `github.io`) anyone can get a name, and no list reliably says which domains those are. Same name again replaces value and hosts. At most 50 per project (`429 secret_limit`).
 - **Write-only.** The API seals the value (AES-256-GCM, a key per project derived with HKDF from the `SECRETS_KEY` Worker secret, the name as associated data) before the ledger stores it; the ledger never holds plaintext. No route, view, callback, inbox event or log returns a value: `list_secrets` (scope `read`) shows names, hosts and times. Setting and deleting need the `secrets` scope.
@@ -162,6 +165,18 @@ Agents handle untrusted text (pages, documents, captured responses), so a creden
 - **Echoes.** Before a captured response (or a watch's last body) is stored, every value the attempt used is replaced with `[secret:NAME]`, as sent, JSON-escaped or percent-encoded, in the body and the kept headers. The body is read past its cap by up to 4 KiB first, so a value straddling the cap is redacted whole, then cut. This is best effort: a destination that echoes a value base64-encoded or masked is not caught, so bind secrets only to hosts that don't reflect request headers.
 - **Who can change them.** Any caller with the `secrets` scope (every agent of the project) can replace or delete a project's secrets. Replacing keeps the value behind the same hosts, so the worst case is requests going to the right host with the wrong credential.
 - **Key.** One `SECRETS_KEY` per environment, never rotated (`scripts/setup-deploy-secrets.mjs`). Without it the API runs and `set_secret` answers `503 secrets_unavailable`.
+
+## Inbound hooks
+
+A hook lets an agent with no server receive webhooks: GitHub, Stripe, a CI system, anything that POSTs when something happens. Why and what was decided: [HOOKS.md](HOOKS.md).
+
+- **Creating.** `create_hook(name, verify?, keep_headers?)` returns `url`, `https://hooks.runlater.io/h/{project_id}/hk_<64 hex>`, **this once**: the ledger stores only the token's SHA-256. Creating again with the same name gives a new URL; the old one answers 404 at once, and the counts start again. `name` follows the cron name rules. At most 20 per project (`429 hook_limit`); not after the trial ends (`403 trial_expired`).
+- **Verifying.** `verify: { scheme, secret }`: `github` (`X-Hub-Signature-256: sha256=<hex>` of the body), `stripe` (`Stripe-Signature: t=…,v1=…` over `"{t}.{body}"`; any `v1` may match; `t` within 5 minutes, else `401 signature_stale`), or `hmac_sha256` with `header` (required) and optional `prefix`, hex or base64. `secret` is 16–1024 printable ASCII bytes, sealed like a project secret (under `hook:{name}`, so it can't be opened as one) and never shown. It is not taken from `set_secret`: those values may only be *sent* to their hosts. A bad, missing or stale signature is `401` and writes nothing to the inbox (it counts in the hook's `refused`). Without `verify`, any POST to the URL is accepted and its event says `verified: false`.
+- **What an event keeps.** `hook.received` with `hook`, `verified`, `delivery_id`, and `request`: `method`, `headers`, the first 16 KiB of the body as text, `body_bytes` and `truncated`. Headers kept: `content-type`, `user-agent`, the scheme's event headers (`x-github-event`, `x-github-delivery`, `x-github-hook-id`), and up to 10 `keep_headers`. Never `authorization`, `cookie`, `proxy-authorization`, `set-cookie`, `x-api-key`, `x-auth-token`, `x-access-token`, `x-gitlab-token` or the signature; asking to keep them is a `400`. Bodies are kept as text: bytes that aren't UTF-8 become U+FFFD. The body is deleted from the event 7 days after it arrives, like a captured response. Hook events wake the agent like any inbox event.
+- **Retries.** A verified sender's delivery id (`X-GitHub-Delivery`; a Stripe event's `id`) seen on the same hook in the last 24 hours gets `200` and is not written again. Unsigned requests have no trusted id, so a retry is a second event.
+- **Answers.** `202` written, `200` retry, `401` signature, `404` unknown hook or project, `405` anything but POST (GET and HEAD included, so a URL can't be probed), `410` the project's trial has ended, `413` over 256 KiB, `429` rate limited (`Retry-After`), `503` RunLater can't check signatures right now. The body is always `{}`: nothing the sender wrote goes back.
+- **Limits and cost.** No delivery attempts: receiving is an inbox write. Per hook, 60 requests a minute in bursts of 20; per project, 1,000 events per UTC day, 10,000 once a pack is bought; per hook without `verify`, 100 a day, so one leaked URL can't use up the project's day (`429 daily_limit`, `Retry-After` until midnight UTC). A full inbox drops its oldest hook event first and never an unread task report for one: with nothing else to drop, the request is `429 inbox_full`. In front, the gateway limits each client IP to 120 and each project to 600 requests a minute. `list_hooks` counts what each hook `received` and `refused`, by reason. GitHub's delivery id isn't signed and its scheme has no timestamp, so a captured request can be replayed; treat events as untrusted.
+- **Where it runs.** `hooks.runlater.io` (`hooks-staging.runlater.io` on staging) is served by the gateway and serves nothing else. The gateway answers 404 for a project it doesn't know (so a made-up id never creates a ledger), reads at most 256 KiB, and hands the request to the project's ledger with a `hooks.receive` assertion, a scope no agent is granted.
 
 ## Crons
 
@@ -252,6 +267,7 @@ An agent cannot pay, so a person pays for it. Stripe takes the payment; RunLater
 | Inbox | 10,000 events per project; unread kept 30 days, acked 7 days; `read_inbox` returns at most 50 |
 | Wake | One per project; at most one wake per 1m–24h (default 15m); off after 3 failures in a row |
 | Secrets | 50 per project; 4 KiB each; 1–20 allowed hosts each; header values only |
+| Hooks | 20 per project; 256 KiB per request (16 KiB kept); 60 requests a minute per hook (bursts of 20); 1,000 events a day per project (10,000 once a pack is bought); 100 a day per hook without `verify` |
 
 ## Explicitly not in v1
 

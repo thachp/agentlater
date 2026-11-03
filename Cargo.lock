@@ -724,7 +724,9 @@ dependencies = [
 name = "runlater-core"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "hex",
+ "hmac",
  "runlater-egress",
  "serde",
  "serde_json",

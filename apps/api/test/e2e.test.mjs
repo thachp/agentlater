@@ -505,6 +505,28 @@ describe("api", () => {
     assert.equal((await api("POST", "/v1/watches", { body: { url: "https://receiver.example.com/x", every: "1m", until: { status: [200] }, deadline: "1h" } })).json.error.field, "every");
   });
 
+  test("a hook's requests reach the inbox only through the gateway's scope", async () => {
+    const created = await api("POST", "/v1/hooks", { scope: "schedule", body: { name: "form", keep_headers: ["X-Form"] } });
+    assert.equal(created.status, 201);
+    const token = created.json.url_path.split("/").pop();
+    assert.match(token, /^hk_[0-9a-f]{64}$/);
+    const delivery = { token, headers: [["Content-Type", "text/plain"], ["X-Form", "signup"], ["Cookie", "s=1"]], body: Buffer.from("hello").toString("base64") };
+    // An agent's scopes can't hand the ledger a request; only the gateway's hook route can.
+    assert.equal((await api("POST", "/v1/hooks/_receive", { scope: "schedule", body: delivery })).status, 403);
+    const res = await api("POST", "/v1/hooks/_receive", { scope: "hooks.receive", body: delivery });
+    assert.equal(res.status, 202);
+    assert.deepEqual(res.json, {});
+    assert.equal((await api("POST", "/v1/hooks/_receive", { scope: "hooks.receive", body: { ...delivery, token: `hk_${"0".repeat(64)}` } })).status, 404);
+    const page = (await api("POST", "/v1/inbox/read", { scope: "read", body: { limit: 50 } })).json;
+    const event = page.events.find((e) => e.event === "hook.received" && e.hook === "form");
+    assert.equal(event.verified, false);
+    assert.equal(event.request.body, "hello");
+    assert.deepEqual(event.request.headers, { "content-type": "text/plain", "x-form": "signup" });
+    const listed = (await api("GET", "/v1/hooks", { scope: "read" })).json.hooks;
+    assert.equal(listed[0].received, 1);
+    assert.equal(JSON.stringify(listed).includes(token), false);
+  });
+
   test("lists tasks newest first with a cursor", async () => {
     const page = await api("GET", "/v1/tasks?limit=2");
     assert.equal(page.json.tasks.length, 2);

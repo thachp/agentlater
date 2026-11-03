@@ -80,6 +80,9 @@ and `env.production`, with that environment's resource name.
 - Staging is routed to `gateway-staging.runlater.io` (a custom domain in `apps/gateway/wrangler.jsonc`).
   Production is routed to `gateway.runlater.io`. After each hostname serves, set that environment's
   `GATEWAY_URL`.
+- Inbound hooks have a hostname of their own on the same Worker: `hooks-staging.runlater.io` and
+  `hooks.runlater.io`, the `HOOKS_URL` var per environment. It serves only `/h/…`. The first deploy that
+  adds it creates the custom domain; nothing to set by hand.
 
 ### Phase 6 — Staging journey
 
@@ -160,6 +163,8 @@ Dashboard. Refunds and disputes do not take attempts back.
 | `runlater.io`, `www.runlater.io` | `runlater-web-production` |
 | `gateway.runlater.io` | `runlater-gateway-production` |
 | `gateway-staging.runlater.io` | `runlater-gateway-staging` |
+| `hooks.runlater.io` | `runlater-gateway-production` (inbound hooks only) |
+| `hooks-staging.runlater.io` | `runlater-gateway-staging` (inbound hooks only) |
 
 All are custom domains in the apps' `wrangler.jsonc`. A deploy from CI (no TTY) repoints a custom domain
 held by another Worker in place, without deleting it first.

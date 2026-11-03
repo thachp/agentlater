@@ -26,4 +26,5 @@ export const LIMITS: [string, string][] = [
   ["Inbox", "10,000 events per project; unread kept 30 days, acked 7 days"],
   ["Wake", "At most one per 1 minute to 24 hours (default 15 minutes); off after 3 failures in a row"],
   ["Secrets", "50 per project, 4 KiB each, each bound to at most 20 hosts"],
+  ["Hooks", "20 per project; 60 requests a minute each; 1,000 events a day (10,000 once paid), 100 per unverified hook; 256 KiB per request"],
 ];
