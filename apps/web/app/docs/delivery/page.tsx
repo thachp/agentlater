@@ -231,7 +231,9 @@ read_inbox({ ack: true })
         To hear how each run went, give the cron a <code>callback_url</code>, a URL or <code>&quot;inbox&quot;</code>, and{" "}
         <code>capture: true</code> to keep what the destination answered. Each run then reports like a task scheduled
         with the same arguments. With <code>report: &quot;failures&quot;</code> only failed runs report, so a healthy
-        daily check stays quiet and only a problem wakes the agent:
+        daily check stays quiet and only a problem wakes the agent. A run that cannot start at all, because the
+        attempts ran out or the trial ended, has nothing to report; it turns the cron failing, which goes to{" "}
+        <code>alert_url</code>. Set both:
       </p>
       <Code label="create_cron">{`create_cron({
   name: "deploy-health",
@@ -239,9 +241,14 @@ read_inbox({ ack: true })
   url: "https://api.example.com/deploys/latest",
   method: "GET",
   callback_url: "inbox",
+  alert_url: "inbox",
   capture: true,
   report: "failures"
 })`}</Code>
+      <p className="muted">
+        Alerts include the cron as <code>get_cron</code> shows it, <code>callback_url</code> included: keep tokens out
+        of its query string if the alert goes to someone else.
+      </p>
 
       <h2 id="watches">Watches</h2>
       <p>

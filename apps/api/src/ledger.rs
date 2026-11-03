@@ -348,6 +348,9 @@ pub struct TaskView {
     pub response: Option<CapturedResponse>,
     /// Set on a wake: the request that told the agent its inbox has something.
     pub wake_call: bool,
+    /// Set on a run of a cron with `report: failures`: it reports to `callback_url` only if
+    /// it fails, so a run that succeeded has no callback task or inbox event, by design.
+    pub report_failures_only: bool,
     /// Tasks in the same lane run one at a time.
     pub lane: Option<String>,
     /// Set on a cron's runs: the cron's name.
@@ -669,6 +672,7 @@ impl TaskRow {
             capture: self.capture != 0,
             response: self.response(attempts.is_some())?,
             wake_call: self.wake_call != 0,
+            report_failures_only: self.report_failures_only != 0,
             lane: self.lane.clone(),
             cron: self.cron.clone(),
             alert_for: self.alert_for.clone(),
@@ -5333,5 +5337,42 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!((e.status, e.field), (400, Some("report")));
+    }
+
+    #[test]
+    fn a_failures_only_run_reports_when_abandoned_but_not_when_canceled() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.put_cron(
+            reporting("health", serde_json::json!({ "report": "failures" })),
+            T0,
+        )
+        .unwrap();
+        l.fire_crons(SIX).unwrap();
+        let canceled = run_id(&l, "health");
+        let t = l.cancel(&canceled, SIX).unwrap();
+        assert!(t.report_failures_only);
+        assert_eq!(inbox(&l).events.len(), 0, "a canceled run did not fail");
+
+        // Started, then out of attempts before it could be sent: that run failed, so it reports.
+        l.fire_crons(SIX + DAY).unwrap();
+        let starved = run_id(&l, "health");
+        db.0.execute("UPDATE project SET attempts_used = attempt_budget", [])
+            .unwrap();
+        let d = l
+            .publish_due(P, SIX + DAY)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.task_id == starved)
+            .unwrap();
+        assert_eq!(
+            l.claim(&d.task_id, d.generation, SIX + DAY).unwrap(),
+            Claimed::Skip("budget_exhausted")
+        );
+        let e = &inbox(&l).events[0];
+        assert_eq!(
+            (e["task"]["id"].as_str(), e["task"]["status"].as_str()),
+            (Some(starved.as_str()), Some("failed"))
+        );
     }
 }

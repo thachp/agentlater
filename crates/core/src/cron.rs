@@ -186,7 +186,7 @@ pub struct CronRequest {
     /// Keep each run's response, as `schedule_http`'s `capture`.
     #[serde(default)]
     pub capture: bool,
-    /// Which runs report to `callback_url`. Needs `callback_url`.
+    /// Which runs report to `callback_url`. `failures` needs `callback_url`.
     #[serde(default)]
     pub report: Option<Report>,
 }
@@ -263,7 +263,9 @@ impl fmt::Display for CronRequestError {
             ),
             Self::Never => f.write_str("schedule never runs"),
             Self::Alert(e) => write!(f, "alert_url: {e}"),
-            Self::ReportWithoutCallback => f.write_str("report needs a callback_url to report to"),
+            Self::ReportWithoutCallback => {
+                f.write_str("report \"failures\" needs a callback_url to report to")
+            }
             Self::Request(e) => e.fmt(f),
         }
     }
@@ -289,7 +291,8 @@ impl CronRequest {
             .map(Callback::parse)
             .transpose()
             .map_err(CronRequestError::Alert)?;
-        if self.report.is_some() && self.callback_url.is_none() {
+        // "always" is the default, so stating it without a callback_url is harmless.
+        if self.report == Some(Report::Failures) && self.callback_url.is_none() {
             return Err(CronRequestError::ReportWithoutCallback);
         }
         let request = ScheduleRequest {
@@ -524,8 +527,14 @@ mod tests {
         assert!(spec.request.capture);
         assert_eq!(spec.report, Report::Failures);
 
-        let e = CronRequest {
+        assert!(CronRequest {
             report: Some(Report::Always),
+            ..base()
+        }
+        .validate(T0)
+        .is_ok());
+        let e = CronRequest {
+            report: Some(Report::Failures),
             ..base()
         }
         .validate(T0)

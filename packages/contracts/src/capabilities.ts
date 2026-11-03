@@ -147,6 +147,8 @@ export const capabilities: CapabilityDefinition[] = [
       "RunLater POSTs a signed alert to alert_url, and again when a run next succeeds. " +
       "To hear how runs went, pass callback_url (a URL, or \"inbox\" for read_inbox) and capture: true to keep each run's response; " +
       "report: \"failures\" sends only failed runs, so a healthy cron stays quiet (and doesn't wake you via set_wake). " +
+      "A run that cannot start at all (attempts ran out, the trial ended) never reports; it turns the cron failing, which goes to " +
+      "alert_url, so set alert_url too (\"inbox\" works). " +
       "Calling again with the same name replaces that cron's schedule and request. At most 10 crons.",
     input: {
       type: "object",
@@ -177,7 +179,7 @@ export const capabilities: CapabilityDefinition[] = [
           maxLength: 2048,
           description:
             "Where each run reports when it finishes, as schedule_http's callback_url: a signed POST of task.finished to an https:// " +
-            "URL (one extra delivery attempt per run), or \"inbox\" (free).",
+            "URL (one extra delivery attempt per report; one is reserved per run), or \"inbox\" (free).",
         },
         capture: {
           type: "boolean",
@@ -188,7 +190,7 @@ export const capabilities: CapabilityDefinition[] = [
           type: "string",
           enum: ["always", "failures"],
           default: "always",
-          description: "Which runs report to callback_url: every run, or only failed ones. Needs callback_url.",
+          description: "Which runs report to callback_url: every run, or only failed ones. \"failures\" needs callback_url.",
         },
       },
     },
