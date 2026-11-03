@@ -6,8 +6,7 @@ import {
   hookCall,
   inboxCall,
   mcpChatGpt,
-  mcpClaudeCode,
-  mcpCodex,
+  mcpClaude,
   mcpGrok,
   mcpRemoteConfig,
   scheduleCall,
@@ -18,22 +17,17 @@ import {
 
 const CONNECT = [
   [
-    "Claude Code",
-    <>Run this once, then approve the connection on the page that opens. No account, no API key.</>,
-    mcpClaudeCode,
+    "Claude",
+    <>
+      In Claude Code, run one command. In Claude Desktop or claude.ai, add a custom connector. Either way, approve the
+      connection on the page that opens.
+    </>,
+    mcpClaude,
   ],
   [
     "ChatGPT",
-    <>
-      Add RunLater as a custom connector (developer mode), then sign in when ChatGPT asks. Your agent gets its own
-      project.
-    </>,
+    <>Add RunLater as a custom connector (developer mode), then sign in when ChatGPT asks.</>,
     mcpChatGpt,
-  ],
-  [
-    "OpenAI Codex",
-    <>Add the server to Codex's config, then sign in once from the terminal.</>,
-    mcpCodex,
   ],
   [
     "Grok",
@@ -41,10 +35,10 @@ const CONNECT = [
     mcpGrok,
   ],
   [
-    "Claude Desktop, Cursor, any MCP client",
+    "Any other MCP client",
     <>
-      Add <code>{GATEWAY_URL}/mcp</code> as a remote MCP server (in Claude, a custom connector) and click{" "}
-      <strong>Connect</strong> when asked.
+      Codex, Cursor and the rest: add <code>{GATEWAY_URL}/mcp</code> as a remote MCP server and sign in when asked.
+      The quickstart has the details for each.
     </>,
     mcpRemoteConfig,
   ],
@@ -96,7 +90,7 @@ export default function Home() {
     <>
       <section className="wrap hero">
         <div>
-          <span className="pill">Open to agents · free trial</span>
+          <span className="pill">Works with Claude, ChatGPT and Grok · free trial</span>
           <h1>
             Your agent's session ends. <em>The work doesn't.</em>
           </h1>
@@ -125,8 +119,8 @@ export default function Home() {
           <p className="eyebrow">Get started</p>
           <h2>Connect your agent in a minute</h2>
           <p className="intro">
-            RunLater is a set of tools your agent calls over MCP, so it works with Claude, ChatGPT, Codex, Grok, Cursor
-            and any other client that speaks MCP, or from code. There is no dashboard, no sign-up and no API key to
+            RunLater is a set of tools your agent calls over MCP, so it works with Claude, ChatGPT and Grok, any other
+            client that speaks MCP, or your own code. There is no dashboard, no sign-up and no API key to
             paste. Each connection gets its own project with a free trial.
           </p>
           <div className="rows">
@@ -257,7 +251,7 @@ export default function Home() {
 
       <section className="wrap cta">
         <h2>Give your agent a sense of later</h2>
-        <p>Connect it from Claude, ChatGPT, Codex, Grok or any MCP client, or from code, and hand it the waiting.</p>
+        <p>Connect it from Claude, ChatGPT or Grok, and hand it the waiting.</p>
         <div className="actions">
           <a className="button primary" href="#connect">
             Connect your agent
