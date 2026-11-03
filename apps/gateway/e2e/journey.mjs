@@ -13,6 +13,7 @@ const CAPABILITIES = [
   "create_project", "get_project", "schedule_http", "get_task", "list_tasks", "cancel_task", "redrive_task",
   "create_cron", "get_cron", "list_crons", "delete_cron", "watch_http",
   "read_inbox", "ack_inbox", "set_wake", "delete_wake",
+  "set_secret", "list_secrets", "delete_secret",
 ];
 
 class JourneyError extends Error {}
@@ -262,7 +263,27 @@ export async function runJourney(c) {
   check((await exec("get_project")).wake === null, "delete_wake left a wake set");
   log("woken with a count, read the captured result from the inbox");
 
-  // 10. Hosted MCP: a client connects through OAuth consent (its own project and trial) and
+  // 10. A secret: filled in only when sending, only to its host, never shown again.
+  const receiverHost = new URL(c.receiverUrl).hostname;
+  const secretValue = `journey-${randomBytes(12).toString("hex")}`;
+  const stored = await exec("set_secret", { name: "JOURNEY_TOKEN", value: secretValue, allowed_hosts: [receiverHost] });
+  check(!JSON.stringify(stored).includes(secretValue), "set_secret echoed the value");
+  const withSecret = await exec("schedule_http", { url: hook("secret"), headers: { "X-Journey-Token": "{{secret:JOURNEY_TOKEN}}" } });
+  const filled = await until("the delivery with a secret", async () => (await deliveries()).find((d) => d.name === "secret"));
+  check(filled.headers["x-journey-token"] === secretValue, "the secret was not filled in at the destination");
+  check(!JSON.stringify(await exec("get_task", { task_id: withSecret.id })).includes(secretValue), "get_task shows the secret");
+  const leak = await exec("schedule_http", { url: "https://example.com/", headers: { "X-Leak": "{{secret:JOURNEY_TOKEN}}" } }).then(
+    () => null,
+    (e) => e,
+  );
+  check(leak?.code === "secret_host_not_allowed", `a secret could be sent to another host: ${leak?.code ?? "accepted"}`);
+  const secretsListed = await exec("list_secrets");
+  check(secretsListed.secrets?.map((s) => s.name).join() === "JOURNEY_TOKEN", `list_secrets returned ${JSON.stringify(secretsListed)}`);
+  check(!JSON.stringify(secretsListed).includes(secretValue), "list_secrets shows the value");
+  await exec("delete_secret", { name: "JOURNEY_TOKEN" });
+  log("secret filled in for its host only, never shown");
+
+  // 11. Hosted MCP: a client connects through OAuth consent (its own project and trial) and
   //    schedules a delivery with the schedule_http tool.
   const tokens = await connectHosted(c.gatewayUrl);
   const mcp = new Client({ name: "runlater-journey", version: "1.0.0" });

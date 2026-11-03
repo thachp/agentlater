@@ -139,6 +139,10 @@ describe("stated limits", () => {
     expect(constant("MAX_WAKE_DEBOUNCE_MS")).toBe("DAY_MS");
     expect(limitsRs).toContain('pub const DEFAULT_WAKE_DEBOUNCE: &str = "15m";');
     expect(constant("MAX_WAKE_FAILURES")).toBe("3");
+    expect(constant("MAX_SECRETS")).toBe("50");
+    expect(constant("MAX_SECRET_BYTES")).toBe("4 * 1024");
+    expect(constant("MAX_ALLOWED_HOSTS")).toBe("20");
+    expect(stated["Secrets"]).toBe("50 per project, 4 KiB each, each bound to at most 20 hosts");
     expect(stated["Wake"]).toBe("At most one per 1 minute to 24 hours (default 15 minutes); off after 3 failures in a row");
   });
 });

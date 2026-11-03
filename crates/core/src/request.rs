@@ -131,6 +131,10 @@ pub enum ValidationError {
     Lane,
     MaxAttempts,
     IdempotencyKey,
+    /// A malformed `{{secret:...}}` in a header value.
+    SecretReference(String),
+    /// A secret reference outside header values, where it would be sent as is.
+    SecretOutsideHeaders(&'static str),
 }
 
 impl ValidationError {
@@ -147,6 +151,8 @@ impl ValidationError {
             Self::Lane => "lane",
             Self::MaxAttempts => "max_attempts",
             Self::IdempotencyKey => "idempotency_key",
+            Self::SecretReference(_) => "headers",
+            Self::SecretOutsideHeaders(field) => field,
         }
     }
 }
@@ -178,6 +184,11 @@ impl fmt::Display for ValidationError {
                 f,
                 "idempotency_key must be 1-{MAX_IDEMPOTENCY_KEY_BYTES} characters of A-Z a-z 0-9 _ -"
             ),
+            Self::SecretReference(why) => write!(f, "headers: {why}"),
+            Self::SecretOutsideHeaders(field) => write!(
+                f,
+                "{field}: {{{{secret:...}}}} references only work in header values"
+            ),
         }
     }
 }
@@ -186,6 +197,16 @@ impl std::error::Error for ValidationError {}
 
 impl ScheduleRequest {
     pub fn validate(self, now_ms: i64) -> Result<TaskSpec, ValidationError> {
+        if self.url.contains("{{secret:") {
+            return Err(ValidationError::SecretOutsideHeaders("url"));
+        }
+        if self
+            .body
+            .as_deref()
+            .is_some_and(|b| b.contains("{{secret:"))
+        {
+            return Err(ValidationError::SecretOutsideHeaders("body"));
+        }
         let destination = Destination::parse(&self.url).map_err(ValidationError::Destination)?;
 
         if self.headers.len() > MAX_HEADERS {
@@ -195,6 +216,7 @@ impl ScheduleRequest {
         let mut header_bytes = 0;
         for (name, value) in &self.headers {
             validate_header(name, value).map_err(ValidationError::Header)?;
+            crate::secret::references(value).map_err(|e| ValidationError::SecretReference(e.0))?;
             if !seen.insert(name.to_ascii_lowercase()) {
                 return Err(ValidationError::DuplicateHeader(name.clone()));
             }

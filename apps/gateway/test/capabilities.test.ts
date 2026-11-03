@@ -23,6 +23,9 @@ describe("capabilities", () => {
       "ack_inbox",
       "set_wake",
       "delete_wake",
+      "set_secret",
+      "list_secrets",
+      "delete_secret",
     ]);
     for (const c of capabilities) {
       expect(c.description.length).toBeGreaterThan(20);
@@ -52,6 +55,10 @@ describe("capabilities", () => {
     expect(route("set_wake", { url: "https://a.example.com/" })).toMatchObject({ method: "POST", path: "/v1/wake", scope: "schedule" });
     expect(route("delete_wake", {})).toEqual({ method: "POST", path: "/v1/wake/delete", scope: "cancel", body: {} });
     expect(() => route("delete_wake", { url: "x" })).toThrow(ArgumentError);
+    expect(route("set_secret", { name: "GH" })).toMatchObject({ method: "POST", path: "/v1/secrets", scope: "secrets" });
+    expect(route("list_secrets", {})).toEqual({ method: "GET", path: "/v1/secrets", scope: "read" });
+    expect(route("delete_secret", { name: "GH_TOKEN" })).toEqual({ method: "POST", path: "/v1/secrets/GH_TOKEN/delete", scope: "secrets", body: {} });
+    for (const name of ["gh", "../x", "GH/delete", 7]) expect(() => route("delete_secret", { name })).toThrow(ArgumentError);
   });
 
   it("build list queries", () => {

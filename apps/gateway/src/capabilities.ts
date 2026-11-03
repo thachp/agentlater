@@ -1,7 +1,7 @@
 // Maps each capability (defined in @runlater/contracts) to exactly one call on the private
 // API (packages/contracts/openapi.yaml), validating arguments that end up in a path.
 
-import { CRON_NAME_PATTERN, LANE_PATTERN, STATUSES } from "@runlater/contracts/capabilities";
+import { CRON_NAME_PATTERN, LANE_PATTERN, SECRET_NAME_PATTERN, STATUSES } from "@runlater/contracts/capabilities";
 import type { ApiClient, Scope } from "./api";
 
 export { capabilities, capabilityNames } from "@runlater/contracts/capabilities";
@@ -39,6 +39,14 @@ function cronName(args: Args): string {
   const name = args.name;
   // Validated here because it becomes part of an API path.
   if (typeof name !== "string" || !new RegExp(CRON_NAME_PATTERN).test(name)) throw new ArgumentError("name is not a valid cron name", "name");
+  return name;
+}
+
+function secretName(args: Args): string {
+  only(args, ["name"]);
+  const name = args.name;
+  // Validated here because it becomes part of an API path.
+  if (typeof name !== "string" || !new RegExp(SECRET_NAME_PATTERN).test(name)) throw new ArgumentError("name is not a valid secret name", "name");
   return name;
 }
 
@@ -111,6 +119,14 @@ export function route(capability: string, args: Args): { method: "GET" | "POST";
     case "delete_wake":
       only(args, []);
       return { method: "POST", path: "/v1/wake/delete", scope: "cancel", body: {} };
+    case "set_secret":
+      // The API validates the secret fully and names the failing field; it never echoes the value.
+      return { method: "POST", path: "/v1/secrets", scope: "secrets", body: args };
+    case "list_secrets":
+      only(args, []);
+      return { method: "GET", path: "/v1/secrets", scope: "read" };
+    case "delete_secret":
+      return { method: "POST", path: `/v1/secrets/${secretName(args)}/delete`, scope: "secrets", body: {} };
     default:
       throw new ArgumentError(`unknown capability ${capability}`);
   }

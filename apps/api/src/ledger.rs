@@ -11,14 +11,15 @@ use crate::db::{Db, DbError, Param};
 use runlater_core::limits::{
     CAPTURED_HEADERS, CAPTURE_BODY_BYTES, CAPTURE_RETENTION_MS, CREDIT_VALIDITY_MS,
     DEFAULT_MAX_ATTEMPTS, INBOX_ACKED_RETENTION_MS, INBOX_DEFAULT_PAGE, INBOX_MAX_PAGE,
-    MAX_CREDIT_ATTEMPTS, MAX_CRONS, MAX_INBOX_EVENTS, MAX_RETAINED_TASKS, MAX_RETAINED_TASKS_PAID,
-    MAX_WAKE_FAILURES, RETENTION_MS, TRIAL_ATTEMPTS, TRIAL_DURATION_MS, WATCH_EXCERPT_BYTES,
+    MAX_CREDIT_ATTEMPTS, MAX_CRONS, MAX_HEADER_BYTES, MAX_INBOX_EVENTS, MAX_RETAINED_TASKS,
+    MAX_RETAINED_TASKS_PAID, MAX_SECRETS, MAX_WAKE_FAILURES, RETENTION_MS, TRIAL_ATTEMPTS,
+    TRIAL_DURATION_MS, WATCH_EXCERPT_BYTES,
 };
 use runlater_core::{
-    judge, next_poll, valid_lane, Attempt, Callback, CancelError, ClaimError, CronRequest,
-    CronRequestError, Method, Outcome, Poll, PollBody, RedriveError, Report, Schedule,
-    ScheduleRequest, Status, Task, Until, ValidationError, WakeRequest, WakeRequestError, Watch,
-    WatchRequest, WatchRequestError, INBOX,
+    fill, header_references, host_allowed, judge, next_poll, valid_lane, Attempt, Callback,
+    CancelError, ClaimError, CronRequest, CronRequestError, Method, Outcome, Poll, PollBody,
+    RedriveError, Report, Schedule, ScheduleRequest, Status, Task, Until, ValidationError,
+    WakeRequest, WakeRequestError, Watch, WatchRequest, WatchRequestError, INBOX,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -178,6 +179,19 @@ const MIGRATIONS: &[&[&str]] = &[
         "ALTER TABLE crons ADD COLUMN capture INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE crons ADD COLUMN report TEXT NOT NULL DEFAULT 'always'",
         "ALTER TABLE tasks ADD COLUMN report_failures_only INTEGER NOT NULL DEFAULT 0",
+    ],
+    // 9: secrets. `sealed` is ciphertext from the API's sealing key; the ledger never sees a
+    // value. `failure` says why a task failed without an attempt (a secret it needed).
+    &[
+        "CREATE TABLE IF NOT EXISTS secrets (
+            name TEXT PRIMARY KEY,
+            sealed TEXT NOT NULL,
+            value_bytes INTEGER NOT NULL,
+            allowed_hosts TEXT NOT NULL,
+            created_ms INTEGER NOT NULL,
+            updated_ms INTEGER NOT NULL
+        )",
+        "ALTER TABLE tasks ADD COLUMN failure TEXT",
     ],
 ];
 
@@ -348,6 +362,11 @@ pub struct TaskView {
     pub response: Option<CapturedResponse>,
     /// Set on a wake: the request that told the agent its inbox has something.
     pub wake_call: bool,
+    /// Why the task failed without an attempt: secret_missing (a secret its headers refer to
+    /// was deleted), secret_host_not_allowed (it no longer allows the host), secret_too_large
+    /// (replaced by a value too long for the headers) or secret_unavailable (the API has no
+    /// key to open secrets with).
+    pub failure: Option<String>,
     /// Set on a run of a cron with `report: failures`: it reports to `callback_url` only if
     /// it fails, so a run that succeeded has no callback task or inbox event, by design.
     pub report_failures_only: bool,
@@ -452,7 +471,7 @@ pub struct Dispatch {
 }
 
 /// Everything the consumer needs to make one attempt.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Delivery {
     pub task_id: String,
     pub attempt: u32,
@@ -469,6 +488,56 @@ pub struct Delivery {
     /// never lets a failed read change the outcome.
     #[serde(default)]
     pub capture: bool,
+    /// The secrets `headers` refer to, still sealed. The consumer opens them, fills them in
+    /// just before sending, and redacts their values from any response it reports.
+    #[serde(default)]
+    pub secrets: Vec<SealedSecret>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SealedSecret {
+    pub name: String,
+    pub sealed: String,
+}
+
+/// A secret as callers see it: never its value.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct SecretView {
+    pub name: String,
+    pub allowed_hosts: Vec<String>,
+    pub created_ms: i64,
+    pub updated_ms: i64,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct SecretList {
+    pub secrets: Vec<SecretView>,
+}
+
+#[derive(Deserialize)]
+struct SecretRow {
+    name: String,
+    sealed: String,
+    /// The value's length, so headers can be sized as they will be sent.
+    value_bytes: i64,
+    allowed_hosts: String,
+    created_ms: i64,
+    updated_ms: i64,
+}
+
+impl SecretRow {
+    fn hosts(&self) -> Result<Vec<String>, DbError> {
+        serde_json::from_str(&self.allowed_hosts).map_err(|e| DbError(e.to_string()))
+    }
+
+    fn view(&self) -> Result<SecretView, DbError> {
+        Ok(SecretView {
+            name: self.name.clone(),
+            allowed_hosts: self.hosts()?,
+            created_ms: self.created_ms,
+            updated_ms: self.updated_ms,
+        })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -559,6 +628,7 @@ struct TaskRow {
     inbox_seq: Option<i64>,
     wake_call: i64,
     report_failures_only: i64,
+    failure: Option<String>,
     created_ms: i64,
     updated_ms: i64,
 }
@@ -672,6 +742,7 @@ impl TaskRow {
             capture: self.capture != 0,
             response: self.response(attempts.is_some())?,
             wake_call: self.wake_call != 0,
+            failure: self.failure.clone(),
             report_failures_only: self.report_failures_only != 0,
             lane: self.lane.clone(),
             cron: self.cron.clone(),
@@ -689,7 +760,7 @@ const TASK_COLUMNS: &str = "seq, id, status, due_ms, max_attempts, run_attempts,
     total_attempts, generation, fence, lease_until_ms, cancel_requested, terminal_ms, \
     method, url, headers, body, run_at_ms, idempotency_key, callback_url, callback_task_id, \
     callback_for, lane, cron, alert_for, watch, watch_errors, watch_state, capture, response, \
-    inbox_seq, wake_call, report_failures_only, created_ms, updated_ms";
+    inbox_seq, wake_call, report_failures_only, failure, created_ms, updated_ms";
 
 /// A row to insert into `tasks`.
 struct NewTask<'s> {
@@ -846,6 +917,9 @@ fn no_cron() -> ApiError {
 
 pub struct Ledger<'a, D: Db> {
     db: &'a D,
+    /// Whether the API can open sealed secrets. Without its key, work that needs a secret
+    /// fails before it is attempted rather than spending an attempt it can't make.
+    secrets_available: bool,
 }
 
 impl<'a, D: Db> Ledger<'a, D> {
@@ -871,7 +945,18 @@ impl<'a, D: Db> Ledger<'a, D> {
                 vec![(MIGRATIONS.len() as i64).into()],
             )?;
         }
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            secrets_available: true,
+        })
+    }
+
+    /// The ledger for an API that has no key to open secrets with.
+    pub fn without_secrets(self) -> Self {
+        Self {
+            secrets_available: false,
+            ..self
+        }
     }
 
     // -- project -------------------------------------------------------------------------
@@ -1060,6 +1145,7 @@ impl<'a, D: Db> Ledger<'a, D> {
             "run_at_ms"
         };
         let spec = request.validate(now).map_err(ApiError::invalid)?;
+        self.check_secrets(&spec.headers, spec.destination.host())?;
         if let Some(existing) = self.replay(spec.idempotency_key.as_deref(), &spec.fingerprint)? {
             return Ok((existing, false));
         }
@@ -1109,6 +1195,7 @@ impl<'a, D: Db> Ledger<'a, D> {
     ) -> Result<(TaskView, bool), ApiError> {
         let project = self.project_row()?.ok_or_else(no_project)?;
         let spec = request.validate(now).map_err(ApiError::invalid_watch)?;
+        self.check_secrets(&spec.request.headers, spec.request.destination.host())?;
         let request = spec.request;
         if let Some(existing) =
             self.replay(request.idempotency_key.as_deref(), &request.fingerprint)?
@@ -1222,6 +1309,10 @@ impl<'a, D: Db> Ledger<'a, D> {
         let callbacks = i64::from(row.callback_url.as_deref().is_some_and(|u| u != INBOX));
         self.admit(&project, callbacks, 1 + callbacks, now)?;
         self.save_row(&row, &task, now)?;
+        self.db.exec(
+            "UPDATE tasks SET failure = NULL WHERE id = ?",
+            vec![task_id.into()],
+        )?;
         self.task(task_id)
     }
 
@@ -1415,6 +1506,29 @@ impl<'a, D: Db> Ledger<'a, D> {
             return Ok(Claimed::Skip("lane_busy"));
         }
 
+        // Secrets are checked again now: one may have been deleted, or narrowed to other hosts,
+        // since the task was scheduled. Either way it cannot be sent, so it fails at once.
+        let secrets = match self.sealed_for(&row)? {
+            Ok(secrets) => secrets,
+            Err(why) => {
+                if task.generation == generation && task.is_due(now) && task.abandon(now) {
+                    self.db.exec(
+                        "UPDATE tasks SET failure = ? WHERE id = ?",
+                        vec![why.into(), task_id.into()],
+                    )?;
+                    if row.watch.is_some() {
+                        let state = WatchState {
+                            reason: Some(why.into()),
+                            ..row.watch_state()?
+                        };
+                        self.store_watch(task_id, row.watch_errors, &state)?;
+                    }
+                    self.save_row(&row, &task, now)?;
+                    return Ok(Claimed::Skip(why));
+                }
+                return Ok(Claimed::Skip("stale"));
+            }
+        };
         let attempt: Attempt = match task.claim(generation, now) {
             Ok(a) => a,
             Err(ClaimError::Stale) => return Ok(Claimed::Skip("stale")),
@@ -1450,6 +1564,7 @@ impl<'a, D: Db> Ledger<'a, D> {
             signing_secret: project.signing_secret,
             read_body: row.watch.is_some() || row.capture != 0,
             capture: row.capture != 0,
+            secrets,
         })))
     }
 
@@ -1654,6 +1769,7 @@ impl<'a, D: Db> Ledger<'a, D> {
             ));
         }
         let spec = request.validate(now).map_err(ApiError::invalid_cron)?;
+        self.check_secrets(&spec.request.headers, spec.request.destination.host())?;
         let existing = self.cron_row(&spec.name)?;
         if existing.is_none() {
             let count: Vec<Counts> = self
@@ -1996,6 +2112,183 @@ impl<'a, D: Db> Ledger<'a, D> {
         )
     }
 
+    // -- secrets --------------------------------------------------------------------------
+
+    fn secret_row(&self, name: &str) -> Result<Option<SecretRow>, DbError> {
+        Ok(self
+            .db
+            .query(
+                "SELECT name, sealed, value_bytes, allowed_hosts, created_ms, updated_ms FROM secrets \
+                 WHERE name = ?",
+                vec![name.into()],
+            )?
+            .pop())
+    }
+
+    /// Stores a secret sealed by the API (the ledger never sees a value), replacing one of the
+    /// same name. Work that refers to it uses the new value from its next attempt.
+    pub fn put_secret(
+        &self,
+        name: &str,
+        sealed: &str,
+        value_bytes: usize,
+        allowed_hosts: &[String],
+        now: i64,
+    ) -> Result<(SecretView, bool), ApiError> {
+        self.project_row()?.ok_or_else(no_project)?;
+        let existing = self.secret_row(name)?;
+        if existing.is_none() {
+            let count: Vec<Counts> = self.db.query(
+                "SELECT COUNT(*) AS total, 0 AS waiting FROM secrets",
+                vec![],
+            )?;
+            if count.first().map_or(0, |c| c.total) >= MAX_SECRETS {
+                return Err(ApiError::new(
+                    429,
+                    "secret_limit",
+                    format!("this project already has {MAX_SECRETS} secrets; delete one first"),
+                ));
+            }
+        }
+        let hosts = serde_json::to_string(allowed_hosts).map_err(|e| DbError(e.to_string()))?;
+        self.db.exec(
+            "INSERT INTO secrets (name, sealed, value_bytes, allowed_hosts, created_ms, updated_ms) \
+             VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (name) DO UPDATE SET sealed = excluded.sealed, \
+             value_bytes = excluded.value_bytes, allowed_hosts = excluded.allowed_hosts, \
+             updated_ms = excluded.updated_ms",
+            vec![
+                name.into(),
+                sealed.into(),
+                (value_bytes as i64).into(),
+                hosts.into(),
+                now.into(),
+                now.into(),
+            ],
+        )?;
+        let row = self
+            .secret_row(name)?
+            .ok_or_else(|| DbError("secret vanished".into()))?;
+        Ok((row.view()?, existing.is_none()))
+    }
+
+    pub fn secrets(&self) -> Result<SecretList, ApiError> {
+        self.project_row()?.ok_or_else(no_project)?;
+        let rows: Vec<SecretRow> = self.db.query(
+            "SELECT name, sealed, value_bytes, allowed_hosts, created_ms, updated_ms FROM secrets ORDER BY name",
+            vec![],
+        )?;
+        let secrets = rows.iter().map(SecretRow::view).collect::<Result<_, _>>()?;
+        Ok(SecretList { secrets })
+    }
+
+    /// Removes a secret. Work that still refers to it fails, without an attempt, when it next
+    /// comes due (`failure: secret_missing`).
+    pub fn delete_secret(&self, name: &str) -> Result<SecretView, ApiError> {
+        let row = self.secret_row(name)?.ok_or_else(|| {
+            ApiError::not_found(
+                "secret_not_found",
+                "no secret with that name in this project",
+            )
+        })?;
+        self.db
+            .exec("DELETE FROM secrets WHERE name = ?", vec![name.into()])?;
+        Ok(row.view()?)
+    }
+
+    /// New work may refer only to secrets that exist and allow its host. This is what stops a
+    /// tricked agent from sending a secret somewhere else.
+    fn check_secrets(&self, headers: &[(String, String)], host: &str) -> Result<(), ApiError> {
+        let names = header_references(headers).map_err(|e| ApiError {
+            field: Some("headers"),
+            ..ApiError::bad_request(e.0)
+        })?;
+        if names.is_empty() {
+            return Ok(());
+        }
+        let mut secrets = Vec::new();
+        for name in names {
+            let Some(row) = self.secret_row(&name)? else {
+                return Err(ApiError {
+                    field: Some("headers"),
+                    ..ApiError::new(
+                        400,
+                        "secret_not_found",
+                        format!(
+                            "headers refer to {{{{secret:{name}}}}}, but this project has no secret {name}"
+                        ),
+                    )
+                });
+            };
+            let hosts = row.hosts()?;
+            if !host_allowed(&hosts, host) {
+                return Err(ApiError {
+                    field: Some("url"),
+                    ..ApiError::new(
+                        400,
+                        "secret_host_not_allowed",
+                        format!(
+                            "secret {name} may not be sent to {host}; it allows {}",
+                            hosts.join(", ")
+                        ),
+                    )
+                });
+            }
+            secrets.push(row);
+        }
+        if filled_header_bytes(headers, &secrets) > MAX_HEADER_BYTES {
+            return Err(ApiError {
+                field: Some("headers"),
+                ..ApiError::bad_request(format!(
+                    "headers exceed {MAX_HEADER_BYTES} bytes once their secrets are filled in"
+                ))
+            });
+        }
+        Ok(())
+    }
+
+    /// The sealed secrets a task's headers need, or why it can't be sent: a secret is gone
+    /// (`secret_missing`), no longer allows its host (`secret_host_not_allowed`), was replaced by
+    /// one too long for its headers (`secret_too_large`), or the API can't open secrets at all
+    /// (`secret_unavailable`). Storage errors are errors, not reasons to fail the task.
+    fn sealed_for(
+        &self,
+        row: &TaskRow,
+    ) -> Result<Result<Vec<SealedSecret>, &'static str>, DbError> {
+        let headers = row.headers()?;
+        let Ok(names) = header_references(&headers) else {
+            return Ok(Err("secret_missing"));
+        };
+        if names.is_empty() {
+            return Ok(Ok(vec![]));
+        }
+        if !self.secrets_available {
+            return Ok(Err("secret_unavailable"));
+        }
+        let Ok(destination) = runlater_egress::Destination::parse(&row.url) else {
+            return Ok(Err("secret_host_not_allowed"));
+        };
+        let mut secrets = Vec::with_capacity(names.len());
+        for name in names {
+            let Some(secret) = self.secret_row(&name)? else {
+                return Ok(Err("secret_missing"));
+            };
+            if !host_allowed(&secret.hosts()?, destination.host()) {
+                return Ok(Err("secret_host_not_allowed"));
+            }
+            secrets.push(secret);
+        }
+        if filled_header_bytes(&headers, &secrets) > MAX_HEADER_BYTES {
+            return Ok(Err("secret_too_large"));
+        }
+        Ok(Ok(secrets
+            .into_iter()
+            .map(|s| SealedSecret {
+                name: s.name,
+                sealed: s.sealed,
+            })
+            .collect()))
+    }
+
     // -- wake -----------------------------------------------------------------------------
 
     fn wake_row(&self) -> Result<Option<WakeRow>, DbError> {
@@ -2015,6 +2308,7 @@ impl<'a, D: Db> Ledger<'a, D> {
                 field: Some(e.field()),
                 ..ApiError::bad_request(e.to_string())
             })?;
+        self.check_secrets(&spec.request.headers, spec.request.destination.host())?;
         let headers =
             serde_json::to_string(&spec.request.headers).map_err(|e| DbError(e.to_string()))?;
         self.cancel_pending_wakes(now)?;
@@ -2657,6 +2951,21 @@ struct DueRow {
 #[derive(Deserialize)]
 struct IdRow {
     id: String,
+}
+
+/// Header bytes as they will be sent: each reference counted at its secret's length.
+fn filled_header_bytes(headers: &[(String, String)], secrets: &[SecretRow]) -> usize {
+    let pad = "x".repeat(runlater_core::limits::MAX_SECRET_BYTES);
+    headers
+        .iter()
+        .map(|(name, value)| {
+            let filled = fill(value, |n| {
+                let row = secrets.iter().find(|s| s.name == n)?;
+                pad.get(..usize::try_from(row.value_bytes).ok()?)
+            });
+            name.len() + filled.map_or(value.len(), |f| f.len())
+        })
+        .sum()
 }
 
 /// What a wake sends: only that something is waiting. The agent reads it from the inbox.
@@ -5373,6 +5682,303 @@ mod tests {
         assert_eq!(
             (e["task"]["id"].as_str(), e["task"]["status"].as_str()),
             (Some(starved.as_str()), Some("failed"))
+        );
+    }
+
+    // -- secrets --------------------------------------------------------------------------
+
+    fn hosts(h: &[&str]) -> Vec<String> {
+        h.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn with_secret_header(url: &str, value: &str) -> ScheduleRequest {
+        let mut r = req(url);
+        r.headers.insert("Authorization".into(), value.into());
+        r
+    }
+
+    #[test]
+    fn secrets_are_listed_without_values_and_capped() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let (v, created) = l
+            .put_secret("GH", "v1:sealed-a", 20, &hosts(&["api.github.com"]), T0)
+            .unwrap();
+        assert!(created);
+        assert_eq!(
+            (v.name.as_str(), v.allowed_hosts.clone()),
+            ("GH", hosts(&["api.github.com"]))
+        );
+        let (v, created) = l
+            .put_secret("GH", "v1:sealed-b", 20, &hosts(&["*.github.com"]), T0 + 5)
+            .unwrap();
+        assert!(!created);
+        assert_eq!((v.created_ms, v.updated_ms), (T0, T0 + 5));
+        let listed = serde_json::to_string(&l.secrets().unwrap()).unwrap();
+        assert!(!listed.contains("sealed"), "{listed}");
+        for i in 1..MAX_SECRETS {
+            l.put_secret(&format!("S{i}"), "v1:x", 20, &hosts(&["a.example.com"]), T0)
+                .unwrap();
+        }
+        let e = l
+            .put_secret("ONE_MORE", "v1:x", 20, &hosts(&["a.example.com"]), T0)
+            .unwrap_err();
+        assert_eq!((e.status, e.code), (429, "secret_limit"));
+        l.put_secret("GH", "v1:sealed-c", 20, &hosts(&["api.github.com"]), T0)
+            .unwrap();
+        assert_eq!(l.delete_secret("GH").unwrap().name, "GH");
+        assert_eq!(l.delete_secret("GH").unwrap_err().code, "secret_not_found");
+    }
+
+    #[test]
+    fn new_work_may_only_send_a_secret_to_its_hosts() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.put_secret("GH", "v1:sealed", 20, &hosts(&["api.github.com"]), T0)
+            .unwrap();
+        let ok = with_secret_header("https://api.github.com/user", "Bearer {{secret:GH}}");
+        let (t, _) = l.schedule(ok, "t1", T0).unwrap();
+        assert_eq!(t.header_names, ["Authorization"]);
+
+        let e = l
+            .schedule(
+                with_secret_header("https://evil.example.com/", "{{secret:GH}}"),
+                "t2",
+                T0,
+            )
+            .unwrap_err();
+        assert_eq!(
+            (e.status, e.code, e.field),
+            (400, "secret_host_not_allowed", Some("url"))
+        );
+        let e = l
+            .schedule(
+                with_secret_header("https://api.github.com/", "{{secret:NOPE}}"),
+                "t3",
+                T0,
+            )
+            .unwrap_err();
+        assert_eq!((e.code, e.field), ("secret_not_found", Some("headers")));
+        let e = l
+            .schedule(
+                with_secret_header("https://api.github.com/", "{{secret:GH"),
+                "t4",
+                T0,
+            )
+            .unwrap_err();
+        assert_eq!(e.field, Some("headers"));
+        let mut in_body = req("https://api.github.com/");
+        in_body.body = Some("{{secret:GH}}".into());
+        assert_eq!(
+            l.schedule(in_body, "t5", T0).unwrap_err().field,
+            Some("body")
+        );
+
+        // Crons, watches and wakes are checked the same way.
+        let mut cron = daily("c");
+        cron.url = "https://evil.example.com/".into();
+        cron.headers
+            .insert("Authorization".into(), "{{secret:GH}}".into());
+        assert_eq!(
+            l.put_cron(cron, T0).unwrap_err().code,
+            "secret_host_not_allowed"
+        );
+        let w = watching(serde_json::json!({ "headers": { "Authorization": "{{secret:GH}}" } }));
+        assert_eq!(
+            l.watch(w, "w1", T0).unwrap_err().code,
+            "secret_host_not_allowed"
+        );
+        let wake = waking(serde_json::json!({ "headers": { "Authorization": "{{secret:GH}}" } }));
+        assert_eq!(
+            l.set_wake(wake, T0).unwrap_err().code,
+            "secret_host_not_allowed"
+        );
+    }
+
+    #[test]
+    fn the_consumer_gets_the_sealed_secret_and_the_reference() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.put_secret("GH", "v1:sealed", 20, &hosts(&["api.github.com"]), T0)
+            .unwrap();
+        l.schedule(
+            with_secret_header("https://api.github.com/user", "Bearer {{secret:GH}}"),
+            "t1",
+            T0,
+        )
+        .unwrap();
+        let d = l.publish_due(P, T0).unwrap().remove(0);
+        let a = deliver(&l, &d, T0);
+        assert_eq!(
+            a.headers,
+            [(
+                "Authorization".to_string(),
+                "Bearer {{secret:GH}}".to_string()
+            )],
+            "the reference, filled in by the consumer"
+        );
+        assert_eq!(
+            a.secrets,
+            [SealedSecret {
+                name: "GH".into(),
+                sealed: "v1:sealed".into()
+            }]
+        );
+        let stored: String =
+            db.0.query_row("SELECT headers FROM tasks WHERE id = 't1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(stored.contains("{{secret:GH}}"));
+    }
+
+    #[test]
+    fn a_task_whose_secret_is_gone_or_narrowed_fails_without_an_attempt() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.put_secret("GH", "v1:sealed", 20, &hosts(&["api.github.com"]), T0)
+            .unwrap();
+        let mut r = with_secret_header("https://api.github.com/user", "Bearer {{secret:GH}}");
+        r.callback_url = Some(INBOX.into());
+        l.schedule(r, "gone", T0).unwrap();
+        l.schedule(
+            with_secret_header("https://api.github.com/x", "{{secret:GH}}"),
+            "narrowed",
+            T0,
+        )
+        .unwrap();
+        l.delete_secret("GH").unwrap();
+        let used = l.project().unwrap().attempts_used;
+        let due = l.publish_due(P, T0).unwrap();
+        let find = |id: &str| due.iter().find(|d| d.task_id == id).unwrap().clone();
+        let d = find("gone");
+        assert_eq!(
+            l.claim(&d.task_id, d.generation, T0).unwrap(),
+            Claimed::Skip("secret_missing")
+        );
+        let t = l.task("gone").unwrap();
+        assert_eq!(
+            (t.status, t.failure.as_deref(), t.attempt_count),
+            (Status::Failed, Some("secret_missing"), 0)
+        );
+        assert_eq!(l.project().unwrap().attempts_used, used, "costs nothing");
+        assert_eq!(
+            inbox(&l).events[0]["task"]["failure"],
+            "secret_missing",
+            "and it reports"
+        );
+
+        // Put back, but for other hosts only.
+        l.put_secret("GH", "v1:sealed", 20, &hosts(&["uploads.github.com"]), T0)
+            .unwrap();
+        let d = find("narrowed");
+        assert_eq!(
+            l.claim(&d.task_id, d.generation, T0).unwrap(),
+            Claimed::Skip("secret_host_not_allowed")
+        );
+        // Fixing the secret and redriving sends it, and clears the failure.
+        l.put_secret("GH", "v1:sealed", 20, &hosts(&["api.github.com"]), T0)
+            .unwrap();
+        let t = l.redrive("gone", T0 + 1).unwrap();
+        assert_eq!((t.status, t.failure), (Status::Scheduled, None));
+        let d = l
+            .publish_due(P, T0 + 1)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.task_id == "gone")
+            .unwrap();
+        assert_eq!(deliver(&l, &d, T0 + 1).secrets.len(), 1);
+    }
+
+    #[test]
+    fn headers_are_sized_with_their_secrets_filled_in() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.put_secret("BIG", "v1:sealed", 4_000, &hosts(&["api.github.com"]), T0)
+            .unwrap();
+        let mut r = req("https://api.github.com/");
+        r.headers.insert("A".into(), "{{secret:BIG}}".into());
+        r.headers.insert("B".into(), "{{secret:BIG}}".into());
+        r.headers.insert("C".into(), "{{secret:BIG}}".into());
+        let e = l.schedule(r, "t1", T0).unwrap_err();
+        assert_eq!((e.status, e.field), (400, Some("headers")));
+
+        // Accepted at its size, then the secret is replaced by a longer one.
+        l.put_secret("SMALL", "v1:sealed", 20, &hosts(&["api.github.com"]), T0)
+            .unwrap();
+        let mut r = req("https://api.github.com/");
+        r.headers.insert("A".into(), "{{secret:SMALL}}".into());
+        r.headers.insert("B".into(), "x".repeat(6_000));
+        l.schedule(r, "t2", T0).unwrap();
+        l.put_secret("SMALL", "v1:sealed", 4_000, &hosts(&["api.github.com"]), T0)
+            .unwrap();
+        let d = l.publish_due(P, T0).unwrap().remove(0);
+        assert_eq!(
+            l.claim(&d.task_id, d.generation, T0).unwrap(),
+            Claimed::Skip("secret_too_large")
+        );
+    }
+
+    #[test]
+    fn without_the_key_a_task_needing_a_secret_fails_before_its_attempt() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.put_secret("GH", "v1:sealed", 20, &hosts(&["api.github.com"]), T0)
+            .unwrap();
+        l.schedule(
+            with_secret_header("https://api.github.com/", "{{secret:GH}}"),
+            "t1",
+            T0,
+        )
+        .unwrap();
+        l.schedule(req("https://api.github.com/plain"), "plain", T0)
+            .unwrap();
+        let l = Ledger::open(&db).unwrap().without_secrets();
+        let due = l.publish_due(P, T0).unwrap();
+        let find = |id: &str| due.iter().find(|d| d.task_id == id).unwrap().clone();
+        let used = l.project().unwrap().attempts_used;
+        let d = find("t1");
+        assert_eq!(
+            l.claim(&d.task_id, d.generation, T0).unwrap(),
+            Claimed::Skip("secret_unavailable")
+        );
+        assert_eq!(
+            l.task("t1").unwrap().failure.as_deref(),
+            Some("secret_unavailable")
+        );
+        assert_eq!(l.project().unwrap().attempts_used, used);
+        let d = find("plain");
+        assert!(
+            matches!(
+                l.claim(&d.task_id, d.generation, T0).unwrap(),
+                Claimed::Deliver(_)
+            ),
+            "others still go"
+        );
+    }
+
+    #[test]
+    fn a_watch_whose_secret_is_gone_says_why() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.put_secret("API", "v1:sealed", 20, &hosts(&["api.example.com"]), T0)
+            .unwrap();
+        l.watch(
+            watching(serde_json::json!({ "headers": { "Authorization": "{{secret:API}}" } })),
+            "w1",
+            T0,
+        )
+        .unwrap();
+        l.delete_secret("API").unwrap();
+        let d = l.publish_due(P, T0).unwrap().remove(0);
+        assert_eq!(
+            l.claim(&d.task_id, d.generation, T0).unwrap(),
+            Claimed::Skip("secret_missing")
+        );
+        let w = l.task("w1").unwrap();
+        assert_eq!(
+            (w.status, w.watch.unwrap().reason.as_deref()),
+            (Status::Failed, Some("secret_missing"))
         );
     }
 }

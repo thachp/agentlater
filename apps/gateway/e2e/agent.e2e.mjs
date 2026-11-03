@@ -30,6 +30,7 @@ const receiverToken = randomBytes(16).toString("hex");
 const CAPABILITIES = [
   "create_project", "get_project", "get_payment_link", "schedule_http", "get_task", "list_tasks", "cancel_task", "redrive_task",
   "create_cron", "get_cron", "list_crons", "delete_cron", "watch_http", "read_inbox", "ack_inbox", "set_wake", "delete_wake",
+  "set_secret", "list_secrets", "delete_secret",
 ];
 
 // Gateway → API assertion keys, fresh per run.
@@ -145,7 +146,7 @@ before(async () => {
           durableObjects: { LEDGER: { className: "TaskLedger", useSQLite: true } },
           queueProducers: { READY: { queueName: "runlater-ready" } },
           queueConsumers: { "runlater-ready": { maxBatchTimeout: 1 } },
-          bindings: { GATEWAY_PUBLIC_KEY: publicHex },
+          bindings: { GATEWAY_PUBLIC_KEY: publicHex, SECRETS_KEY: randomBytes(32).toString("hex") },
           outboundService: async (req) => {
             if (new URL(req.url).hostname === RECEIVER_HOST) {
               const body = ["GET", "HEAD"].includes(req.method) ? undefined : await req.arrayBuffer();
@@ -648,6 +649,38 @@ describe("hosted MCP at /mcp", () => {
     await client.close();
   });
 
+  test("a secret set over MCP is filled in only for its host and never shown again", async () => {
+    const client = await mcpClient((await connect("Secret Keeper")).access_token);
+    value(await client.callTool({ name: "create_project", arguments: {} }));
+    const token = `tok_${randomBytes(8).toString("hex")}`;
+    const set = value(
+      await client.callTool({ name: "set_secret", arguments: { name: "DEST_TOKEN", value: token, allowed_hosts: ["dest.example.com"] } }),
+    );
+    assert.deepEqual(set.allowed_hosts, ["dest.example.com"]);
+    assert.ok(!JSON.stringify(set).includes(token));
+
+    const task = value(
+      await client.callTool({
+        name: "schedule_http",
+        arguments: { url: "https://dest.example.com/with-secret", headers: { Authorization: "Bearer {{secret:DEST_TOKEN}}" } },
+      }),
+    );
+    const sent = await until(() => received.find((r) => r.headers["runlater-task-id"] === task.id));
+    assert.equal(sent.headers.authorization, `Bearer ${token}`);
+
+    const refused = await client.callTool({
+      name: "schedule_http",
+      arguments: { url: "https://elsewhere.example.com/", headers: { Authorization: "{{secret:DEST_TOKEN}}" } },
+    });
+    assert.equal(refused.isError, true);
+    assert.equal(value(refused).error.code, "secret_host_not_allowed");
+    const listed = value(await client.callTool({ name: "list_secrets", arguments: {} }));
+    assert.deepEqual(listed.secrets.map((s) => s.name), ["DEST_TOKEN"]);
+    assert.ok(!JSON.stringify(listed).includes(token));
+    assert.equal(value(await client.callTool({ name: "delete_secret", arguments: { name: "DEST_TOKEN" } })).name, "DEST_TOKEN");
+    await client.close();
+  });
+
   test("a person buys attempts through the payment link; Stripe's webhook adds them once", async () => {
     const client = await mcpClient((await connect("Buyer")).access_token);
     const project = value(await client.callTool({ name: "create_project", arguments: {} }));
@@ -888,7 +921,8 @@ describe("staging journey, run against the local stack", () => {
       timeoutMs: 60_000,
     });
     // ok + flaky (2) + gone + behind + delayed + its callback + one poll + the captured
-    // task + its wake = 10 attempts; canceled tasks, the deleted cron and the inbox use none.
-    assert.equal(result.attemptsUsed, 10);
+    // task + its wake + the secret's delivery = 11 attempts; canceled tasks, the deleted cron,
+    // the inbox and the refused leak use none.
+    assert.equal(result.attemptsUsed, 11);
   });
 });

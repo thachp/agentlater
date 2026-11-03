@@ -14,6 +14,9 @@ export interface CapabilityDefinition {
 const TASK_ID = { type: "string", pattern: "^task_[0-9a-f]{20}$", description: "The task id returned by schedule_http." };
 export const LANE_PATTERN = "^[A-Za-z0-9_.:-]{1,64}$";
 export const CRON_NAME_PATTERN = "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$";
+export const SECRET_NAME_PATTERN = "^[A-Z][A-Z0-9_]{0,63}$";
+const SECRET_NAME = { type: "string", pattern: SECRET_NAME_PATTERN, description: "The secret's name, e.g. \"GITHUB_TOKEN\"." };
+const SECRET_HEADERS_NOTE = " A header value may use {{secret:NAME}} (see set_secret); RunLater fills it in only when sending, to hosts the secret allows.";
 export const STATUSES = ["scheduled", "delivering", "retrying", "succeeded", "failed", "canceled"];
 
 const noArgs = { type: "object", additionalProperties: false, properties: {} };
@@ -68,7 +71,8 @@ export const capabilities: CapabilityDefinition[] = [
           type: "object",
           maxProperties: 32,
           additionalProperties: { type: "string" },
-          description: "Headers to send. Host, Content-Length and RunLater-*/CF-*/X-Forwarded-* headers are not allowed.",
+          description:
+            "Headers to send. Host, Content-Length and RunLater-*/CF-*/X-Forwarded-* headers are not allowed." + SECRET_HEADERS_NOTE,
         },
         body: { type: "string", maxLength: 65536, description: "Request body as text, e.g. JSON. Not allowed with GET." },
         run_at_ms: { type: "integer", minimum: 0, description: "When to send, unix ms. Omit to send now. Not with delay." },
@@ -163,7 +167,7 @@ export const capabilities: CapabilityDefinition[] = [
           type: "object",
           maxProperties: 32,
           additionalProperties: { type: "string" },
-          description: "Headers to send on every run. Same rules as schedule_http.",
+          description: "Headers to send on every run. Same rules as schedule_http." + SECRET_HEADERS_NOTE,
         },
         body: { type: "string", maxLength: 65536, description: "Request body for every run. Not allowed with GET." },
         max_attempts: { type: "integer", minimum: 1, maximum: 5, default: 5, description: "Attempts per run." },
@@ -231,7 +235,7 @@ export const capabilities: CapabilityDefinition[] = [
           type: "object",
           maxProperties: 32,
           additionalProperties: { type: "string" },
-          description: "Headers to send on every poll, e.g. Authorization. Same rules as schedule_http.",
+          description: "Headers to send on every poll, e.g. Authorization. Same rules as schedule_http." + SECRET_HEADERS_NOTE,
         },
         body: { type: "string", maxLength: 65536, description: "Request body for every poll. Not allowed with GET." },
         every: {
@@ -342,7 +346,9 @@ export const capabilities: CapabilityDefinition[] = [
           type: "object",
           maxProperties: 32,
           additionalProperties: { type: "string" },
-          description: "Headers to send on every wake, e.g. Authorization. Same rules as schedule_http. Values are never shown again.",
+          description:
+            "Headers to send on every wake, e.g. Authorization. Same rules as schedule_http. Values are never shown again." +
+            SECRET_HEADERS_NOTE,
         },
         debounce: {
           type: "string",
@@ -357,6 +363,51 @@ export const capabilities: CapabilityDefinition[] = [
     name: "delete_wake",
     description: "Stop waking: RunLater no longer calls the wake URL. A wake already being sent finishes; one not yet sent is canceled.",
     input: noArgs,
+  },
+  {
+    name: "set_secret",
+    description:
+      "Store a credential once and refer to it instead of pasting it into requests: put {{secret:NAME}} in a header value of " +
+      "schedule_http, create_cron, watch_http or set_wake, e.g. \"Authorization\": \"Bearer {{secret:GITHUB_TOKEN}}\". RunLater " +
+      "encrypts the value, fills it in only at the moment it sends, and only to allowed_hosts: a request to any other host is " +
+      "refused, so a tricked or mistaken call cannot leak it. The value is never returned by any call, and if a destination echoes " +
+      "it back as sent, JSON-escaped or URL-encoded, a captured response shows [secret:NAME] instead (best effort: other " +
+      "encodings are not caught). Calling again with the same name replaces the value and hosts; " +
+      "work that refers to it uses the new value from its next attempt. At most 50 secrets.",
+    input: {
+      type: "object",
+      additionalProperties: false,
+      required: ["name", "value", "allowed_hosts"],
+      properties: {
+        name: SECRET_NAME,
+        value: {
+          type: "string",
+          minLength: 16,
+          maxLength: 4096,
+          description: "The credential: 16 to 4096 characters of printable ASCII, no line breaks (it is sent in a header).",
+        },
+        allowed_hosts: {
+          type: "array",
+          minItems: 1,
+          maxItems: 20,
+          items: { type: "string", maxLength: 255 },
+          description:
+            "The exact host names it may be sent to, e.g. \"api.github.com\". No scheme, port, path or wildcard: under shared " +
+            "domains (workers.dev, amazonaws.com) anyone can get a name, so a wildcard can't be made safe.",
+        },
+      },
+    },
+  },
+  {
+    name: "list_secrets",
+    description: "List this project's secrets: names, allowed hosts and when each was set. Never values.",
+    input: noArgs,
+  },
+  {
+    name: "delete_secret",
+    description:
+      "Delete a secret. Work that still refers to it fails without using an attempt when it next comes due (failure: secret_missing).",
+    input: { type: "object", additionalProperties: false, required: ["name"], properties: { name: SECRET_NAME } },
   },
 ];
 

@@ -32,6 +32,7 @@ There is no human sign-up, password, or dashboard in v1. The agent *is* the cust
 5. **Redrive** a task that failed, to try it again.
 6. **Find out later** what happened while the agent was away, without a public URL of its own: the *Inbox*.
 7. **Be woken** when something lands there, instead of waiting for a person to open a session: *Wake*.
+8. **Use credentials without handling them**: *Secrets*, bound to the hosts they are for.
 
 That's the whole product for v1.
 
@@ -109,6 +110,9 @@ The bridge keeps the agent's keys in `~/.agent-auth`. Losing them loses access t
 | `ack_inbox` | `up_to` | `acked_seq`, `unread` |
 | `set_wake` | `url`, `headers?`, `debounce?` | wake |
 | `delete_wake` | — | wake as it was |
+| `set_secret` | `name`, `value`, `allowed_hosts` | secret, without its value |
+| `list_secrets` | — | secrets: names, hosts, times |
+| `delete_secret` | `name` | secret as it was |
 
 The REST routes underneath (`/v1/tasks`, …) are an internal contract between
 services, not a public product in v1.
@@ -146,6 +150,18 @@ The inbox holds results until a session reads them; a wake starts that session. 
 - **What.** A signed `POST` of `{"event": "inbox.unread", "project_id", "unread"}`, the count when it is sent, and nothing else: results and captured responses stay behind the authenticated inbox. It is a task with `wake_call: true`, retried like any delivery and costing one attempt per try. It is not admitted, so it never spends attempts promised to waiting tasks: it goes only while an attempt is spare. With nothing else waiting it gets one try even past the budget or the trial; with work waiting and no spare attempt it is canceled (`budget_reserved`), which is not a wake failure. It can exceed the task cap by one at a time. A wake cannot be redriven (`409 wake_not_redrivable`), and its header values are wiped once it ends.
 - **Turning off.** A wake that fails (all its attempts) counts; a delivered one resets the count. After 3 in a row the wake turns itself off (`state: disabled`, `disabled_reason: wake_failing`) and adds a `wake.disabled` event to the inbox, which does not itself wake. `set_wake` again replaces the URL, headers and debounce, turns it back on, cancels a wake not yet sent, and queues one if anything is unread. `delete_wake` removes it (404 `wake_not_set` if there is none); a wake already being sent finishes.
 - `get_project` shows `wake`: URL, header names (never values), debounce, state, failures in a row, and the last wake's time and task id.
+
+## Secrets
+
+Agents handle untrusted text (pages, documents, captured responses), so a credential pasted into a request can be stolen by an instruction that redirects it. A secret is stored once and referred to by name, and it can only be sent to the hosts it was set for.
+
+- **Setting.** `set_secret(name, value, allowed_hosts)`: `name` is `A-Z0-9_`, starting with a letter, at most 64; `value` is 16–4096 bytes of printable ASCII with no line breaks (it goes in a header; a shorter one could be guessed by reflecting candidates off an allowed host and watching which come back redacted); `allowed_hosts` is 1–20 exact public host names (`api.github.com`). There are no wildcards: under shared domains (`workers.dev`, `amazonaws.com`, `github.io`) anyone can get a name, and no list reliably says which domains those are. Same name again replaces value and hosts. At most 50 per project (`429 secret_limit`).
+- **Write-only.** The API seals the value (AES-256-GCM, a key per project derived with HKDF from the `SECRETS_KEY` Worker secret, the name as associated data) before the ledger stores it; the ledger never holds plaintext. No route, view, callback, inbox event or log returns a value: `list_secrets` (scope `read`) shows names, hosts and times. Setting and deleting need the `secrets` scope.
+- **Using.** `{{secret:NAME}}` inside a header value of `schedule_http`, `create_cron`, `watch_http` or `set_wake`. Anywhere else (URL, body) it is an error rather than text sent as is. The task stores the reference; when work is accepted, every name must exist (`400 secret_not_found`), allow the destination's host (`400 secret_host_not_allowed`, field `url`), and the headers must fit 8 KiB with each value's real length counted.
+- **Sending.** At each attempt the ledger checks again and hands the consumer the sealed values; the consumer opens them, fills the headers in, sends, and forgets them. A secret deleted, narrowed or replaced by one too long in the meantime fails the task at once, without an attempt, with `failure: secret_missing`, `secret_host_not_allowed` or `secret_too_large`; an API without its key fails it with `secret_unavailable` (each reports like any failure, a watch shows it as `watch.reason`, and a redrive after fixing it sends it). Rotation is immediate: the next attempt of anything referring to the name uses the new value.
+- **Echoes.** Before a captured response (or a watch's last body) is stored, every value the attempt used is replaced with `[secret:NAME]`, as sent, JSON-escaped or percent-encoded, in the body and the kept headers. The body is read past its cap by up to 4 KiB first, so a value straddling the cap is redacted whole, then cut. This is best effort: a destination that echoes a value base64-encoded or masked is not caught, so bind secrets only to hosts that don't reflect request headers.
+- **Who can change them.** Any caller with the `secrets` scope (every agent of the project) can replace or delete a project's secrets. Replacing keeps the value behind the same hosts, so the worst case is requests going to the right host with the wrong credential.
+- **Key.** One `SECRETS_KEY` per environment, never rotated (`scripts/setup-deploy-secrets.mjs`). Without it the API runs and `set_secret` answers `503 secrets_unavailable`.
 
 ## Crons
 
@@ -209,6 +225,7 @@ An agent cannot pay, so a person pays for it. Stripe takes the payment; RunLater
 | Captured response | First 16 KiB and 4 headers; deleted 7 days after the task finishes |
 | Inbox | 10,000 events per project; unread kept 30 days, acked 7 days; `read_inbox` returns at most 50 |
 | Wake | One per project; at most one wake per 1m–24h (default 15m); off after 3 failures in a row |
+| Secrets | 50 per project; 4 KiB each; 1–20 allowed hosts each; header values only |
 
 ## Explicitly not in v1
 

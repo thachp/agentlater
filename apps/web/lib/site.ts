@@ -25,4 +25,5 @@ export const LIMITS: [string, string][] = [
   ["Captured responses", "First 16 KiB and 4 headers, kept 7 days after the task finishes"],
   ["Inbox", "10,000 events per project; unread kept 30 days, acked 7 days"],
   ["Wake", "At most one per 1 minute to 24 hours (default 15 minutes); off after 3 failures in a row"],
+  ["Secrets", "50 per project, 4 KiB each, each bound to at most 20 hosts"],
 ];

@@ -9,6 +9,9 @@
 //   secret   ASSERTION_PRIVATE_KEY  gateway's Ed25519 seed (hex) for API assertions
 //   variable GATEWAY_PUBLIC_KEY     its public key (hex); the API verifies with it
 //   secret   BETTER_AUTH_SECRET     Better Auth signing secret
+//   secret   SECRETS_KEY            the API's master key for project secrets (32 bytes, hex).
+//                                  Never rotated, not even with --rotate: every stored
+//                                  secret is sealed with it and would become unreadable.
 //   secret   CLOUDFLARE_ACCOUNT_ID  if --account-id is given
 // Staging only:
 //   secret   RECEIVER_TOKEN         reads recorded deliveries from the test receiver
@@ -64,6 +67,10 @@ for (const env of ENVS) {
   if (rotate || !secrets.has("BETTER_AUTH_SECRET")) {
     gh(["secret", "set", "BETTER_AUTH_SECRET", "--env", env], randomBytes(32).toString("hex"));
     done.push("BETTER_AUTH_SECRET");
+  }
+  if (!secrets.has("SECRETS_KEY")) {
+    gh(["secret", "set", "SECRETS_KEY", "--env", env], randomBytes(32).toString("hex"));
+    done.push("SECRETS_KEY");
   }
   if (env === "staging" && (rotate || !secrets.has("RECEIVER_TOKEN"))) {
     gh(["secret", "set", "RECEIVER_TOKEN", "--env", env], randomBytes(32).toString("hex"));

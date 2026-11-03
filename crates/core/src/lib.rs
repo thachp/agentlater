@@ -8,6 +8,7 @@ pub mod cron;
 pub mod limits;
 mod request;
 mod retry;
+mod secret;
 mod task;
 mod wake;
 mod watch;
@@ -19,6 +20,10 @@ pub use request::{
     valid_lane, Callback, Method, ScheduleRequest, TaskSpec, ValidationError, INBOX,
 };
 pub use retry::{backoff_ms, classify, Outcome, Verdict};
+pub use secret::{
+    fill, header_references, host_allowed, redact, references, valid_secret_name, ReferenceError,
+    SecretError, SecretRequest, SecretSpec,
+};
 pub use task::{Attempt, CancelError, Cancelled, ClaimError, RedriveError, Stale, Status, Task};
 pub use wake::{WakeRequest, WakeRequestError, WakeSpec};
 pub use watch::{

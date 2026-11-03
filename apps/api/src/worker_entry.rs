@@ -3,14 +3,16 @@
 
 use crate::assertion::{self, Scope};
 use crate::db::{Db, DbError, Param};
-use crate::ledger::{ApiError, Claimed, Delivery, Dispatch, Ledger, ResponseRead};
+use crate::ledger::{ApiError, Claimed, Delivery, Dispatch, Ledger, ResponseRead, SealedSecret};
+use crate::sealing::{SealingKey, NONCE_BYTES};
 use futures_util::future::{join_all, select, Either};
 use futures_util::StreamExt;
 use runlater_core::limits::{
     ATTEMPT_TIMEOUT_MS, CAPTURED_HEADERS, CAPTURE_BODY_BYTES, MAX_WATCH_RESPONSE_BYTES,
 };
 use runlater_core::{
-    CronRequest, Outcome, PollBody, ScheduleRequest, Status, WakeRequest, WatchRequest,
+    fill, redact, CronRequest, Outcome, PollBody, ScheduleRequest, SecretRequest, Status,
+    WakeRequest, WatchRequest,
 };
 use runlater_egress::{sign, Destination};
 use serde::de::DeserializeOwned;
@@ -129,6 +131,10 @@ fn required_scope(method: &Method, path: &[&str]) -> Option<Scope> {
         (Method::Post, ["v1", "inbox", "ack"]) => Scope::Read,
         (Method::Post, ["v1", "wake"]) => Scope::Schedule,
         (Method::Post, ["v1", "wake", "delete"]) => Scope::Cancel,
+        (Method::Post, ["v1", "secrets"]) => Scope::Secrets,
+        // Names and hosts only; values are never returned.
+        (Method::Get, ["v1", "secrets"]) => Scope::Read,
+        (Method::Post, ["v1", "secrets", _, "delete"]) => Scope::Secrets,
         _ => return None,
     })
 }
@@ -137,6 +143,17 @@ fn segments(url: &Url) -> Vec<String> {
     url.path_segments()
         .map(|s| s.filter(|p| !p.is_empty()).map(String::from).collect())
         .unwrap_or_default()
+}
+
+/// The key project secrets are sealed with (`SECRETS_KEY`, 32 bytes as hex). Secrets are
+/// unavailable without it.
+fn sealing_key(env: &Env) -> Option<SealingKey> {
+    let raw = env
+        .secret("SECRETS_KEY")
+        .map(|s| s.to_string())
+        .or_else(|_| env.var("SECRETS_KEY").map(|s| s.to_string()))
+        .ok()?;
+    SealingKey::parse(&raw)
 }
 
 fn gateway_key(env: &Env) -> Option<assertion::VerifyingKey> {
@@ -371,6 +388,41 @@ impl TaskLedger {
             (Method::Post, ["v1", "wake", "delete"]) => {
                 ledger.delete_wake(t).map(|v| json(&v, 200))
             }
+            (Method::Post, ["v1", "secrets"]) => match body::<SecretRequest>(req).await {
+                Ok(r) => match (r.validate(), sealing_key(&self.env)) {
+                    (Err(e), _) => Err(ApiError {
+                        field: Some(e.field()),
+                        ..ApiError::bad_request(e.to_string())
+                    }),
+                    (Ok(_), None) => {
+                        return simple_error(
+                            503,
+                            "secrets_unavailable",
+                            "secrets are not configured on this deployment",
+                        )
+                    }
+                    (Ok(spec), Some(key)) => {
+                        let nonce: [u8; NONCE_BYTES] = random_bytes(NONCE_BYTES as u32)?
+                            .try_into()
+                            .map_err(|_| Error::RustError("short nonce".into()))?;
+                        let sealed = key.seal(&project_id, &spec.name, &spec.value, nonce);
+                        ledger
+                            .put_secret(
+                                &spec.name,
+                                &sealed,
+                                spec.value.len(),
+                                &spec.allowed_hosts,
+                                t,
+                            )
+                            .map(|(v, c)| created(&v, c))
+                    }
+                },
+                Err(e) => Err(e),
+            },
+            (Method::Get, ["v1", "secrets"]) => ledger.secrets().map(|s| json(&s, 200)),
+            (Method::Post, ["v1", "secrets", name, "delete"]) => {
+                ledger.delete_secret(name).map(|v| json(&v, 200))
+            }
             (Method::Post, ["internal", "claim"]) => match body::<ClaimBody>(req).await {
                 Ok(c) => ledger.claim(&c.task_id, c.generation, t).map(|claimed| {
                     let reply = match claimed {
@@ -439,7 +491,8 @@ impl DurableObject for TaskLedger {
     async fn fetch(&self, mut req: Request) -> Result<Response> {
         let sql = self.sql();
         let ledger = match Ledger::open(&sql) {
-            Ok(l) => l,
+            Ok(l) if sealing_key(&self.env).is_some() => l,
+            Ok(l) => l.without_secrets(),
             Err(e) => return error(e.into()),
         };
         let response = self.route(&mut req, &ledger).await?;
@@ -514,9 +567,43 @@ async fn process(env: &Env, d: &Dispatch) -> Result<()> {
     let Some(delivery) = claim.deliver else {
         return Ok(());
     };
-    let (outcome, read) = deliver(&delivery).await;
-    let (body, truncated, headers) =
-        read.map_or((None, false, vec![]), |r| (r.body, r.truncated, r.headers));
+    // Secrets are opened only here, and only for as long as this attempt takes.
+    let values = match open_secrets(env, &d.project_id, &delivery.secrets) {
+        Some(values) => values,
+        None => {
+            console_error!("could not open the secrets for {}", delivery.task_id);
+            vec![]
+        }
+    };
+    let (outcome, read) = if values.len() < delivery.secrets.len() {
+        (Outcome::Rejected, None)
+    } else {
+        match filled(&delivery, &values) {
+            Some(ready) => deliver(&ready).await,
+            None => (Outcome::Rejected, None),
+        }
+    };
+    // A response that echoes a credential back must not carry it into the ledger. The body was
+    // read past its cap, so a value straddling the cap is redacted whole before the cut.
+    let cap = if delivery.capture {
+        CAPTURE_BODY_BYTES
+    } else {
+        MAX_WATCH_RESPONSE_BYTES
+    };
+    let (body, truncated, headers) = read.map_or((None, false, vec![]), |r| {
+        let (body, cut) = match r.body.map(|b| redact(&b, &values)) {
+            Some(b) if b.len() > cap => (Some(cut_at(&b, cap)), true),
+            other => (other, false),
+        };
+        (
+            body,
+            r.truncated || cut,
+            r.headers
+                .into_iter()
+                .map(|(k, v)| (k, redact(&v, &values)))
+                .collect(),
+        )
+    });
     let _: serde_json::Value = call(
         &stub,
         &d.project_id,
@@ -532,6 +619,51 @@ async fn process(env: &Env, d: &Dispatch) -> Result<()> {
     )
     .await?;
     Ok(())
+}
+
+/// The first `max` bytes of `s`, cut at a character boundary.
+fn cut_at(s: &str, max: usize) -> String {
+    let mut end = max.min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
+/// The plaintext of each sealed secret, or None if any cannot be opened.
+fn open_secrets(
+    env: &Env,
+    project_id: &str,
+    sealed: &[SealedSecret],
+) -> Option<Vec<(String, String)>> {
+    if sealed.is_empty() {
+        return Some(vec![]);
+    }
+    let key = sealing_key(env)?;
+    sealed
+        .iter()
+        .map(|s| Some((s.name.clone(), key.open(project_id, &s.name, &s.sealed)?)))
+        .collect()
+}
+
+/// The delivery with its header references filled in.
+fn filled(d: &Delivery, values: &[(String, String)]) -> Option<Delivery> {
+    let lookup = |name: &str| {
+        values
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
+    };
+    let headers = d
+        .headers
+        .iter()
+        .map(|(k, v)| Some((k.clone(), fill(v, lookup)?)))
+        .collect::<Option<Vec<_>>>()?;
+    // The sealed secrets stay on it: send() reads a little further when there are some.
+    Some(Delivery {
+        headers,
+        ..d.clone()
+    })
 }
 
 #[event(queue)]
@@ -617,6 +749,16 @@ fn kept_headers(response: &Response) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Extra bytes to read past a cap when the request carried secrets, so an echoed value that
+/// straddles the cap is still whole when it is redacted.
+fn secret_margin(d: &Delivery) -> usize {
+    if d.secrets.is_empty() {
+        0
+    } else {
+        runlater_core::limits::MAX_SECRET_BYTES
+    }
+}
+
 async fn send(
     destination: &Destination,
     d: &Delivery,
@@ -679,7 +821,7 @@ async fn send(
             if left <= 0 {
                 return Ok((outcome, Some(unread(headers))));
             }
-            let read = read_capped(&mut response, CAPTURE_BODY_BYTES);
+            let read = read_capped(&mut response, CAPTURE_BODY_BYTES + secret_margin(d));
             let limit = Delay::from(Duration::from_millis(left as u64));
             futures_util::pin_mut!(read, limit);
             let body = match select(read, limit).await {
@@ -694,7 +836,7 @@ async fn send(
         }
         // A body cut off mid-read is a failed poll, not an empty answer.
         Ok(
-            match read_capped(&mut response, MAX_WATCH_RESPONSE_BYTES).await {
+            match read_capped(&mut response, MAX_WATCH_RESPONSE_BYTES + secret_margin(d)).await {
                 Ok((body, truncated)) => (
                     outcome,
                     Some(ResponseBody {

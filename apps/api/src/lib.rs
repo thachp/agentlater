@@ -7,6 +7,7 @@ pub mod assertion;
 pub mod db;
 pub mod http;
 pub mod ledger;
+pub mod sealing;
 
 #[cfg(target_arch = "wasm32")]
 mod worker_entry;

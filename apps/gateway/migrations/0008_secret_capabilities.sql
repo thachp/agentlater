@@ -1,0 +1,2 @@
+-- set_secret, list_secrets and delete_secret for hosts that activated before they existed, as in 0003_host_capabilities.sql.
+UPDATE "agentHost" SET "defaultCapabilities" = '["create_project","get_project","get_payment_link","schedule_http","get_task","list_tasks","cancel_task","redrive_task","create_cron","get_cron","list_crons","delete_cron","watch_http","read_inbox","ack_inbox","set_wake","delete_wake","set_secret","list_secrets","delete_secret"]' WHERE "userId" IS NULL;

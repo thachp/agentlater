@@ -7,7 +7,7 @@
 
 import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { createHmac, generateKeyPairSync, sign } from "node:crypto";
+import { createHmac, generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 
@@ -41,7 +41,7 @@ before(async () => {
     durableObjects: { LEDGER: { className: "TaskLedger", useSQLite: true } },
     queueProducers: { READY: { queueName: "runlater-ready" } },
     queueConsumers: { "runlater-ready": { maxBatchTimeout: 1 } },
-    bindings: { GATEWAY_PUBLIC_KEY: publicHex },
+    bindings: { GATEWAY_PUBLIC_KEY: publicHex, SECRETS_KEY: randomBytes(32).toString("hex") },
     outboundService: async (req) => {
       const url = new URL(req.url);
       received.push({
@@ -308,6 +308,68 @@ describe("api", () => {
     assert.equal(after.last_wake_task_id, id);
     assert.equal((await api("POST", "/v1/wake/delete", { project, body: {} })).json.url, "https://receiver.example.com/wake");
     assert.equal((await api("GET", "/v1/projects/self", { project })).json.wake, null);
+  });
+
+  test("fills a secret in only when sending, only to its host, and redacts it from the capture", async () => {
+    const project = "proj_secrets";
+    await api("POST", "/v1/projects", { project });
+    const token = `tok_${randomBytes(8).toString("hex")}`;
+    const set = await api("POST", "/v1/secrets", {
+      project,
+      scope: "secrets",
+      body: { name: "RECEIVER_TOKEN", value: token, allowed_hosts: ["receiver.example.com"] },
+    });
+    assert.equal(set.status, 201);
+    assert.deepEqual(Object.keys(set.json).sort(), ["allowed_hosts", "created_ms", "name", "updated_ms"]);
+    const needsScope = await api("POST", "/v1/secrets", { project, body: { name: "X", value: "y", allowed_hosts: ["a.example.com"] } });
+    assert.equal(needsScope.status, 403, "the secrets scope is separate");
+
+    replies.set("/echo", [{ status: 200, body: JSON.stringify({ you_sent: token }), headers: { "Content-Type": "application/json" } }]);
+    const res = await api("POST", "/v1/tasks", {
+      project,
+      body: { url: "https://receiver.example.com/echo", headers: { Authorization: "Bearer {{secret:RECEIVER_TOKEN}}" }, capture: true },
+    });
+    assert.equal(res.status, 201);
+    const task = await settled(project, res.json.id, ["succeeded", "failed"]);
+    assert.equal(task.status, "succeeded");
+    const sent = received.find((r) => r.headers["runlater-task-id"] === task.id);
+    assert.equal(sent.headers.authorization, `Bearer ${token}`, "the destination gets the real value");
+    assert.equal(task.response.body, JSON.stringify({ you_sent: "[secret:RECEIVER_TOKEN]" }));
+    assert.ok(!JSON.stringify(task).includes(token), "the task never shows it");
+
+    const elsewhere = await api("POST", "/v1/tasks", {
+      project,
+      body: { url: "https://evil.example.com/", headers: { Authorization: "{{secret:RECEIVER_TOKEN}}" } },
+    });
+    assert.equal(elsewhere.json.error.code, "secret_host_not_allowed");
+    const listed = await api("GET", "/v1/secrets", { project });
+    assert.deepEqual(listed.json.secrets.map((s) => s.name), ["RECEIVER_TOKEN"]);
+    assert.ok(!JSON.stringify(listed.json).includes(token));
+    // An echo that straddles the 16 KiB capture cap is redacted whole, not cut to a prefix.
+    const padding = "p".repeat(16 * 1024 - 10);
+    replies.set("/straddle", [{ status: 200, body: `${padding}${token}tail` }]);
+    const straddle = await api("POST", "/v1/tasks", {
+      project,
+      body: { url: "https://receiver.example.com/straddle", headers: { Authorization: "{{secret:RECEIVER_TOKEN}}" }, capture: true },
+    });
+    const cut = await settled(project, straddle.json.id, ["succeeded", "failed"]);
+    assert.equal(cut.response.truncated, true);
+    assert.ok(!cut.response.body.includes(token.slice(0, 8)), "no prefix of the value survives the cut");
+    assert.ok(cut.response.body.endsWith("[secret:RE") || cut.response.body.length <= 16 * 1024);
+    const short = await api("POST", "/v1/secrets", {
+      project,
+      scope: "secrets",
+      body: { name: "PIN", value: "1234", allowed_hosts: ["receiver.example.com"] },
+    });
+    assert.equal(short.json.error.field, "value", "short secrets are refused");
+    const wildcard = await api("POST", "/v1/secrets", {
+      project,
+      scope: "secrets",
+      body: { name: "WILD", value: "x".repeat(20), allowed_hosts: ["*.workers.dev"] },
+    });
+    assert.equal(wildcard.json.error.field, "allowed_hosts", "no wildcards");
+    const gone = await api("POST", "/v1/secrets/RECEIVER_TOKEN/delete", { project, scope: "secrets", body: {} });
+    assert.equal(gone.json.name, "RECEIVER_TOKEN");
   });
 
   test("runs a lane one task at a time, in order", async () => {
