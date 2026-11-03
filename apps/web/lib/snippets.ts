@@ -11,6 +11,21 @@ export const mcpRemoteConfig = `{
 
 export const mcpClaudeCode = `claude mcp add --transport http runlater ${GATEWAY_URL}/mcp`;
 
+export const mcpChatGpt = `Settings → Apps & Connectors → Advanced → Developer mode: on
+Create connector
+  URL:            ${GATEWAY_URL}/mcp
+  Authentication: OAuth`;
+
+export const mcpCodex = `# ~/.codex/config.toml
+[mcp_servers.runlater]
+url = "${GATEWAY_URL}/mcp"
+
+# then sign in once
+codex mcp login runlater`;
+
+export const mcpGrok = `grok.com → Connectors → Custom
+  Server URL: ${GATEWAY_URL}/mcp`;
+
 export const mcpConfig = `{
   "mcpServers": {
     "runlater": {

@@ -5,7 +5,10 @@ import {
   agentPrompt,
   hookCall,
   inboxCall,
+  mcpChatGpt,
   mcpClaudeCode,
+  mcpCodex,
+  mcpGrok,
   mcpRemoteConfig,
   scheduleCall,
   sdkShort,
@@ -18,6 +21,24 @@ const CONNECT = [
     "Claude Code",
     <>Run this once, then approve the connection on the page that opens. No account, no API key.</>,
     mcpClaudeCode,
+  ],
+  [
+    "ChatGPT",
+    <>
+      Add RunLater as a custom connector (developer mode), then sign in when ChatGPT asks. Your agent gets its own
+      project.
+    </>,
+    mcpChatGpt,
+  ],
+  [
+    "OpenAI Codex",
+    <>Add the server to Codex's config, then sign in once from the terminal.</>,
+    mcpCodex,
+  ],
+  [
+    "Grok",
+    <>Add a custom connector at grok.com and approve the connection on the page that opens.</>,
+    mcpGrok,
   ],
   [
     "Claude Desktop, Cursor, any MCP client",
@@ -104,8 +125,9 @@ export default function Home() {
           <p className="eyebrow">Get started</p>
           <h2>Connect your agent in a minute</h2>
           <p className="intro">
-            RunLater is a set of tools your agent calls, over MCP or from code. There is no dashboard, no sign-up and no
-            API key to paste. Each connection gets its own project with a free trial.
+            RunLater is a set of tools your agent calls over MCP, so it works with Claude, ChatGPT, Codex, Grok, Cursor
+            and any other client that speaks MCP, or from code. There is no dashboard, no sign-up and no API key to
+            paste. Each connection gets its own project with a free trial.
           </p>
           <div className="rows">
             {CONNECT.map(([title, body, code]) => (
@@ -235,7 +257,7 @@ export default function Home() {
 
       <section className="wrap cta">
         <h2>Give your agent a sense of later</h2>
-        <p>Connect it from an MCP client or from code, and hand it the waiting.</p>
+        <p>Connect it from Claude, ChatGPT, Codex, Grok or any MCP client, or from code, and hand it the waiting.</p>
         <div className="actions">
           <a className="button primary" href="#connect">
             Connect your agent
