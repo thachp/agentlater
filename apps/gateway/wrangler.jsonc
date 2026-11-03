@@ -25,14 +25,19 @@
   "ratelimits": [
     { "name": "REGISTER_RATE", "namespace_id": "1001", "simple": { "limit": 10, "period": 60 } },
     { "name": "OAUTH_RATE", "namespace_id": "1003", "simple": { "limit": 20, "period": 60 } },
-    { "name": "MPP_RATE", "namespace_id": "1005", "simple": { "limit": 10, "period": 60 } }
+    { "name": "MPP_RATE", "namespace_id": "1005", "simple": { "limit": 10, "period": 60 } },
+    { "name": "HOOK_RATE", "namespace_id": "1007", "simple": { "limit": 120, "period": 60 } }
   ],
   "env": {
     "staging": {
       "name": "runlater-gateway-staging",
-      "vars": { "PUBLIC_URL": "https://gateway-staging.runlater.io" },
-      // Must match PUBLIC_URL: Agent Auth checks token audiences against it.
-      "routes": [{ "pattern": "gateway-staging.runlater.io", "custom_domain": true }],
+      "vars": { "PUBLIC_URL": "https://gateway-staging.runlater.io", "HOOKS_URL": "https://hooks-staging.runlater.io" },
+      // Must match PUBLIC_URL: Agent Auth checks token audiences against it. The hooks host
+      // serves inbound hooks only.
+      "routes": [
+        { "pattern": "gateway-staging.runlater.io", "custom_domain": true },
+        { "pattern": "hooks-staging.runlater.io", "custom_domain": true }
+      ],
       "services": [{ "binding": "API", "service": "runlater-api-staging" }],
       "d1_databases": [
         { "binding": "DB", "database_name": "runlater-gateway-staging", "database_id": "ff3501c9-62a7-44e2-b17a-3b24b7183d1d", "migrations_dir": "migrations" }
@@ -41,14 +46,18 @@
       "ratelimits": [
         { "name": "REGISTER_RATE", "namespace_id": "1001", "simple": { "limit": 10, "period": 60 } },
         { "name": "OAUTH_RATE", "namespace_id": "1003", "simple": { "limit": 20, "period": 60 } },
-        { "name": "MPP_RATE", "namespace_id": "1005", "simple": { "limit": 10, "period": 60 } }
+        { "name": "MPP_RATE", "namespace_id": "1005", "simple": { "limit": 10, "period": 60 } },
+        { "name": "HOOK_RATE", "namespace_id": "1007", "simple": { "limit": 120, "period": 60 } }
       ],
       "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "8d9c410b9f39424fb155ca27b542afe0" }]
     },
     "production": {
       "name": "runlater-gateway-production",
-      "vars": { "PUBLIC_URL": "https://gateway.runlater.io" },
-      "routes": [{ "pattern": "gateway.runlater.io", "custom_domain": true }],
+      "vars": { "PUBLIC_URL": "https://gateway.runlater.io", "HOOKS_URL": "https://hooks.runlater.io" },
+      "routes": [
+        { "pattern": "gateway.runlater.io", "custom_domain": true },
+        { "pattern": "hooks.runlater.io", "custom_domain": true }
+      ],
       "services": [{ "binding": "API", "service": "runlater-api-production" }],
       "d1_databases": [
         { "binding": "DB", "database_name": "runlater-gateway-production", "database_id": "73ca0a7b-8022-4d88-aba5-b57bed67ba5a", "migrations_dir": "migrations" }
@@ -57,7 +66,8 @@
       "ratelimits": [
         { "name": "REGISTER_RATE", "namespace_id": "1002", "simple": { "limit": 10, "period": 60 } },
         { "name": "OAUTH_RATE", "namespace_id": "1004", "simple": { "limit": 20, "period": 60 } },
-        { "name": "MPP_RATE", "namespace_id": "1006", "simple": { "limit": 10, "period": 60 } }
+        { "name": "MPP_RATE", "namespace_id": "1006", "simple": { "limit": 10, "period": 60 } },
+        { "name": "HOOK_RATE", "namespace_id": "1008", "simple": { "limit": 120, "period": 60 } }
       ],
       "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "d172e7fad1f3452badcbf756685c7abe" }]
     }

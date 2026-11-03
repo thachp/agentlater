@@ -1,0 +1,660 @@
+//! Inbound hooks: each delivery to a hook's URL becomes a `hook.received` inbox event.
+//!
+//! The ledger stores a hook by the SHA-256 of its token, so not even a copy of the database
+//! gives the URL back. The API checks signatures (it holds the key that opens the hook's
+//! secret) and hands the ledger what to keep; the ledger applies the rate limits, drops
+//! retries the sender marked with a delivery id, and writes the event.
+
+use super::*;
+use runlater_core::limits::{
+    DAY_MS, HOOK_BURST, HOOK_DEDUPE_MS, HOOK_EVENTS_PER_DAY, HOOK_EVENTS_PER_DAY_PAID,
+    HOOK_INTERVAL_MS, MAX_HOOKS,
+};
+use runlater_core::{HookSpec, VerifySpec};
+
+/// A hook as callers see it: never its URL or secret.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct HookView {
+    pub name: String,
+    pub verify: Option<VerifySpec>,
+    pub keep_headers: Vec<String>,
+    pub created_ms: i64,
+    pub last_received_ms: Option<i64>,
+    /// Requests written to the inbox.
+    pub received: i64,
+    /// Requests refused, by reason: signature_missing, signature_invalid, signature_stale,
+    /// rate_limited, daily_limit or project_expired.
+    pub refused: BTreeMap<String, i64>,
+}
+
+/// `create_hook`'s answer: the hook, and the path of its URL, shown this once.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct CreatedHook {
+    #[serde(flatten)]
+    pub hook: HookView,
+    pub url_path: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct HookList {
+    pub hooks: Vec<HookView>,
+}
+
+/// A hook as the receive path needs it.
+#[derive(Deserialize)]
+pub struct HookRow {
+    pub name: String,
+    verify: Option<String>,
+    /// The verify secret, sealed by the API.
+    pub sealed_secret: Option<String>,
+    keep_headers: String,
+    created_ms: i64,
+    last_received_ms: Option<i64>,
+    received: i64,
+    refused: String,
+    /// When the rate limit's next request is due on average (GCRA).
+    rate_tat_ms: i64,
+}
+
+const HOOK_COLUMNS: &str = "name, verify, sealed_secret, keep_headers, created_ms, \
+    last_received_ms, received, refused, rate_tat_ms";
+
+impl HookRow {
+    pub fn verify(&self) -> Result<Option<VerifySpec>, DbError> {
+        self.verify
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| DbError(e.to_string()))
+    }
+
+    pub fn keep_headers(&self) -> Result<Vec<String>, DbError> {
+        serde_json::from_str(&self.keep_headers).map_err(|e| DbError(e.to_string()))
+    }
+
+    fn view(&self) -> Result<HookView, DbError> {
+        Ok(HookView {
+            name: self.name.clone(),
+            verify: self.verify()?,
+            keep_headers: self.keep_headers()?,
+            created_ms: self.created_ms,
+            last_received_ms: self.last_received_ms,
+            received: self.received,
+            refused: serde_json::from_str(&self.refused).map_err(|e| DbError(e.to_string()))?,
+        })
+    }
+}
+
+/// What the API kept of one request to a hook.
+#[derive(Debug)]
+pub struct Received<'r> {
+    /// Whether a signature was checked and matched.
+    pub verified: bool,
+    pub delivery_id: Option<String>,
+    pub headers: BTreeMap<String, String>,
+    /// At most `HOOK_BODY_KEPT_BYTES`, as text.
+    pub body: &'r str,
+    pub body_bytes: usize,
+}
+
+/// How a request to a hook was answered.
+#[derive(Debug, PartialEq, Eq)]
+pub enum HookOutcome {
+    /// Written to the inbox as this event.
+    Accepted(i64),
+    /// A delivery id seen in the last day: a retry, already in the inbox.
+    Duplicate,
+    /// Not written: the status to answer, why, and when to try again.
+    Refused {
+        status: u16,
+        reason: &'static str,
+        retry_after_ms: Option<i64>,
+    },
+}
+
+/// The SHA-256 a hook's token is stored and looked up by.
+pub fn token_hash(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+impl<D: Db> Ledger<'_, D> {
+    fn hook_row(&self, name: &str) -> Result<Option<HookRow>, DbError> {
+        Ok(self
+            .db
+            .query(
+                &format!("SELECT {HOOK_COLUMNS} FROM hooks WHERE name = ?"),
+                vec![name.into()],
+            )?
+            .pop())
+    }
+
+    /// Creates a hook, or replaces one of the same name with a new URL: the old URL stops
+    /// working at once, and the counts start again. `token` is random from the API.
+    pub fn put_hook(
+        &self,
+        spec: &HookSpec,
+        token: &str,
+        sealed_secret: Option<&str>,
+        now: i64,
+    ) -> Result<(CreatedHook, bool), ApiError> {
+        let project = self.project_row()?.ok_or_else(no_project)?;
+        if now >= project.expires_ms {
+            return Err(ApiError::new(
+                403,
+                "trial_expired",
+                "this project's attempts have expired",
+            ));
+        }
+        let existing = self.hook_row(&spec.name)?;
+        if existing.is_none() {
+            let count: Vec<Counts> = self
+                .db
+                .query("SELECT COUNT(*) AS total, 0 AS waiting FROM hooks", vec![])?;
+            if count.first().map_or(0, |c| c.total) >= MAX_HOOKS {
+                return Err(ApiError::new(
+                    429,
+                    "hook_limit",
+                    format!("this project already has {MAX_HOOKS} hooks; delete one first"),
+                ));
+            }
+        }
+        let verify = spec
+            .verify
+            .as_ref()
+            .map(|(v, _)| serde_json::to_string(v))
+            .transpose()
+            .map_err(|e| DbError(e.to_string()))?;
+        let keep = serde_json::to_string(&spec.keep_headers).map_err(|e| DbError(e.to_string()))?;
+        self.db.exec(
+            "DELETE FROM hooks WHERE name = ?",
+            vec![spec.name.as_str().into()],
+        )?;
+        self.db.exec(
+            "DELETE FROM hook_deliveries WHERE hook = ?",
+            vec![spec.name.as_str().into()],
+        )?;
+        self.db.exec(
+            "INSERT INTO hooks (name, token_hash, verify, sealed_secret, keep_headers, \
+             created_ms, received, refused, rate_tat_ms) VALUES (?, ?, ?, ?, ?, ?, 0, '{}', 0)",
+            vec![
+                spec.name.as_str().into(),
+                token_hash(token).into(),
+                verify.into(),
+                sealed_secret.into(),
+                keep.into(),
+                now.into(),
+            ],
+        )?;
+        let row = self
+            .hook_row(&spec.name)?
+            .ok_or_else(|| DbError("hook vanished".into()))?;
+        let created = CreatedHook {
+            hook: row.view()?,
+            url_path: format!("/h/{}/{token}", project.id),
+        };
+        Ok((created, existing.is_none()))
+    }
+
+    pub fn hooks(&self) -> Result<HookList, ApiError> {
+        self.project_row()?.ok_or_else(no_project)?;
+        let rows: Vec<HookRow> = self.db.query(
+            &format!("SELECT {HOOK_COLUMNS} FROM hooks ORDER BY name"),
+            vec![],
+        )?;
+        let hooks = rows.iter().map(HookRow::view).collect::<Result<_, _>>()?;
+        Ok(HookList { hooks })
+    }
+
+    /// Removes a hook; its URL answers 404 from now on. Events it wrote stay in the inbox.
+    pub fn delete_hook(&self, name: &str) -> Result<HookView, ApiError> {
+        let row = self.hook_row(name)?.ok_or_else(|| {
+            ApiError::not_found("hook_not_found", "no hook with that name in this project")
+        })?;
+        self.db
+            .exec("DELETE FROM hooks WHERE name = ?", vec![name.into()])?;
+        self.db.exec(
+            "DELETE FROM hook_deliveries WHERE hook = ?",
+            vec![name.into()],
+        )?;
+        Ok(row.view()?)
+    }
+
+    /// The hook a request's token belongs to, if any.
+    pub fn hook_for_token(&self, token: &str) -> Result<Option<HookRow>, DbError> {
+        Ok(self
+            .db
+            .query(
+                &format!("SELECT {HOOK_COLUMNS} FROM hooks WHERE token_hash = ?"),
+                vec![token_hash(token).into()],
+            )?
+            .pop())
+    }
+
+    /// Counts a request refused before it reached [`Self::receive_hook`] (a bad signature).
+    pub fn hook_refused(&self, hook: &str, reason: &str) -> Result<(), DbError> {
+        let Some(row) = self.hook_row(hook)? else {
+            return Ok(());
+        };
+        let mut refused: BTreeMap<String, i64> =
+            serde_json::from_str(&row.refused).map_err(|e| DbError(e.to_string()))?;
+        *refused.entry(reason.into()).or_default() += 1;
+        let refused = serde_json::to_string(&refused).map_err(|e| DbError(e.to_string()))?;
+        self.db.exec(
+            "UPDATE hooks SET refused = ? WHERE name = ?",
+            vec![refused.into(), hook.into()],
+        )
+    }
+
+    /// Writes a request the API accepted (signature checked, if the hook has one) as an inbox
+    /// event, unless the project is over its limits or the sender is retrying.
+    pub fn receive_hook(
+        &self,
+        hook: &HookRow,
+        r: Received<'_>,
+        now: i64,
+    ) -> Result<HookOutcome, DbError> {
+        let project = self
+            .project_row()?
+            .ok_or_else(|| DbError("no project for the hook".into()))?;
+        let refuse = |status, reason, retry_after_ms| -> Result<HookOutcome, DbError> {
+            self.hook_refused(&hook.name, reason)?;
+            Ok(HookOutcome::Refused {
+                status,
+                reason,
+                retry_after_ms,
+            })
+        };
+        if now >= project.expires_ms {
+            return refuse(410, "project_expired", None);
+        }
+        // GCRA: one request per interval on average, `HOOK_BURST` at once.
+        let tat = hook.rate_tat_ms.max(now);
+        let allowance = (HOOK_BURST - 1) * HOOK_INTERVAL_MS;
+        if tat - now > allowance {
+            return refuse(429, "rate_limited", Some(tat - now - allowance));
+        }
+        self.db.exec(
+            "UPDATE hooks SET rate_tat_ms = ? WHERE name = ?",
+            vec![(tat + HOOK_INTERVAL_MS).into(), hook.name.as_str().into()],
+        )?;
+
+        if let Some(id) = &r.delivery_id {
+            self.db.exec(
+                "DELETE FROM hook_deliveries WHERE hook = ? AND expires_ms <= ?",
+                vec![hook.name.as_str().into(), now.into()],
+            )?;
+            let seen: Vec<Counts> = self.db.query(
+                "SELECT COUNT(*) AS total, 0 AS waiting FROM hook_deliveries \
+                 WHERE hook = ? AND delivery_id = ?",
+                vec![hook.name.as_str().into(), id.as_str().into()],
+            )?;
+            if seen.first().map_or(0, |c| c.total) > 0 {
+                return Ok(HookOutcome::Duplicate);
+            }
+        }
+
+        let day = now.div_euclid(DAY_MS);
+        let cap = if project.paid != 0 {
+            HOOK_EVENTS_PER_DAY_PAID
+        } else {
+            HOOK_EVENTS_PER_DAY
+        };
+        let today: Vec<DayRow> = self
+            .db
+            .query("SELECT hook_day, hook_day_count FROM project", vec![])?;
+        let count = today
+            .first()
+            .filter(|t| t.hook_day == day)
+            .map_or(0, |t| t.hook_day_count);
+        if count >= cap {
+            return refuse(429, "daily_limit", Some((day + 1) * DAY_MS - now));
+        }
+        self.db.exec(
+            "UPDATE project SET hook_day = ?, hook_day_count = ?",
+            vec![day.into(), (count + 1).into()],
+        )?;
+
+        if let Some(id) = &r.delivery_id {
+            self.db.exec(
+                "INSERT INTO hook_deliveries (hook, delivery_id, expires_ms) VALUES (?, ?, ?)",
+                vec![
+                    hook.name.as_str().into(),
+                    id.as_str().into(),
+                    (now + HOOK_DEDUPE_MS).into(),
+                ],
+            )?;
+        }
+        let seq = self.next_inbox_seq()?;
+        let event = serde_json::json!({
+            "event": "hook.received",
+            "hook": hook.name,
+            "verified": r.verified,
+            "delivery_id": r.delivery_id,
+            "request": {
+                "method": "POST",
+                "headers": r.headers,
+                "body": r.body,
+                "body_bytes": r.body_bytes,
+                "truncated": r.body.len() < r.body_bytes,
+            },
+        });
+        self.add_to_inbox(seq, &event, now)?;
+        self.db.exec(
+            "UPDATE hooks SET received = received + 1, last_received_ms = ? WHERE name = ?",
+            vec![now.into(), hook.name.as_str().into()],
+        )?;
+        self.wake_soon(now)?;
+        Ok(HookOutcome::Accepted(seq))
+    }
+}
+
+#[derive(Deserialize)]
+struct DayRow {
+    hook_day: i64,
+    hook_day_count: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::sqlite::Memory;
+    use runlater_core::limits::{CAPTURE_RETENTION_MS, TRIAL_DURATION_MS};
+    use runlater_core::{HookRequest, WakeRequest};
+
+    const T0: i64 = 1_767_225_600_000;
+    const P: &str = "proj_1";
+    const TOKEN: &str = "hk_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn setup(db: &Memory) -> Ledger<'_, Memory> {
+        let l = Ledger::open(db).unwrap();
+        l.create_project(P, "secret", T0).unwrap();
+        l
+    }
+
+    fn spec(v: serde_json::Value) -> HookSpec {
+        serde_json::from_value::<HookRequest>(v)
+            .unwrap()
+            .validate()
+            .unwrap()
+    }
+
+    fn hook(l: &Ledger<'_, Memory>, name: &str, token: &str) -> CreatedHook {
+        l.put_hook(&spec(serde_json::json!({ "name": name })), token, None, T0)
+            .unwrap()
+            .0
+    }
+
+    fn received(delivery_id: Option<&str>) -> Received<'static> {
+        Received {
+            verified: delivery_id.is_some(),
+            delivery_id: delivery_id.map(String::from),
+            headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
+            body: r#"{"action":"completed"}"#,
+            body_bytes: 22,
+        }
+    }
+
+    fn send(
+        l: &Ledger<'_, Memory>,
+        token: &str,
+        delivery_id: Option<&str>,
+        now: i64,
+    ) -> HookOutcome {
+        let row = l.hook_for_token(token).unwrap().expect("a hook");
+        l.receive_hook(&row, received(delivery_id), now).unwrap()
+    }
+
+    fn events(l: &Ledger<'_, Memory>) -> Vec<serde_json::Value> {
+        l.read_inbox(None, Some(50), false).unwrap().events
+    }
+
+    #[test]
+    fn creates_lists_and_deletes_hooks_without_their_url() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let s = spec(serde_json::json!({
+            "name": "gh-ci",
+            "verify": { "scheme": "github", "secret": "whsec_0123456789abcdef" },
+            "keep_headers": ["X-Request-Id"],
+        }));
+        let (created, new) = l.put_hook(&s, TOKEN, Some("v1:sealed"), T0).unwrap();
+        assert!(new);
+        assert_eq!(created.url_path, format!("/h/{P}/{TOKEN}"));
+        assert_eq!(created.hook.keep_headers, ["x-request-id"]);
+        assert_eq!(
+            created.hook.verify.as_ref().unwrap().scheme.as_str(),
+            "github"
+        );
+
+        let listed = serde_json::to_string(&l.hooks().unwrap()).unwrap();
+        assert!(
+            !listed.contains(TOKEN) && !listed.contains("sealed"),
+            "{listed}"
+        );
+        let stored: Vec<IdRow> = db
+            .query("SELECT token_hash AS id FROM hooks", vec![])
+            .unwrap();
+        assert_eq!(stored[0].id, token_hash(TOKEN), "only the hash is stored");
+
+        assert!(l.hook_for_token(TOKEN).unwrap().is_some());
+        assert!(l.hook_for_token("hk_other").unwrap().is_none());
+        l.delete_hook("gh-ci").unwrap();
+        assert!(l.hook_for_token(TOKEN).unwrap().is_none());
+        assert_eq!(l.delete_hook("gh-ci").unwrap_err().code, "hook_not_found");
+    }
+
+    #[test]
+    fn replacing_a_hook_retires_its_old_url() {
+        let db = Memory::new();
+        let l = setup(&db);
+        hook(&l, "h", TOKEN);
+        send(&l, TOKEN, None, T0);
+        let (again, new) = l
+            .put_hook(
+                &spec(serde_json::json!({ "name": "h" })),
+                "hk_new",
+                None,
+                T0 + 1,
+            )
+            .unwrap();
+        assert!(!new);
+        assert_eq!(again.hook.received, 0, "the counts start again");
+        assert!(l.hook_for_token(TOKEN).unwrap().is_none());
+        assert!(l.hook_for_token("hk_new").unwrap().is_some());
+    }
+
+    #[test]
+    fn caps_the_hooks_a_project_holds() {
+        let db = Memory::new();
+        let l = setup(&db);
+        for i in 0..MAX_HOOKS {
+            hook(&l, &format!("h{i}"), &format!("hk_{i}"));
+        }
+        let e = l
+            .put_hook(
+                &spec(serde_json::json!({ "name": "one-more" })),
+                "hk_x",
+                None,
+                T0,
+            )
+            .unwrap_err();
+        assert_eq!((e.status, e.code), (429, "hook_limit"));
+        // Replacing one is not a new hook.
+        l.put_hook(&spec(serde_json::json!({ "name": "h0" })), "hk_y", None, T0)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_delivery_becomes_an_inbox_event_and_wakes_the_agent() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.set_wake(
+            serde_json::from_value::<WakeRequest>(serde_json::json!({
+                "url": "https://agent.example.com/wake",
+                "debounce": "1m",
+            }))
+            .unwrap(),
+            T0,
+        )
+        .unwrap();
+        hook(&l, "h", TOKEN);
+        assert_eq!(send(&l, TOKEN, None, T0), HookOutcome::Accepted(1));
+        let e = &events(&l)[0];
+        assert_eq!(e["event"], "hook.received");
+        assert_eq!(e["hook"], "h");
+        assert_eq!(e["verified"], false);
+        assert_eq!(e["request"]["body"], r#"{"action":"completed"}"#);
+        assert_eq!(e["request"]["truncated"], false);
+        assert_eq!(e["request"]["headers"]["content-type"], "application/json");
+        assert_eq!(l.project().unwrap().inbox_unread, 1);
+        let h = &l.hooks().unwrap().hooks[0];
+        assert_eq!((h.received, h.last_received_ms), (1, Some(T0)));
+        let wakes: Vec<IdRow> = db
+            .query("SELECT id FROM tasks WHERE wake_call = 1", vec![])
+            .unwrap();
+        assert_eq!(
+            wakes.len(),
+            1,
+            "a hook event wakes the agent like any other"
+        );
+    }
+
+    #[test]
+    fn a_retried_delivery_is_written_once() {
+        let db = Memory::new();
+        let l = setup(&db);
+        hook(&l, "h", TOKEN);
+        assert!(matches!(
+            send(&l, TOKEN, Some("d-1"), T0),
+            HookOutcome::Accepted(_)
+        ));
+        assert_eq!(
+            send(&l, TOKEN, Some("d-1"), T0 + 1_000),
+            HookOutcome::Duplicate
+        );
+        assert!(matches!(
+            send(&l, TOKEN, Some("d-2"), T0 + 2_000),
+            HookOutcome::Accepted(_)
+        ));
+        // A day later the id is forgotten.
+        assert!(matches!(
+            send(&l, TOKEN, Some("d-1"), T0 + HOOK_DEDUPE_MS + 1),
+            HookOutcome::Accepted(_)
+        ));
+        assert_eq!(events(&l).len(), 3);
+    }
+
+    #[test]
+    fn rate_limits_each_hook() {
+        let db = Memory::new();
+        let l = setup(&db);
+        hook(&l, "h", TOKEN);
+        hook(&l, "other", "hk_other");
+        for _ in 0..HOOK_BURST {
+            assert!(matches!(
+                send(&l, TOKEN, None, T0),
+                HookOutcome::Accepted(_)
+            ));
+        }
+        assert_eq!(
+            send(&l, TOKEN, None, T0),
+            HookOutcome::Refused {
+                status: 429,
+                reason: "rate_limited",
+                retry_after_ms: Some(HOOK_INTERVAL_MS)
+            }
+        );
+        assert!(
+            matches!(send(&l, "hk_other", None, T0), HookOutcome::Accepted(_)),
+            "per hook"
+        );
+        assert!(matches!(
+            send(&l, TOKEN, None, T0 + HOOK_INTERVAL_MS),
+            HookOutcome::Accepted(_)
+        ));
+        let h = l
+            .hooks()
+            .unwrap()
+            .hooks
+            .into_iter()
+            .find(|h| h.name == "h")
+            .unwrap();
+        assert_eq!(h.refused["rate_limited"], 1);
+    }
+
+    #[test]
+    fn caps_hook_events_per_day() {
+        let db = Memory::new();
+        let l = setup(&db);
+        hook(&l, "h", TOKEN);
+        db.exec(
+            "UPDATE project SET hook_day = ?, hook_day_count = ?",
+            vec![T0.div_euclid(DAY_MS).into(), HOOK_EVENTS_PER_DAY.into()],
+        )
+        .unwrap();
+        let HookOutcome::Refused {
+            status,
+            reason,
+            retry_after_ms,
+        } = send(&l, TOKEN, None, T0)
+        else {
+            panic!("over the daily cap")
+        };
+        assert_eq!((status, reason), (429, "daily_limit"));
+        let next_day = (T0.div_euclid(DAY_MS) + 1) * DAY_MS;
+        assert_eq!(retry_after_ms, Some(next_day - T0));
+        assert!(matches!(
+            send(&l, TOKEN, None, next_day),
+            HookOutcome::Accepted(_)
+        ));
+    }
+
+    #[test]
+    fn an_expired_project_tells_senders_to_stop() {
+        let db = Memory::new();
+        let l = setup(&db);
+        hook(&l, "h", TOKEN);
+        let end = T0 + TRIAL_DURATION_MS;
+        assert_eq!(
+            send(&l, TOKEN, None, end),
+            HookOutcome::Refused {
+                status: 410,
+                reason: "project_expired",
+                retry_after_ms: None
+            }
+        );
+        assert!(events(&l).is_empty());
+        let e = l
+            .put_hook(
+                &spec(serde_json::json!({ "name": "late" })),
+                "hk_late",
+                None,
+                end,
+            )
+            .unwrap_err();
+        assert_eq!(e.code, "trial_expired");
+    }
+
+    #[test]
+    fn a_kept_body_goes_with_captured_responses() {
+        let db = Memory::new();
+        let l = setup(&db);
+        hook(&l, "h", TOKEN);
+        send(&l, TOKEN, None, T0);
+        l.expire_inbox_responses(T0 + CAPTURE_RETENTION_MS).unwrap();
+        let e = &events(&l)[0];
+        assert_eq!(e["request"]["body"], serde_json::Value::Null);
+        assert_eq!(e["request"]["body_bytes"], 22, "what it was is still said");
+    }
+
+    #[test]
+    fn counts_refusals_the_api_made() {
+        let db = Memory::new();
+        let l = setup(&db);
+        hook(&l, "h", TOKEN);
+        l.hook_refused("h", "signature_invalid").unwrap();
+        l.hook_refused("h", "signature_invalid").unwrap();
+        l.hook_refused("gone", "signature_invalid").unwrap();
+        assert_eq!(l.hooks().unwrap().hooks[0].refused["signature_invalid"], 2);
+    }
+}

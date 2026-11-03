@@ -1,6 +1,6 @@
 // Public entry for agents. Serves Agent Auth discovery and the agent endpoints, the hosted MCP
 // server at /mcp behind OAuth, Stripe's payment webhook and MPP purchases, and turns capability executions into signed calls on the
-// private Rust API (API binding).
+// private Rust API (API binding). Also serves inbound hooks (/h/…), on the hooks host.
 
 import { OAuthProvider, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { importSigningKey } from "./api";
@@ -9,12 +9,15 @@ import { handleStripeWebhook, type BillingEnv } from "./billing";
 import { llmsTxt, openApi } from "./discovery";
 import { readLimited } from "./body";
 import { handleAuthorize } from "./consent";
+import { handleHook, isHookPath, type HooksEnv } from "./hooks";
 import { handleMcp, type McpProps } from "./mcp";
 import { handleMpp } from "./mpp";
 
 export { AuthStore } from "./store";
 
-export interface Env extends AuthEnv, BillingEnv {
+export interface Env extends AuthEnv, BillingEnv, HooksEnv {
+  /** Where hook URLs point: a host of their own. Defaults to PUBLIC_URL. */
+  HOOKS_URL?: string;
   /** Hex-encoded 32-byte Ed25519 seed; its public key is the API's GATEWAY_PUBLIC_KEY. */
   ASSERTION_PRIVATE_KEY: string;
   REGISTER_RATE: RateLimit;
@@ -204,7 +207,21 @@ const OAUTH_LIMITED = new Set(["/oauth/register", "/authorize"]);
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const path = new URL(request.url).pathname;
+    const url = new URL(request.url);
+    const path = url.pathname;
+    // Hooks are for the open internet, so they bypass OAuth and Agent Auth, and the hooks host
+    // serves nothing else.
+    const hooksHost = env.HOOKS_URL ? new URL(env.HOOKS_URL).host : null;
+    if (isHookPath(path) || (hooksHost && hooksHost !== new URL(env.PUBLIC_URL).host && url.host === hooksHost)) {
+      if (!isHookPath(path)) return error(404, "not_found", "no such route");
+      let key: CryptoKey;
+      try {
+        key = await signingKey(env);
+      } catch {
+        return error(500, "misconfigured", "assertion signing key is not configured");
+      }
+      return handleHook(request, env, key);
+    }
     if (OAUTH_LIMITED.has(path) && request.method !== "OPTIONS") {
       const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
       if (!(await env.OAUTH_RATE.limit({ key: `${path}:${ip}` })).success) {

@@ -143,6 +143,10 @@ describe("stated limits", () => {
     expect(constant("MAX_SECRET_BYTES")).toBe("4 * 1024");
     expect(constant("MAX_ALLOWED_HOSTS")).toBe("20");
     expect(stated["Secrets"]).toBe("50 per project, 4 KiB each, each bound to at most 20 hosts");
+    expect(constant("MAX_HOOKS")).toBe("20");
+    expect(constant("HOOK_EVENTS_PER_DAY")).toBe("1_000");
+    expect(constant("HOOK_EVENTS_PER_DAY_PAID")).toBe("10_000");
+    expect(stated["Hooks"]).toContain("20 per project; 60 requests a minute each; 1,000 events a day (10,000 once paid)");
     expect(stated["Wake"]).toBe("At most one per 1 minute to 24 hours (default 15 minutes); off after 3 failures in a row");
   });
 });

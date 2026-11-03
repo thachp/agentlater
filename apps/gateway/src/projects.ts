@@ -30,7 +30,7 @@ export async function ensureProject(db: D1Database, owner: string): Promise<stri
 
 /** Runs a capability for an owner: create_project allocates its project, anything else needs one. */
 export async function runCapability(
-  env: BillingEnv & { DB: D1Database; API: Fetcher; PUBLIC_URL: string },
+  env: BillingEnv & { DB: D1Database; API: Fetcher; PUBLIC_URL: string; HOOKS_URL?: string },
   key: CryptoKey,
   owner: string,
   capability: string,
@@ -48,7 +48,13 @@ export async function runCapability(
     return paymentLink(env, owner, projectId);
   }
   try {
-    return await execute(new ApiClient(env.API, key, projectId), capability, args);
+    const result = await execute(new ApiClient(env.API, key, projectId), capability, args);
+    if (capability === "create_hook") {
+      // The API knows only the path; the URL is shown this once and never stored.
+      const { url_path, ...hook } = result as { url_path: string } & Record<string, unknown>;
+      return { ...hook, url: `${env.HOOKS_URL ?? env.PUBLIC_URL}${url_path}` };
+    }
+    return result;
   } catch (e) {
     if (e instanceof ApiError && OUT_OF_ATTEMPTS.has(e.body.error.code) && billingEnabled(env)) {
       const error = { ...e.body.error, message: `${e.body.error.message}; get_payment_link returns a link your user can use to buy more` };

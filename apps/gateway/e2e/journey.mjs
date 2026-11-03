@@ -1,7 +1,7 @@
 // The agent journey against a deployed (or local) stack: a fresh Agent Auth identity, a
 // project, and real deliveries to the staging receiver, checked end to end including the
 // signature, lanes, delays, callbacks, crons, watches, the inbox with captured responses,
-// wake, and hosted MCP. Used by `staging.mjs` after each staging deploy, and by agent.e2e.mjs locally.
+// wake, secrets, inbound hooks, and hosted MCP. Used by `staging.mjs` after each staging deploy, and by agent.e2e.mjs locally.
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { AgentAuthClient, MemoryStorage } from "@auth/agent";
@@ -14,6 +14,7 @@ const CAPABILITIES = [
   "create_cron", "get_cron", "list_crons", "delete_cron", "watch_http",
   "read_inbox", "ack_inbox", "set_wake", "delete_wake",
   "set_secret", "list_secrets", "delete_secret",
+  "create_hook", "list_hooks", "delete_hook",
 ];
 
 class JourneyError extends Error {}
@@ -297,7 +298,49 @@ export async function runJourney(c) {
   await exec("delete_secret", { name: "JOURNEY_TOKEN" });
   log("secret filled in for its host only, never shown");
 
-  // 11. Hosted MCP: a client connects through OAuth consent (its own project and trial) and
+  // 11. An inbound hook: a GitHub-style signed webhook to the hook's URL lands in the inbox
+  //     once; a retry, a forged body and a GET don't add anything; deleting it retires the URL.
+  const hookSecret = `journey-hook-${run}`;
+  const inbound = await exec("create_hook", { name: "journey", verify: { scheme: "github", secret: hookSecret } });
+  check(/\/h\/prj_[0-9a-f]{24}\/hk_[0-9a-f]{64}$/.test(inbound.url ?? ""), `create_hook returned ${JSON.stringify(inbound)}`);
+  check(!JSON.stringify(inbound).includes(hookSecret), "create_hook echoed the secret");
+  const hookBody = JSON.stringify({ action: "completed", run });
+  const toHook = (b, delivery = `journey-${run}`) =>
+    fetch(inbound.url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-GitHub-Event": "workflow_run",
+        "X-GitHub-Delivery": delivery,
+        "X-Hub-Signature-256": `sha256=${createHmac("sha256", hookSecret).update(b).digest("hex")}`,
+      },
+      body: b,
+    });
+  // The hooks host is a custom domain of its own: right after the deploy that first adds it,
+  // its certificate can take a moment to be issued.
+  const firstHook = await until("the hooks host to answer", async () => {
+    const res = await toHook(hookBody).catch(() => null);
+    return res && res.status < 500 ? res : null;
+  });
+  check(firstHook.status === 202, `the signed webhook got ${firstHook.status}`);
+  check((await toHook(hookBody)).status === 200, "the webhook's retry was not recognized");
+  const forgedHook = await fetch(inbound.url, { method: "POST", headers: { "X-Hub-Signature-256": "sha256=00" }, body: hookBody });
+  check(forgedHook.status === 401, `a forged webhook got ${forgedHook.status}`);
+  check((await fetch(inbound.url)).status === 405, "the hook URL answered a GET");
+  const hookPage = await exec("read_inbox", { ack: true });
+  const hookEvents = hookPage.events.filter((e) => e.event === "hook.received" && e.hook === "journey");
+  check(hookEvents.length === 1, `expected one hook event, got ${hookEvents.length}`);
+  check(
+    hookEvents[0].verified === true && hookEvents[0].request.body === hookBody && hookEvents[0].request.headers["x-github-event"] === "workflow_run",
+    `hook event: ${JSON.stringify(hookEvents[0])}`,
+  );
+  const hookListed = (await exec("list_hooks")).hooks?.find((h) => h.name === "journey");
+  check(hookListed?.received === 1 && hookListed.refused.signature_invalid === 1, `list_hooks returned ${JSON.stringify(hookListed)}`);
+  await exec("delete_hook", { name: "journey" });
+  check((await toHook(hookBody, `journey-${run}-2`)).status === 404, "a deleted hook still accepted requests");
+  log("hook received a signed webhook once, refused the rest");
+
+  // 12. Hosted MCP: a client connects through OAuth consent (its own project and trial) and
   //    schedules a delivery with the schedule_http tool.
   const tokens = await connectHosted(c.gatewayUrl);
   const mcp = new Client({ name: "runlater-journey", version: "1.0.0" });

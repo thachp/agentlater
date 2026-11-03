@@ -31,6 +31,7 @@ const CAPABILITIES = [
   "create_project", "get_project", "get_payment_link", "schedule_http", "get_task", "list_tasks", "cancel_task", "redrive_task",
   "create_cron", "get_cron", "list_crons", "delete_cron", "watch_http", "read_inbox", "ack_inbox", "set_wake", "delete_wake",
   "set_secret", "list_secrets", "delete_secret",
+  "create_hook", "list_hooks", "delete_hook",
 ];
 
 // Gateway → API assertion keys, fresh per run.
@@ -113,6 +114,7 @@ before(async () => {
             REGISTER_RATE: { namespace_id: "1001", simple: { limit: 100, period: 60 } },
             OAUTH_RATE: { namespace_id: "1003", simple: { limit: 100, period: 60 } },
             MPP_RATE: { namespace_id: "1005", simple: { limit: 100, period: 60 } },
+            HOOK_RATE: { namespace_id: "1007", simple: { limit: 100, period: 60 } },
           },
           kvNamespaces: { OAUTH_KV: "oauth-kv" },
           outboundService: async (req) => {
@@ -429,6 +431,56 @@ describe("agent journey through the gateway", () => {
     const second = await client.connectAgent({ provider: origin, mode: "autonomous", capabilities: CAPABILITIES, name: "e2e agent 2" });
     const p = data(await client.executeCapability({ agentId: second.agentId, capability: "get_project", arguments: {} }));
     assert.equal(p.id, project.id);
+  });
+
+  test("a hook turns a signed webhook into an inbox event, once", async () => {
+    const exec = (capability, args = {}) => client.executeCapability({ agentId, capability, arguments: args }).then(data);
+    const secret = "gh-webhook-secret-0123456789";
+    const hook = await exec("create_hook", { name: "gh-ci", verify: { scheme: "github", secret } });
+    assert.match(hook.url, /^http:\/\/127\.0\.0\.1:\d+\/h\/prj_[0-9a-f]{24}\/hk_[0-9a-f]{64}$/);
+    assert.equal(hook.url_path, undefined);
+    assert.equal(JSON.stringify(hook).includes(secret), false);
+
+    const body = JSON.stringify({ action: "completed", workflow_run: { conclusion: "success" } });
+    const signed = (b, delivery = "d-1") => ({
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "GitHub-Hookshot/e2e",
+        "X-GitHub-Event": "workflow_run",
+        "X-GitHub-Delivery": delivery,
+        "X-Hub-Signature-256": `sha256=${createHmac("sha256", secret).update(b).digest("hex")}`,
+        Authorization: "Bearer must-not-be-kept",
+      },
+      body: b,
+    });
+    const first = await fetch(hook.url, signed(body));
+    assert.equal(first.status, 202);
+    assert.deepEqual(await first.json(), {});
+    assert.equal((await fetch(hook.url, signed(body))).status, 200, "GitHub's retry is not written again");
+    const forged = await fetch(hook.url, { ...signed(body), body: body.replace("success", "failure") });
+    assert.equal(forged.status, 401);
+    assert.equal((await fetch(hook.url)).status, 405);
+    assert.equal((await fetch(hook.url.replace(/hk_[0-9a-f]{4}/, "hk_0000"), signed(body))).status, 404);
+    const unknownProject = hook.url.replace(/prj_[0-9a-f]{24}/, `prj_${"0".repeat(24)}`);
+    assert.equal((await fetch(unknownProject, signed(body))).status, 404);
+
+    const page = await exec("read_inbox", {});
+    const event = page.events.find((e) => e.event === "hook.received");
+    assert.equal(event.hook, "gh-ci");
+    assert.equal(event.verified, true);
+    assert.equal(event.delivery_id, "d-1");
+    assert.equal(event.request.body, body);
+    assert.equal(event.request.headers["x-github-event"], "workflow_run");
+    assert.equal(event.request.headers.authorization, undefined);
+    assert.equal(page.events.filter((e) => e.event === "hook.received").length, 1);
+
+    const [listed] = (await exec("list_hooks")).hooks;
+    assert.equal(listed.received, 1);
+    assert.equal(listed.refused.signature_invalid, 1);
+    assert.equal(JSON.stringify(listed).includes("hk_"), false, "list_hooks never shows the URL");
+    await exec("delete_hook", { name: "gh-ci" });
+    assert.equal((await fetch(hook.url, signed(body, "d-2"))).status, 404);
   });
 
   test("another host cannot see this project's tasks", async () => {
