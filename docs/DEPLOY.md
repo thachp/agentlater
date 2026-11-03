@@ -39,9 +39,12 @@ Nothing deploys until `DEPLOY_ENABLED` is set, so the workflow can merge before 
      node scripts/setup-deploy-secrets.mjs --account-id <cloudflare account id>
      ```
 
-     It sets `CLOUDFLARE_ACCOUNT_ID`, `ASSERTION_PRIVATE_KEY`, `BETTER_AUTH_SECRET`, the `GATEWAY_PUBLIC_KEY`
-     variable and (staging) `RECEIVER_TOKEN`, skipping any already set. `--rotate` replaces them all; the
-     key pair always changes together. The deploy workflow hands these to Cloudflare at deploy time
+     It sets `CLOUDFLARE_ACCOUNT_ID`, `ASSERTION_PRIVATE_KEY`, `BETTER_AUTH_SECRET`, `SECRETS_KEY`, the
+     `GATEWAY_PUBLIC_KEY` variable and (staging) `RECEIVER_TOKEN`, skipping any already set. `--rotate` replaces
+     them all except `SECRETS_KEY`; the key pair always changes together. `SECRETS_KEY` seals every project
+     secret, so it is never rotated: replacing it makes every stored secret unreadable (tasks that use one
+     then fail as `rejected`). Without it the API still deploys, with a warning, and `set_secret` answers
+     `503 secrets_unavailable`. The deploy workflow hands these to Cloudflare at deploy time
      (`--secrets-file` / `--var`), so nothing secret is committed or set with `wrangler secret put`.
    - Variable in each (once the gateway has a hostname): `GATEWAY_URL`, e.g. `https://gateway-staging.runlater.io`. Setting it turns on the smoke check and, on staging, the required journey.
 3. **Repository variable** `DEPLOY_ENABLED=true` (Settings → Secrets and variables → Actions → *Repository*

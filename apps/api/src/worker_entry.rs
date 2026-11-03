@@ -3,14 +3,16 @@
 
 use crate::assertion::{self, Scope};
 use crate::db::{Db, DbError, Param};
-use crate::ledger::{ApiError, Claimed, Delivery, Dispatch, Ledger, ResponseRead};
+use crate::ledger::{ApiError, Claimed, Delivery, Dispatch, Ledger, ResponseRead, SealedSecret};
+use crate::sealing::{SealingKey, NONCE_BYTES};
 use futures_util::future::{join_all, select, Either};
 use futures_util::StreamExt;
 use runlater_core::limits::{
     ATTEMPT_TIMEOUT_MS, CAPTURED_HEADERS, CAPTURE_BODY_BYTES, MAX_WATCH_RESPONSE_BYTES,
 };
 use runlater_core::{
-    CronRequest, Outcome, PollBody, ScheduleRequest, Status, WakeRequest, WatchRequest,
+    fill, redact, CronRequest, Outcome, PollBody, ScheduleRequest, SecretRequest, Status,
+    WakeRequest, WatchRequest,
 };
 use runlater_egress::{sign, Destination};
 use serde::de::DeserializeOwned;
@@ -129,6 +131,10 @@ fn required_scope(method: &Method, path: &[&str]) -> Option<Scope> {
         (Method::Post, ["v1", "inbox", "ack"]) => Scope::Read,
         (Method::Post, ["v1", "wake"]) => Scope::Schedule,
         (Method::Post, ["v1", "wake", "delete"]) => Scope::Cancel,
+        (Method::Post, ["v1", "secrets"]) => Scope::Secrets,
+        // Names and hosts only; values are never returned.
+        (Method::Get, ["v1", "secrets"]) => Scope::Read,
+        (Method::Post, ["v1", "secrets", _, "delete"]) => Scope::Secrets,
         _ => return None,
     })
 }
@@ -137,6 +143,17 @@ fn segments(url: &Url) -> Vec<String> {
     url.path_segments()
         .map(|s| s.filter(|p| !p.is_empty()).map(String::from).collect())
         .unwrap_or_default()
+}
+
+/// The key project secrets are sealed with (`SECRETS_KEY`, 32 bytes as hex). Secrets are
+/// unavailable without it.
+fn sealing_key(env: &Env) -> Option<SealingKey> {
+    let raw = env
+        .secret("SECRETS_KEY")
+        .map(|s| s.to_string())
+        .or_else(|_| env.var("SECRETS_KEY").map(|s| s.to_string()))
+        .ok()?;
+    SealingKey::parse(&raw)
 }
 
 fn gateway_key(env: &Env) -> Option<assertion::VerifyingKey> {
@@ -371,6 +388,35 @@ impl TaskLedger {
             (Method::Post, ["v1", "wake", "delete"]) => {
                 ledger.delete_wake(t).map(|v| json(&v, 200))
             }
+            (Method::Post, ["v1", "secrets"]) => match body::<SecretRequest>(req).await {
+                Ok(r) => match (r.validate(), sealing_key(&self.env)) {
+                    (Err(e), _) => Err(ApiError {
+                        field: Some(e.field()),
+                        ..ApiError::bad_request(e.to_string())
+                    }),
+                    (Ok(_), None) => {
+                        return simple_error(
+                            503,
+                            "secrets_unavailable",
+                            "secrets are not configured on this deployment",
+                        )
+                    }
+                    (Ok(spec), Some(key)) => {
+                        let nonce: [u8; NONCE_BYTES] = random_bytes(NONCE_BYTES as u32)?
+                            .try_into()
+                            .map_err(|_| Error::RustError("short nonce".into()))?;
+                        let sealed = key.seal(&project_id, &spec.name, &spec.value, nonce);
+                        ledger
+                            .put_secret(&spec.name, &sealed, &spec.allowed_hosts, t)
+                            .map(|(v, c)| created(&v, c))
+                    }
+                },
+                Err(e) => Err(e),
+            },
+            (Method::Get, ["v1", "secrets"]) => ledger.secrets().map(|s| json(&s, 200)),
+            (Method::Post, ["v1", "secrets", name, "delete"]) => {
+                ledger.delete_secret(name).map(|v| json(&v, 200))
+            }
             (Method::Post, ["internal", "claim"]) => match body::<ClaimBody>(req).await {
                 Ok(c) => ledger.claim(&c.task_id, c.generation, t).map(|claimed| {
                     let reply = match claimed {
@@ -514,9 +560,33 @@ async fn process(env: &Env, d: &Dispatch) -> Result<()> {
     let Some(delivery) = claim.deliver else {
         return Ok(());
     };
-    let (outcome, read) = deliver(&delivery).await;
-    let (body, truncated, headers) =
-        read.map_or((None, false, vec![]), |r| (r.body, r.truncated, r.headers));
+    // Secrets are opened only here, and only for as long as this attempt takes.
+    let values = match open_secrets(env, &d.project_id, &delivery.secrets) {
+        Some(values) => values,
+        None => {
+            console_error!("could not open the secrets for {}", delivery.task_id);
+            vec![]
+        }
+    };
+    let (outcome, read) = if values.len() < delivery.secrets.len() {
+        (Outcome::Rejected, None)
+    } else {
+        match filled(&delivery, &values) {
+            Some(ready) => deliver(&ready).await,
+            None => (Outcome::Rejected, None),
+        }
+    };
+    // A response that echoes a credential back must not carry it into the ledger.
+    let (body, truncated, headers) = read.map_or((None, false, vec![]), |r| {
+        (
+            r.body.map(|b| redact(&b, &values)),
+            r.truncated,
+            r.headers
+                .into_iter()
+                .map(|(k, v)| (k, redact(&v, &values)))
+                .collect(),
+        )
+    });
     let _: serde_json::Value = call(
         &stub,
         &d.project_id,
@@ -532,6 +602,42 @@ async fn process(env: &Env, d: &Dispatch) -> Result<()> {
     )
     .await?;
     Ok(())
+}
+
+/// The plaintext of each sealed secret, or None if any cannot be opened.
+fn open_secrets(
+    env: &Env,
+    project_id: &str,
+    sealed: &[SealedSecret],
+) -> Option<Vec<(String, String)>> {
+    if sealed.is_empty() {
+        return Some(vec![]);
+    }
+    let key = sealing_key(env)?;
+    sealed
+        .iter()
+        .map(|s| Some((s.name.clone(), key.open(project_id, &s.name, &s.sealed)?)))
+        .collect()
+}
+
+/// The delivery with its header references filled in.
+fn filled(d: &Delivery, values: &[(String, String)]) -> Option<Delivery> {
+    let lookup = |name: &str| {
+        values
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
+    };
+    let headers = d
+        .headers
+        .iter()
+        .map(|(k, v)| Some((k.clone(), fill(v, lookup)?)))
+        .collect::<Option<Vec<_>>>()?;
+    Some(Delivery {
+        headers,
+        secrets: vec![],
+        ..d.clone()
+    })
 }
 
 #[event(queue)]

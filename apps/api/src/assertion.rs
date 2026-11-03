@@ -33,6 +33,8 @@ pub enum Scope {
     Cancel,
     /// Add bought attempts; only the gateway's payment webhook asks for it.
     Billing,
+    /// Set and delete project secrets.
+    Secrets,
 }
 
 impl Scope {
@@ -43,6 +45,7 @@ impl Scope {
             "read" => Self::Read,
             "cancel" => Self::Cancel,
             "billing" => Self::Billing,
+            "secrets" => Self::Secrets,
             _ => return None,
         })
     }

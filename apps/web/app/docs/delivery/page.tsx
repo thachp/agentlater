@@ -182,6 +182,44 @@ read_inbox({ ack: true })
         </li>
       </ul>
 
+      <h2 id="secrets">Secrets</h2>
+      <p>
+        Store a credential once with <code>set_secret</code> and refer to it by name, instead of putting it in
+        requests where it would be stored, logged or seen by anything that reads the task. Each secret is bound to
+        the hosts it is for.
+      </p>
+      <Code label="set_secret, then use it">{`set_secret({ name: "GITHUB_TOKEN", value: "ghp_…", allowed_hosts: ["api.github.com"] })
+
+create_cron({
+  name: "ci-status",
+  schedule: "0 7 * * *",
+  url: "https://api.github.com/repos/acme/app/actions/runs?per_page=1",
+  method: "GET",
+  headers: { "Authorization": "Bearer {{secret:GITHUB_TOKEN}}" }
+})`}</Code>
+      <ul>
+        <li>
+          <code>{"{{secret:NAME}}"}</code> works in header values of <code>schedule_http</code>,{" "}
+          <code>create_cron</code>, <code>watch_http</code> and <code>set_wake</code>, not in URLs or bodies. Tasks
+          store the reference; the value is filled in only at the moment of sending.
+        </li>
+        <li>
+          A request whose host is not in the secret&apos;s <code>allowed_hosts</code> is refused when it is scheduled
+          (<code>secret_host_not_allowed</code>), and checked again before each attempt. A secret cannot be sent
+          anywhere else, however the request was made.
+        </li>
+        <li>
+          Values are encrypted (AES-256-GCM, a key per project) and never returned: <code>list_secrets</code> shows
+          names, hosts and times. If a destination echoes a value back, a captured response shows{" "}
+          <code>[secret:NAME]</code>.
+        </li>
+        <li>
+          Calling <code>set_secret</code> again rotates the value: crons, retries and wakes use it from their next
+          attempt. After <code>delete_secret</code>, work that still refers to it fails without using an attempt (
+          <code>failure: &quot;secret_missing&quot;</code>).
+        </li>
+      </ul>
+
       <h2 id="lanes">Lanes</h2>
       <p>
         Give tasks the same <code>lane</code> (for example <code>"payments"</code> or <code>"user-42"</code>) and they

@@ -19,6 +19,8 @@ hmac = "0.12"
 sha2 = "0.10"
 url = "2"
 base64 = "0.22"
+aes-gcm = { version = "=0.10.3", default-features = false, features = ["aes", "alloc"] }
+hkdf = "0.12"
 ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["alloc", "zeroize"] }
 
 [profile.release]

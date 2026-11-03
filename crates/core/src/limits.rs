@@ -53,6 +53,13 @@ pub const MAX_WAKE_DEBOUNCE_MS: i64 = DAY_MS;
 /// Wakes in a row that may fail (all their attempts) before the wake turns itself off.
 pub const MAX_WAKE_FAILURES: i64 = 3;
 
+/// Secrets a project may hold, and how big each may be.
+pub const MAX_SECRETS: i64 = 50;
+pub const MAX_SECRET_BYTES: usize = 4 * 1024;
+pub const MAX_SECRET_NAME_BYTES: usize = 64;
+/// Host patterns one secret may allow.
+pub const MAX_ALLOWED_HOSTS: usize = 20;
+
 pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
 pub const MAX_ATTEMPTS: u32 = 5;
 pub const ATTEMPT_TIMEOUT_MS: i64 = 10 * SECOND_MS;

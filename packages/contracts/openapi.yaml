@@ -275,6 +275,45 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Wake" }
         default: { $ref: "#/components/responses/Error" }
+  /v1/secrets:
+    post:
+      operationId: setSecret
+      description: >
+        Seals and stores a secret, or replaces the one with this name (201 created, 200 replaced).
+        The value is never returned by any route. 429 secret_limit past 50; 503
+        secrets_unavailable when the API has no SECRETS_KEY. Scope: secrets.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SecretRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/Secret" }
+        "200": { $ref: "#/components/responses/Secret" }
+        default: { $ref: "#/components/responses/Error" }
+    get:
+      operationId: listSecrets
+      description: "Names and hosts, by name; never values. Scope: read."
+      responses:
+        "200":
+          description: The project's secrets.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [secrets]
+                properties:
+                  secrets: { type: array, items: { $ref: "#/components/schemas/Secret" } }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/secrets/{name}/delete:
+    post:
+      operationId: deleteSecret
+      description: "Returns the secret as it was. 404 secret_not_found. Scope: secrets."
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string, pattern: "^[A-Z][A-Z0-9_]{0,63}$" } }
+      responses:
+        "200": { $ref: "#/components/responses/Secret" }
+        default: { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     assertion:
@@ -284,7 +323,7 @@ components:
       description: >
         base64url(claims JSON) "." base64url(Ed25519 signature over the first segment).
         Claims: aud "runlater-api", sub (project id, [A-Za-z0-9_-]{1,64}), scope
-        (space-separated: project schedule read cancel billing), iat and exp in unix seconds,
+        (space-separated: project schedule read cancel billing secrets), iat and exp in unix seconds,
         lifetime at most 300 s.
   parameters:
     TaskId:
@@ -298,6 +337,11 @@ components:
       required: true
       schema: { type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$" }
   responses:
+    Secret:
+      description: The secret, without its value.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Secret" }
     Project:
       description: The project and its attempts.
       content:
@@ -315,7 +359,7 @@ components:
           schema: { $ref: "#/components/schemas/Cron" }
     Error:
       description: >
-        400 invalid_request / ack_beyond_inbox, 401 unauthorized, 402 budget_exhausted, 403 forbidden or
+        400 invalid_request / ack_beyond_inbox / secret_not_found / secret_host_not_allowed, 401 unauthorized, 402 budget_exhausted, 403 forbidden or
         trial_expired, 404 not_found / project_not_found / task_not_found / cron_not_found / wake_not_set,
         409 idempotency_conflict / task_finished / task_not_failed / watch_not_redrivable / wake_not_redrivable,
         429 task_limit (1,000 tasks held, finished ones included until purged) / cron_limit,
@@ -491,7 +535,7 @@ components:
         http_status: { type: [integer, "null"] }
     Task:
       type: object
-      required: [id, status, method, url, header_names, body_bytes, run_at_ms, next_attempt_ms, max_attempts, attempt_count, idempotency_key, callback_url, callback_task_id, callback_for, inbox_seq, capture, response, wake_call, report_failures_only, lane, cron, alert_for, watch, created_ms, updated_ms, finished_ms]
+      required: [id, status, method, url, header_names, body_bytes, run_at_ms, next_attempt_ms, max_attempts, attempt_count, idempotency_key, callback_url, callback_task_id, callback_for, inbox_seq, capture, response, wake_call, failure, report_failures_only, lane, cron, alert_for, watch, created_ms, updated_ms, finished_ms]
       description: Header values and the body are never returned; they may hold credentials.
       properties:
         id: { type: string }
@@ -511,6 +555,7 @@ components:
         inbox_seq: { type: [integer, "null"], description: 'With callback_url "inbox": the event for the most recent time it finished.' }
         capture: { type: boolean }
         wake_call: { type: boolean, description: Set on wakes. }
+        failure: { type: [string, "null"], description: "Why it failed without an attempt: secret_missing or secret_host_not_allowed." }
         report_failures_only: { type: boolean, description: "Set on runs of a cron with report: failures; a run that did not fail has no report, by design." }
         response:
           oneOf: [{ $ref: "#/components/schemas/CapturedResponse" }, { type: "null" }]
@@ -590,5 +635,27 @@ components:
         consecutive_failures: { type: integer }
         last_wake_ms: { type: [integer, "null"], description: When the last wake was sent; the next goes no sooner than debounce_ms after it. }
         last_wake_task_id: { type: [string, "null"] }
+        created_ms: { type: integer }
+        updated_ms: { type: integer }
+    SecretRequest:
+      type: object
+      additionalProperties: false
+      required: [name, value, allowed_hosts]
+      properties:
+        name: { type: string, pattern: "^[A-Z][A-Z0-9_]{0,63}$" }
+        value: { type: string, minLength: 1, maxLength: 4096, description: Printable ASCII, no line breaks. Sealed before it is stored. }
+        allowed_hosts:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items: { type: string }
+          description: 'Exact public host names, or "*.example.com" for any subdomain.'
+    Secret:
+      type: object
+      description: Never includes the value.
+      required: [name, allowed_hosts, created_ms, updated_ms]
+      properties:
+        name: { type: string }
+        allowed_hosts: { type: array, items: { type: string } }
         created_ms: { type: integer }
         updated_ms: { type: integer }

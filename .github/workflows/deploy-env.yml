@@ -40,9 +40,19 @@ jobs:
       - name: Deploy api
         env:
           GATEWAY_PUBLIC_KEY: ${{ vars.GATEWAY_PUBLIC_KEY }}
+          SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
         run: |
           test -n "$GATEWAY_PUBLIC_KEY" || { echo "::error::GATEWAY_PUBLIC_KEY is not set; run scripts/setup-deploy-secrets.mjs"; exit 1; }
-          npx wrangler deploy --env "$DEPLOY_ENV" --var "GATEWAY_PUBLIC_KEY:$GATEWAY_PUBLIC_KEY"
+          # Without SECRETS_KEY the API runs, but set_secret answers 503 secrets_unavailable.
+          if [ -z "$SECRETS_KEY" ]; then
+            echo "::warning::SECRETS_KEY is not set, so project secrets are unavailable; run scripts/setup-deploy-secrets.mjs"
+            npx wrangler deploy --env "$DEPLOY_ENV" --var "GATEWAY_PUBLIC_KEY:$GATEWAY_PUBLIC_KEY"
+          else
+            secrets="$(mktemp "$RUNNER_TEMP/secrets.XXXXXX")"
+            trap 'rm -f "$secrets"' EXIT
+            node -e 'process.stdout.write(JSON.stringify({ SECRETS_KEY: process.env.SECRETS_KEY }))' > "$secrets"
+            npx wrangler deploy --env "$DEPLOY_ENV" --var "GATEWAY_PUBLIC_KEY:$GATEWAY_PUBLIC_KEY" --secrets-file "$secrets"
+          fi
         working-directory: apps/api
 
       # Forward-only; must apply before the gateway that reads the new schema deploys.
