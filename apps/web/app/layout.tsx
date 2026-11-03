@@ -8,7 +8,7 @@ export const metadata: Metadata = {
   metadataBase: new URL("https://runlater.io"),
   title: { default: "RunLater — HTTP requests later, for AI agents", template: "%s · RunLater" },
   description:
-    "RunLater lets an AI agent schedule a signed HTTPS request for later, retries it when the destination fails, and records every attempt.",
+    "RunLater keeps an AI agent's work going after its session ends: signed HTTPS requests later, watches that act when a job finishes, webhooks, and an inbox of results the next session reads.",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
