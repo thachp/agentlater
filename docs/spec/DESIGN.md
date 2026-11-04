@@ -28,12 +28,12 @@ Source: [`packages/contracts/src/capabilities.ts`](../../packages/contracts/src/
 | **Assume the session ends.** | The inbox cursor lives on RunLater's side, because an agent can't keep one. Every result can wait for a later session. |
 | **Context is the scarce resource.** | `read_inbox` returns 10 events by default and 50 at most. `list_tasks` leaves out response bodies. Hook events keep 16 KiB of a 256 KiB request. |
 | **Say what it costs before it's spent.** | Tool descriptions state what each poll, wake and callback costs, and the plugin skill gives the arithmetic: a watch every 5 minutes for 6 hours is 73 attempts. Admission answers `402` up front rather than failing hours later. |
-| **Repeating a call should be safe.** | `create_project` returns the same project. `idempotency_key` returns the same task. Crons and secrets replace by name. Delivery to the agent is at-least-once, like delivery to a destination. The one deliberate exception: `create_hook` on an existing name issues a new URL, because that's how a leaked one is rotated. |
+| **Repeating a call should be safe.** | `create_project` returns the same project. `idempotency_key` returns the same task. Crons and secrets replace by name. Delivery to the agent is at-least-once, like delivery to a destination. Two exceptions: `schedule_http` without an `idempotency_key` schedules again, and `create_hook` on an existing name deliberately issues a new URL, because that's how a leaked one is rotated. |
 | **Errors say what to do next.** | An error has a stable `code`, a readable `message` and, when it's about one argument, a `field`. `project_not_found` says to call `create_project`; `budget_exhausted` points to `get_payment_link`. A model can fix its own mistake from the error alone. |
 | **Refuse rather than quietly change the request.** | `{{secret:NAME}}` in a body is an error, not text sent as is. Asking to keep `Authorization` on a hook is a `400`, not silently dropped. |
 | **Small literals, no languages.** | `"inbox"`, `"24h"`, `{{secret:NAME}}`, `{ path, in }`. Exact matching only: no regexes, expressions or templates, which are slow and easy to get wrong. |
 | **Report what's known, and no more.** | `succeeded` means the destination returned 2xx, and the docs say so. Delivery is at-least-once. No promise of exact timing. |
-| **Other people's text is data.** | Captured responses, watch bodies and hook requests come from elsewhere, and tool descriptions tell agents never to follow instructions in them. |
+| **Other people's text is data.** | Captured responses, watch bodies and hook requests come from elsewhere, and agents are told never to follow instructions in them. The warning is in the capture, `read_inbox` and hook descriptions and in the plugin skill, but not yet in `watch_http`'s description (see [known gaps](#known-gaps)). |
 | **Dangerous things stay out of reach.** | Secrets are write-only. A hook URL is shown once. Nothing outside the project can spend its attempts, which is why hooks can't send requests. |
 
 ### Conventions
@@ -58,7 +58,7 @@ Source: [`packages/contracts/src/capabilities.ts`](../../packages/contracts/src/
 
 ### Telling agents the habits
 
-The start-of-session inbox check only works if agents know about it, so it's said everywhere an agent might first look: the hosted server's instructions (`mcp.ts`), the tool descriptions, `/llms.txt` and the plugin's `SKILL.md`. A new habit needs adding to all four.
+The start-of-session inbox check only works if agents know about it, so it's said where an agent might first look: the hosted server's instructions (`mcp.ts`), the `get_project` description and the plugin's `SKILL.md`. `/llms.txt` only says to read the inbox next session (see [known gaps](#known-gaps)). A new habit needs adding to all of them.
 
 ## Designing for people
 
@@ -94,7 +94,7 @@ Plain, specific and a little dry. RunLater is trusted with things that happen wh
 | Tell people what to do on failure: "ask your agent for a new one" | "Something went wrong" alone |
 | Show code that really runs: the signature samples are executed in tests | Illustrative code that nobody has run |
 
-Terms are used consistently: *delivery attempt*, *task*, *project*, *inbox*, *wake*, *hook*, *lane*. Facts stated on the site live in `lib/site.ts` and `lib/snippets.ts`, so they can be checked against the code.
+Terms are used consistently: *delivery attempt*, *task*, *project*, *inbox*, *wake*, *hook*, *lane*. Most facts stated on the site live in `lib/site.ts` and `lib/snippets.ts`, so they can be checked against the code; some numbers are still written directly in pages.
 
 ### Visual language
 
@@ -138,7 +138,7 @@ Warm paper, near-black ink and one terracotta accent: closer to a printed manual
 | Eyebrow | 12.5px mono, uppercase, `0.06em` | Accent |
 | Code | 13.5px mono / 1.6 | 12.5px in cards |
 
-**Layout.** `--wrap` is 1120px wide with a 16px gutter each side; sections are 56px apart with a hairline rule; prose is at most 760px wide. Breakpoints are 900px (grids collapse, docs nav moves to the top) and 560px (one column, nav shortens). Corners: 14px for cards and code, 10px for buttons, 999px for the pill.
+**Layout.** `--wrap` is 1120px wide with a 16px gutter each side; sections have 56px of padding either side of a hairline rule; prose is at most 760px wide. Breakpoints are 900px (grids collapse, docs nav moves to the top) and 560px (one column, nav shortens). Corners: 14px for cards and code, 10px for buttons, 999px for the pill.
 
 **Components.**
 
@@ -180,7 +180,9 @@ Found while writing this down, from reading the code and computing contrast. Apa
 | **Inter is named but never loaded** | `globals.css:15` | The site renders in Inter only for people who have it installed; others get the system font. | Pick one: load it with `next/font`, or drop it and own the system stack |
 | **Smooth scrolling ignores `prefers-reduced-motion`** | `globals.css:38` | It's a small accessibility miss, and the site's only motion. | Wrap it in a media query |
 | **Icon and accent are different oranges:** `#db4b27` and `#bf4325` | `icon.svg`, `globals.css:7` | Minor drift. The icon's white on orange is 4.12:1, fine for a graphic. | Decide whether it's deliberate |
-| **`--green` is defined and never used** | `globals.css:10` | Dead token. | Remove it, or use it for a status |
+| **`--green` and `--accent-ink` are defined and never used** | `globals.css:8,10` | Dead tokens, left out of the table above. | Remove them, or put them to use |
+| **`/llms.txt` lacks the start-of-session inbox check** | `apps/gateway/src/discovery.ts` | An agent that only reads this page misses the habit. | Add the sentence |
+| **`watch_http`'s description has no untrusted-data warning** | `packages/contracts/src/capabilities.ts` | It returns up to 16 KiB of someone else's response body. | Add the sentence |
 | **Hard-coded color outside the tokens** | `::selection` in `globals.css:54` | It won't follow theme changes. | Move it to a token |
 | **No social preview** | `layout.tsx` metadata | Links shared in chat show no image or card. | Add Open Graph metadata and an image |
 | **Two error shapes** | `apps/gateway/src/index.ts`: `{error: code, message}`; API and `/mcp`: `{error: {code, message, field?}}` | An agent that meets a gateway-level `429` or `404` gets a different shape, against "errors say what to do next". | Align them, checking first what Agent Auth clients expect |
