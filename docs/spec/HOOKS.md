@@ -1,6 +1,6 @@
 # RunLater — Inbound hooks
 
-Status: **implemented** · Owner: Patrick Thach · Last updated: 2026-11-03 · The rules are in [PRODUCT.md](PRODUCT.md#inbound-hooks); this note is the why. Builds on the [inbox](INBOX.md), wake and secrets.
+Status: **implemented** · Owner: Patrick Thach · Last updated: 2026-11-04 · The rules are in [PRODUCT.md](PRODUCT.md#inbound-hooks), which wins where this differs (the list of headers never kept grew while building); this note is the why. Builds on the [inbox](INBOX.md), wake and secrets.
 
 ## In one line
 
@@ -133,7 +133,7 @@ The response body is always empty JSON (`{}`), and RunLater never sends back any
 | Cost | No attempts | An event is an inbox write, like an inbox callback. Abuse is bounded by rate limits and caps, not by charging. |
 | Dedupe | By the sender's delivery id, for 24 hours | Senders retry on timeouts. Without a delivery id there is nothing safe to key on. |
 | Synchronous challenges (Slack `url_verification`, Meta `hub.challenge`) | Not in v1 | They need RunLater to echo sender input back. That is small, but each scheme needs its own handling. |
-| Filtering (e.g. only `workflow_run`) | Not in v1; `keep_headers` keeps the event type visible | Filtering at the sender (GitHub's event picker) covers most cases. |
+| Filtering (e.g. only `workflow_run`) | Left out at first; `keep_headers` kept the event type visible. **Since built:** [HOOK_FILTERS.md](HOOK_FILTERS.md), which also added `update_hook` | The sender's event picker turned out too coarse: it can't say "only failures". |
 | Scopes | `schedule` to create, `cancel` to delete, `read` to list | The same as crons and wake. Hook events land in the inbox, which `read` already covers. |
 
 ## Out of scope

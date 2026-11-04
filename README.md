@@ -2,8 +2,8 @@
 
 Let an AI agent make an HTTP request later, and check whether it happened.
 
-The product spec is [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md) and the design is in
-[docs/spec/ARCHITECTURE.md](docs/spec/ARCHITECTURE.md). The pre-rebuild implementation was removed at
+The specs are [PRODUCT.md](docs/spec/PRODUCT.md) (what it does), [ARCHITECTURE.md](docs/spec/ARCHITECTURE.md)
+(how it's built) and [DESIGN.md](docs/spec/DESIGN.md) (how it should feel, to agents and to people). The pre-rebuild implementation was removed at
 cutover; it is in git history before this change.
 
 ## Layout
@@ -12,10 +12,11 @@ cutover; it is in git history before this change.
 | --- | --- | --- |
 | `apps/api` | Private task API: ledger, scheduling, delivery | Rust · workers-rs |
 | `apps/gateway` | Public entry for agents: Agent Auth, capabilities, MCP | TypeScript Worker |
-| `apps/web` | runlater.io landing and docs | Next.js · OpenNext |
+| `apps/web` | runlater.io landing, docs and payment page | Next.js · OpenNext |
+| `apps/receiver` | Staging-only fixture the journey delivers to | TypeScript Worker |
 | `crates/core` | Task domain, no Cloudflare deps | Rust |
 | `crates/egress` | Destination policy and request signing | Rust |
-| `packages/contracts` | OpenAPI contract between gateway and API | OpenAPI 3.1 |
+| `packages/contracts` | Capability definitions, and the OpenAPI contract between gateway and API | TypeScript · OpenAPI 3.1 |
 | `packages/tsconfig` | Shared TypeScript config | |
 | `plugins/runlater` | Claude Code plugin: the hosted MCP server and a `runlater` skill | Markdown · JSON |
 

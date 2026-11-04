@@ -1,170 +1,242 @@
-# RunLater — Target Architecture & Repo Layout
+# RunLater — Architecture
 
-Status: **draft for review** · Companion to [PRODUCT.md](PRODUCT.md)
+Status: **current**, describes what runs in production · Owner: Patrick Thach · Last updated: 2026-11-04 · What it does: [PRODUCT.md](PRODUCT.md) · How it should feel: [DESIGN.md](DESIGN.md) · How to ship it: [DEPLOY.md](../DEPLOY.md)
 
 ## Decisions
 
 | Decision | Choice |
 | --- | --- |
 | Primary customer | AI agents |
-| Identity | Agent Auth (Better Auth `@better-auth/agent-auth` host), plus MCP OAuth for the hosted `/mcp` server: a no-account consent page, one project per grant. API keys, invitations and receiver pairing are removed. |
-| Backend | Rust (`workers-rs`) on Cloudflare Workers — task ledger, scheduling, delivery |
-| Agent-facing layer | TypeScript Worker — Agent Auth host and capabilities, and a hosted MCP server at `/mcp` |
-| Frontend | Next.js on Cloudflare Workers via OpenNext |
-| Payments | Stripe Checkout, embedded on `runlater.io/pay` with Stripe.js, for a person to pay; MPP (`mppx`, Stripe Shared Payment Tokens) for an agent to pay itself. Prepaid attempt packs, no accounts or subscriptions. |
-| Approach | Clean rebuild in a new layout; port the proven ledger/delivery core; delete milestone code. No migration of beta data. |
+| Identity | Agent Auth (Better Auth `@better-auth/agent-auth`), plus MCP OAuth for the hosted `/mcp` server: a no-account consent page, one project per grant. No API keys. |
+| Backend | Rust (`workers-rs`) on Cloudflare Workers: task ledger, scheduling, delivery |
+| Agent-facing layer | TypeScript Worker: Agent Auth, hosted MCP, public hooks, billing |
+| Frontend | Next.js on Cloudflare Workers via OpenNext, statically prerendered |
+| Storage | One SQLite Durable Object per project; D1 only for identity and the owner-to-project map |
+| Payments | Stripe Embedded Checkout for a person; MPP (`mppx`, Stripe Shared Payment Tokens) for an agent. Prepaid attempt packs, no accounts or subscriptions. |
 
 ## System
 
 ```mermaid
 flowchart LR
-    Agent["Agent<br/>(Agent Auth SDK or MCP bridge)"]
-    subgraph CF["Cloudflare"]
-        Web["apps/web<br/>Next.js · OpenNext<br/>runlater.io, docs"]
-        GW["apps/gateway (TypeScript)<br/>Agent Auth host · capabilities · MCP<br/>D1: hosts, agents, projects"]
-        API["apps/api (Rust)<br/>internal REST · auth by service binding"]
-        DO["TaskLedger Durable Object<br/>SQLite per project:<br/>tasks, attempts, outbox"]
-        Q["Queue: ready"]
-        C["Delivery consumer (Rust, same Worker)"]
-    end
-    Dest["Public HTTPS destination"]
+    Agent["Agent<br/>MCP client or Agent Auth SDK/bridge"]
+    Sender["Webhook sender<br/>GitHub, Stripe, CI"]
+    Person["The agent's person"]
+    Stripe["Stripe"]
+    Dest["Public HTTPS destination<br/>or wake URL"]
 
-    Agent -->|discover / register / execute capability| GW
-    GW -->|service binding + signed project assertion| API
+    subgraph CF["Cloudflare"]
+        Web["apps/web<br/>runlater.io"]
+        subgraph GWW["apps/gateway (TypeScript)"]
+            GW["gateway.runlater.io<br/>/mcp · OAuth · Agent Auth · billing"]
+            HK["hooks.runlater.io<br/>/h/… only"]
+        end
+        ID[("D1: hosts, agents,<br/>owner → project")]
+        KV[("KV: OAuth grants")]
+        AS[("AuthStore DO:<br/>JWT replay, counters")]
+        API["apps/api (Rust)<br/>verifies assertions"]
+        DO[("TaskLedger DO<br/>one SQLite per project")]
+        Q["Queue: runlater-ready"]
+        C["Delivery consumer<br/>same Worker"]
+    end
+
+    Agent --> GW
+    Sender --> HK
+    Person -->|consent| GW
+    Person -->|pay| Web
+    Web -->|Embedded Checkout| Stripe
+    Stripe -->|webhook| GW
+    GW --- ID
+    GW --- KV
+    GW --- AS
+    GW -->|service binding + signed assertion| API
+    HK -->|service binding + hooks.receive| API
     API --> DO
-    DO -->|alarm → outbox| Q
+    DO -->|alarm: publish due| Q
     Q --> C
-    C -->|claim lease| DO
+    C -->|claim, record| DO
     C -->|signed request| Dest
 ```
 
-### Responsibilities
+### `apps/gateway`: the only public entry for agents
 
-**`apps/gateway` (TypeScript)** — the only public entry for agents.
-- Agent Auth discovery, host/agent registration, capability execution (signature + `htm/htu/ath` binding checks).
-- Owns identity tables in D1: `host`, `agent`, `project(host_id → project_id, trial, expiry, revoked_at)`.
-- Maps each capability to one internal API call. Never accepts a project id from the caller; derives it from the authenticated host.
-- MCP, hosted: `/mcp` (Streamable HTTP, stateless) behind `@cloudflare/workers-oauth-provider` (OAuth 2.1, dynamic client registration, PKCE; clients, grants and tokens in the `OAUTH_KV` namespace). `/authorize` is a one-click consent page with no account; approving creates an owner `mcp:<id>` whose grant carries it, and `runlater_project` maps that owner to a project exactly as it maps an Agent Auth host. Tools are the capabilities, run through the same code path (`runCapability`).
-- MCP, local: MCP clients can also run the Agent Auth bridge (`@auth/agent-cli mcp --url <gateway>`), a local stdio MCP server that holds the agent's keys and exposes generic Agent Auth tools (`connect_agent`, `list_capabilities`, `execute_capability`, …). Our capability names, descriptions and input schemas are what the agent reads through them.
-- Billing: `get_payment_link` creates a Stripe Checkout Session (`ui_mode: embedded_page`) for the caller's project and returns `runlater.io/pay#key=…&secret=…`. `POST /billing/webhook` verifies `Stripe-Signature`, matches the session's metadata to the owner's project, and calls the API's `POST /v1/projects/self/credits` (scope `billing`) with the session id, which the ledger applies once.
-- MPP: `get_payment_link` also returns `/billing/mpp/<project>.<expiry>.<mac>` (HMAC with a key derived from the Stripe secret key). `POST` there runs `mppx`'s Stripe charge: `402` with an HMAC-bound challenge, then a PaymentIntent from the agent's Shared Payment Token, credited by PaymentIntent id. `payment_intent.succeeded` on the webhook is the backstop if that credit fails.
-- Rate limits registration and capability calls (Workers Rate Limiting binding).
+| Path | Serves | Auth |
+| --- | --- | --- |
+| `/mcp` | Hosted MCP: Streamable HTTP, stateless, POST only. Tools are the capabilities. | OAuth 2.1 bearer token (`@cloudflare/workers-oauth-provider`) |
+| `/authorize`, `/oauth/*` | Dynamic client registration, PKCE, the one-click consent page | Rate limited per IP |
+| `/.well-known/agent-configuration`, Agent Auth routes under its base path | Discovery, registration, capability execution | Agent Auth JWTs, single-use `jti` |
+| `/h/{project}/{token}` | Inbound hooks. The only thing the hooks host serves. | The token, checked in the ledger |
+| `/billing/webhook` | Stripe events | `Stripe-Signature` |
+| `/billing/mpp/{link}` | An agent buying a pack | HMAC in the link, then the payment challenge |
+| `/openapi.json`, `/llms.txt`, `/health` | Discovery documents; `/health` also checks the API | None |
 
-**`apps/api` (Rust)** — the task authority. Not on a public route.
-- Reachable only via service binding from the gateway. Every request carries a short-lived assertion `{project_id, scopes, exp}` signed with Ed25519 by the gateway; the API verifies it.
-- One `TaskLedger` Durable Object per project (SQLite): tasks, attempts, idempotency keys, outbox, budget counter.
-- Alarm wakes for earliest due task → writes outbox → publishes `{project_id, task_id, generation}` to Queue.
-- Queue consumer claims a fenced lease, re-validates destination, signs, sends (10 s timeout), records the attempt, then acks.
-- Budget is charged per attempt inside the DO, so it cannot be bypassed.
-- Assertion format, scopes and the full route contract: [`packages/contracts/openapi.yaml`](../../packages/contracts/openapi.yaml).
+- **Two identities, one path.** `runCapability` (`src/projects.ts`) takes an owner, either an Agent Auth host id or `mcp:<id>` from a grant, finds its project in `runlater_project`, and maps the capability to exactly one API call (`src/capabilities.ts`). A project id is never taken from the caller.
+- **The local bridge.** `@auth/agent-cli mcp --url <gateway>` is a stdio MCP server that holds an agent's keys and exposes generic tools (`execute_capability`, …). Nothing in the gateway is specific to it.
+- **Rate limits** are Workers Rate Limiting bindings: registration 10/min per IP; OAuth registration and consent 20/min per IP and path; MPP 10/min; hooks 120/min per IP and 600/min per project. `/mcp` tool calls have none ([open question](PRODUCT.md#open-questions)).
+- **Billing.** `get_payment_link` creates a Checkout Session and returns `runlater.io/pay#key=…&secret=…` and an `mpp_url`. Payments reach the ledger through `POST /v1/projects/self/credits` (scope `billing`), keyed by session or PaymentIntent id, so a retried webhook adds nothing. `payment_intent.succeeded` is the backstop if an MPP credit fails after the charge.
 
-**`apps/web` (Next.js)** — landing page and docs at runlater.io (docs under `/docs`), and `/pay`, which mounts Stripe's Embedded Checkout from the key and client secret in the link's fragment. Statically prerendered; no auth in v1.
+### `apps/api`: the task authority
 
-### Internal API (gateway → api)
+Not on any public route (`workers_dev: false`, no custom domain). It is reached only through a service binding from the gateway.
+
+- **Assertions.** Each request carries `RunLater-Assertion`: `{aud, sub: project_id, scope, iat, exp}` signed with Ed25519 by the gateway, living at most 5 minutes. The route table in `worker_entry.rs` names the scope each route needs. Scopes: `project`, `schedule`, `read`, `cancel`, `secrets`, plus two no agent is granted: `billing` and `hooks.receive`. A shared test vector pins the format across TypeScript and Rust.
+- **The ledger.** `src/ledger.rs` is plain synchronous Rust behind a small `Db` trait, so the same code runs against rusqlite in `cargo test` and against Durable Object SQLite in workerd. A run of storage calls with no `await` between them commits atomically, and that is what makes "record the match and queue the action" one transaction.
+- **Sealing.** `src/sealing.rs` holds AES-256-GCM with a per-project key derived by HKDF from `SECRETS_KEY`. The API seals before the ledger stores and the consumer opens at send time, so the ledger never holds plaintext.
+- **Glue.** `src/worker_entry.rs` is the HTTP entry, the `TaskLedger` class, its alarm and the queue consumer.
+
+### `apps/web`
+
+Landing page, docs (`/docs`, `/docs/capabilities`, `/docs/delivery`), `/pay`, `/terms`, `/privacy`. No auth and no server state. The capabilities page renders the same definitions the gateway serves.
+
+### `apps/receiver`
+
+A staging-only fixture: it records what the journey delivers and scripts replies (`ok`, `flaky`, `gone`). Never deployed to production.
+
+## Where data lives
+
+| Store | Holds | Notes |
+| --- | --- | --- |
+| `TaskLedger` DO, per project | `project`, `tasks`, `attempts`, `crons`, `payments`, `inbox`, `wake`, `secrets`, `hooks`, `hook_deliveries`, `meta` | The source of truth for budget, expiry and everything an agent scheduled |
+| D1 `DB` | Better Auth tables, `runlater_project(host_id, project_id, created_at)` | `host_id` holds the owner, despite the name. Trial and budget are **not** here. |
+| KV `OAUTH_KV` | OAuth clients, grants, tokens | Refresh tokens last 30 days from last use |
+| `AuthStore` DO, one | JWT replay keys, Better Auth counters | One instance, so check-and-set is atomic |
+
+Schema changes:
+
+- **Ledger:** `MIGRATIONS` in `ledger.rs` is append-only (12 so far). Each ledger applies what it hasn't, when it opens, counted in `meta`.
+- **D1:** `apps/gateway/migrations`, forward-only, applied at deploy before the gateway.
+
+## How work moves
+
+**Delivery.** The task rows are the outbox; there is no separate table.
+
+1. Scheduling writes the task and arms the DO's alarm for the earliest due time.
+2. The alarm runs `recover` (expired leases), `purge`, `fire_crons` and `publish_due`, sends `{project_id, task_id, generation}` to the queue, and re-arms.
+3. The consumer claims a fenced lease from the ledger, re-checks the destination, signs and sends (10 s timeout), and records the outcome.
+4. A message lost on the way is harmless: a published task that nobody claimed becomes eligible again after 60 s. `generation` guards against stale dispatches and `fence` against stale results.
+
+**Inbox and wake.** Writing an event happens in the transaction that finishes the task. If a wake is set, the same step queues a `wake_call` task, debounced, delivered like any other.
+
+**Hooks.** The gateway applies its rate limits, reads at most 256 KiB and checks the project exists in D1, so a made-up id never creates a Durable Object. Then it forwards with a `hooks.receive` assertion. The ledger handles the rest in one transaction: token hash, signature, rate limit, filter, dedupe, caps, event.
+
+**Secrets at send time.** The ledger re-checks each reference and hands over sealed values; the consumer opens them, fills headers, sends, and redacts echoes before anything is stored.
+
+## What must stay true
+
+- A project id comes from the authenticated owner, never from the caller.
+- The API has no public route, and every request carries a scoped assertion.
+- Budget is charged inside the ledger, so no route can skip it.
+- An accepted task always reaches `succeeded`, `failed` or `canceled`.
+- Plaintext secrets never reach the ledger, a log, a view or an event.
+- Destinations are checked when accepted and before every attempt, and `global_fetch_strictly_public` refuses private addresses after DNS resolution.
+- Nothing a webhook sender wrote is echoed back to it.
+
+## Internal API (gateway → api)
+
+Source of truth: [`packages/contracts/openapi.yaml`](../../packages/contracts/openapi.yaml). It is written by hand, and nothing generates types from it or checks it against the routes.
 
 ```
-POST   /v1/projects                    create (idempotent on host id)
+POST   /v1/projects                    create (idempotent)
 GET    /v1/projects/self
+POST   /v1/projects/self/credits       scope: billing
 POST   /v1/tasks                       schedule
-GET    /v1/tasks?status=&cursor=
+GET    /v1/tasks?status=&lane=&cursor=
 GET    /v1/tasks/{id}                  includes attempts
 POST   /v1/tasks/{id}/cancel
 POST   /v1/tasks/{id}/redrive
+POST   /v1/watches
+POST   /v1/crons
+GET    /v1/crons
+GET    /v1/crons/{name}
+POST   /v1/crons/{name}/delete
+POST   /v1/inbox/read
+POST   /v1/inbox/ack
+POST   /v1/wake
+POST   /v1/wake/delete
+POST   /v1/secrets                     scope: secrets
+GET    /v1/secrets
+POST   /v1/secrets/{name}/delete       scope: secrets
+POST   /v1/hooks
+GET    /v1/hooks
+POST   /v1/hooks/_receive              scope: hooks.receive
+POST   /v1/hooks/{name}                update, keeping the URL
+POST   /v1/hooks/{name}/delete
 GET    /health
 ```
-
-The OpenAPI file in `packages/contracts` is the source of truth; TS types are generated from it for the gateway.
 
 ## Repo layout
 
 ```
 runlater/
 ├── apps/
-│   ├── api/                 Rust Worker: routes, TaskLedger DO, queue consumer (thin)
-│   │   ├── src/
-│   │   ├── Cargo.toml
-│   │   └── wrangler.jsonc
-│   ├── gateway/             TS Worker: Agent Auth host, capabilities, MCP
-│   │   ├── src/{index,auth,capabilities,api,projects,store}.ts
+│   ├── api/                 Rust Worker
+│   │   ├── src/             worker_entry, ledger (+ ledger/hooks), assertion, sealing, db, http
+│   │   └── test/            workerd e2e
+│   ├── gateway/             TS Worker
+│   │   ├── src/             index, mcp, consent, auth, store, projects, capabilities,
+│   │   │                    api, hooks, billing, mpp, discovery, body
 │   │   ├── migrations/      D1 SQL
-│   │   └── wrangler.jsonc
-│   └── web/                 Next.js + OpenNext
-│       ├── app/
-│       ├── app/docs/        quickstart, capabilities (generated), delivery & signatures
-│       └── wrangler.jsonc
+│   │   └── e2e/             agent.e2e, journey, staging, oauth
+│   ├── receiver/            TS Worker: staging fixture
+│   └── web/                 Next.js + OpenNext: app/, components/, lib/
 ├── crates/
-│   ├── core/                Pure Rust domain: task state machine, retry policy, limits, validation. No worker deps; native unit tests.
-│   └── egress/              Pure Rust: destination policy (URL/host/IP checks) + request signing
+│   ├── core/                Pure domain: task state machine, retry, limits, request, cron,
+│   │                        watch, wake, secret, hook. No Worker deps.
+│   └── egress/              Pure: destination policy, header rules, request signing
 ├── packages/
-│   ├── contracts/           openapi.yaml and capability definitions (src/capabilities.ts), shared by gateway and web
+│   ├── contracts/           capabilities.ts (shared by gateway and web), billing.ts, openapi.yaml
 │   └── tsconfig/            shared TS config
+├── plugins/runlater/        Claude Code plugin: MCP config and skill
+├── .claude-plugin/          Plugin marketplace manifest
+├── server.json              MCP Registry entry
+├── scripts/                 setup-deploy-secrets.mjs
 ├── docs/
-│   ├── spec/                PRODUCT.md, ARCHITECTURE.md (this)
-│   └── adr/                 one file per significant decision
-├── Cargo.toml               workspace: apps/api, crates/*
-├── package.json             npm workspaces: apps/gateway, apps/web, packages/*
-├── turbo.json               (optional) task runner
-└── .github/workflows/       ci.yml, deploy.yml
+│   ├── DEPLOY.md
+│   └── spec/                PRODUCT, ARCHITECTURE, DESIGN, and one note per larger feature
+└── .github/workflows/       ci, deploy, deploy-env, monitor
 ```
 
-### Environments
+## Adding a capability
 
-One `wrangler.jsonc` per app with `env.staging` and `env.production`. No per-milestone configs (`alpha/`, `beta/`, `staging/` go away). Feature flags become runtime vars, not Cargo features — the Rust build has **zero** feature flags.
+1. Change the rules in `PRODUCT.md` first; `crates/core/src/limits.rs` follows it.
+2. Define it in `packages/contracts/src/capabilities.ts`. That is what agents read and what the docs render.
+3. Map it to one API call in `apps/gateway/src/capabilities.ts`.
+4. Add the route and its scope in `worker_entry.rs`, the logic in the ledger, and any schema change as a new `MIGRATIONS` entry.
+5. Add a D1 migration granting it to existing hosts. `test/host-capabilities.test.ts` fails until there is one.
+6. Update `openapi.yaml`, the delivery docs and `lib/site.ts` (the web test checks the stated limits against `crates/core`), then the plugin's `SKILL.md` and `reference.md`, bumping its version in both manifests.
+7. Follow the rules for agent-facing design in [DESIGN.md](DESIGN.md#designing-for-agents).
 
-### Testing
+## Environments
+
+One `wrangler.jsonc` per app with `env.staging` and `env.production`. The Rust build has no Cargo feature flags of its own. Staging and production have separate D1, KV, queues and hostnames; see [DEPLOY.md](../DEPLOY.md).
+
+## Testing
 
 | Layer | Tool |
 | --- | --- |
-| `crates/*` | `cargo test` (native, fast) |
-| `apps/api` | `vitest` + `@cloudflare/vitest-pool-workers` against Miniflare (DO, alarms, queues) |
-| `apps/gateway` | `vitest` unit tests; `npm run test:e2e` runs the built gateway and API together in Miniflare, driven by the real `@auth/agent` SDK and the `@auth/agent-cli` MCP bridge |
-| End-to-end | One script: register agent → create project → schedule → local receiver gets signed request → `get_task` shows `succeeded` |
-| `apps/web` | `next build` + Playwright smoke |
+| `crates/*`, ledger | `cargo test`, native. The test database enforces workerd's limits (for example, `SQLITE_LIMIT_COMPOUND_SELECT = 5`). |
+| `apps/api` | `npm run test:e2e`: the built Worker in local workerd, with DO SQLite, alarms and Queues |
+| `apps/gateway` | `vitest` units; `npm run test:e2e`: gateway, API and receiver together, driven by the real `@auth/agent` SDK, the MCP bridge and scripted OAuth |
+| Journey | `e2e/journey.mjs`: one agent's whole path, run locally in CI, on staging after each deploy, and daily against production |
+| `apps/web` | `vitest`: the docs' Node and Python signature samples are executed against the `crates/egress` vector, and the stated limits are checked against `crates/core`. `npm run check` builds with OpenNext. There are no browser tests. |
+| `apps/receiver` | `vitest` |
 
-Replaces the 89 files in `scripts/` and the bespoke shell harnesses.
+## CI/CD and monitoring
 
-### CI/CD
-
-- `ci.yml`: `cargo fmt/clippy/test`, `npm run lint typecheck test`, `wrangler deploy --dry-run` per app.
-- `deploy.yml`: on `main`, deploy to staging, run e2e against staging, then manual approval → production.
-
-## What gets ported vs deleted
-
-| Today | Fate |
-| --- | --- |
-| `src/core.rs`, `limits.rs`, `security.rs`, `signed.rs`, `callback.rs` (signing), `destinations.rs` / `safe_egress.rs` (policy) | **Port** into `crates/core` and `crates/egress`, cleaned up |
-| `src/runtime.rs`, `publication.rs`, `transport.rs`, `delivery.rs`, `application.rs` (CQRS, outbox, leases) | **Port** the patterns into `apps/api`; one runtime instead of four |
-| `production_runtime.rs`, `public_beta*.rs`, `invitation*.rs`, `anonymous_trial.rs`, `funding.rs`, `funded_tasks.rs`, `receiver_pairing.rs`, `mcp_delegation.rs`, `general_http*.rs`, `identity.rs`, `auth.rs`, `staging.rs` | **Delete** (keep in git history) |
-| `agent-auth/canonical/` | **Port** into `apps/gateway` (TypeScript) |
-| `agent-auth/{replacement,coordinator,prototype}` | Delete |
-| `mcp/` (OAuth MCP server) | Delete; capability → tool mapping reused in gateway |
-| `egress/` | Fold into `crates/egress` |
-| `web/next` | Move to `apps/web`; drop `web/landing`, `web/redirect`, `web/docs`, `web/shared` |
-| `alpha/`, `beta/`, `staging/`, `offline/`, `discovery/`, `examples/`, `scripts/`, `tests/` | Delete; replaced by per-app tests and one e2e |
-| `docs/*.md` (40 files) | Moved to `legacy/docs/`; deleted at cutover ✅ |
-
-## Migration plan
-
-Each phase is one PR that leaves `main` green.
-
-1. **Skeleton.** ✅ Create workspaces, `crates/`, `apps/`, `packages/`. Move old code under `legacy/` so nothing is lost while porting. CI runs the new layout only; legacy workflows (including the old API auto-release) are parked in `legacy/.github/workflows` and no longer run.
-2. **Core crates.** ✅ Port domain + egress into `crates/core` and `crates/egress` with native tests. `crates/core` models one task as a pure state machine (generation guards stale dispatches, fence guards stale results) so phase 3 can store tasks as SQLite rows instead of the legacy whole-ledger snapshot. Phase 3 must enable `global_fetch_strictly_public` on the API Worker.
-3. **API.** ✅ `apps/api`: TaskLedger DO, alarm, outbox, queue consumer, internal routes, assertion verification. The ledger's SQL runs behind a small `Db` trait, so it is tested natively against rusqlite and in workerd unchanged. `npm run test:e2e` in `apps/api` drives the built Worker in Miniflare (DO SQLite, alarms, Queues) with outbound deliveries captured locally.
-   - Admission: a project may hold at most as many waiting tasks as it has attempts left, so storage is bounded by the trial.
-   - The gateway's Ed25519 public key is the `GATEWAY_PUBLIC_KEY` secret. Queues `runlater-ready[-staging|-production]` must exist before the first deploy.
-4. **Gateway.** ✅ `apps/gateway`: Agent Auth host (Better Auth + `@better-auth/agent-auth`) on D1, seven capabilities, Ed25519 assertions to the API, an `AuthStore` Durable Object for JWT replay and rate-limit state, and a per-IP registration rate limit.
-   - The MCP bridge is validated end to end: `@auth/agent-cli@0.5.1` (SDK 0.5.1) works against the 0.6.2 server. No hosted `/mcp` endpoint is needed for it.
-   - Capability calls are protected by single-use `jti` (replay returns 401) rather than the legacy request-binding check, which the standard SDK and the bridge do not send.
-   - A cross-language test vector pins the assertion format: a token signed by the TypeScript gateway is verified by the Rust API's tests.
-5. **Web.** ✅ Landing page and docs (`/docs`, `/docs/capabilities`, `/docs/delivery`) in `apps/web`, statically prerendered.
-   - The capabilities reference renders the same definitions the gateway serves (`@runlater/contracts/capabilities`).
-   - The signature-verification samples (Node, Python) are executed in tests against the `crates/egress` vector, and the limits the site states are checked against `crates/core`.
-   - `docs.runlater.io` content now lives at `runlater.io/docs`; the old hostname is retired at cutover, with no redirect.
-6. **E2E + deploy.** ✅ One journey script ([`apps/gateway/e2e/journey.mjs`](../../apps/gateway/e2e/journey.mjs)) runs locally in CI and against staging after every staging deploy, delivering to a staging-only receiver Worker (`apps/receiver`). Staging failing blocks production. First live run still needs the setup in [DEPLOY.md](../DEPLOY.md).
-7. **Cutover.** ✅ `runlater.io` and `gateway.runlater.io` serve the new Workers; the legacy hostnames, Workers and queues are deleted, and so is `legacy/`. See [DEPLOY.md](../DEPLOY.md).
+- **`ci.yml`** on every PR and on `main`: `cargo fmt`, `clippy` (native and wasm), `cargo test`; `typecheck`, `test`; then `wrangler deploy --dry-run` per Worker and both e2e suites.
+- **`deploy.yml`** after CI passes on `main`, if `DEPLOY_ENABLED`: staging, then production behind the environment's required reviewer. Order within an environment: API, D1 migrations, gateway, web, receiver (staging only), health check, journey (staging only). A failed journey stops production.
+- **`monitor.yml`**: health and the main site pages every 15 minutes, the journey against production daily. A failed run emails whoever last changed the workflow, and that is the only alert. Workers Logs are on for each Worker.
 
 ## Risks
 
-- **MCP compatibility** — Agent Auth isn't standard MCP OAuth, so remote MCP clients use the hosted `/mcp` server and its OAuth consent page instead; the `@auth/agent-cli` bridge still works for clients that run local servers. Both are covered by `npm run test:e2e`.
-- **Agent Auth maturity** — packages are at 0.6.x and the protocol may change. Keep it isolated in `apps/gateway/src/auth`.
-- **Removing the live MCP/OAuth path** breaks any current users at cutover. Phase 7 must check for live tasks/grants first.
+| Risk | Notes |
+| --- | --- |
+| Agent Auth maturity | Server packages are at 0.6.x and the bridge at 0.5.1, and the protocol may change. Hosted MCP doesn't depend on it, and it is kept to `src/auth.ts`, `store.ts` and the routes in `index.ts`. |
+| Thin alerting | One GitHub email, from a workflow GitHub pauses after 60 days without repository activity. Nothing measures delivery lateness. |
+| `AuthStore` is a single Durable Object | Every Agent Auth call goes through it for replay checks, so it is a throughput ceiling and a shared point of failure for that path. Hosted MCP doesn't use it. Fine at today's traffic; untested at scale. |
+| `SECRETS_KEY` is never rotated | One per environment. Losing it loses every sealed secret and hook verify secret; leaking it exposes them if the ledgers leak too. |
+| Contract drift | `openapi.yaml` isn't checked against the routes, so it can go stale without a test failing. |
+| Concentration in `ledger.rs` | About 6,500 lines including tests, and every feature passes through it. Hooks have already moved to their own module; the others may follow. |
+
+## History
+
+The rebuild replaced an earlier implementation in seven phases: skeleton, core crates, API, gateway, web, e2e and deploy, cutover. Cutover finished on 2026-11-01: `runlater.io` and `gateway.runlater.io` serve these Workers, and the legacy hostnames, Workers, queues and `legacy/` tree are gone. The phase plan and the port-or-delete table are in this file's git history.

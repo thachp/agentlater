@@ -1,10 +1,12 @@
 # RunLater — Product Spec (v1)
 
-Status: **v1, live** at `gateway.runlater.io` · Owner: Patrick Thach · Last updated: 2026-11-02
+Status: **v1, live** at `gateway.runlater.io` · Owner: Patrick Thach · Last updated: 2026-11-04 · How it's built: [ARCHITECTURE.md](ARCHITECTURE.md) · How it should feel: [DESIGN.md](DESIGN.md)
 
 ## One line
 
 **RunLater lets an AI agent say "make this HTTP request later" — and then check whether it happened.**
+
+Publicly: *your agent's session ends; the work doesn't.* The request is the unit, and everything else (crons, watches, hooks, the inbox, wake) exists so that waiting, and finding out, can outlast a session.
 
 ## Problem
 
@@ -14,51 +16,86 @@ retry a flaky webhook five times over twenty minutes. Today an agent that needs
 intent. Developers solve it with cron boxes, queues, or QStash-style services that
 assume a human signed up, pasted an API key, and wired a dashboard.
 
+The harder half is coming back. Most agents have no public URL, so nothing can tell them what
+happened, and the next session starts by re-checking everything. Outside events (a failed CI run,
+a disputed payment) have the same problem: they need a server to land on.
+
 ## Who it's for
 
 | Priority | User | How they reach us |
 | --- | --- | --- |
 | Primary | **AI agents** acting for a person or system | Agent Auth capabilities, or the same capabilities as tools on the hosted MCP server (`/mcp`) |
-| Secondary | Developers building those agents | Same capabilities over HTTP; docs site |
+| Secondary | Developers building those agents | Agent Auth SDK from code; docs site |
+| Occasional | The agent's person | One click on a consent page; a payment link when attempts run out |
 
 There is no human sign-up, password, or dashboard in v1. The agent *is* the customer.
 
+### Where agents find it
+
+| Channel | What it is | Source |
+| --- | --- | --- |
+| Hosted MCP | `https://gateway.runlater.io/mcp`, added as a custom connector or remote server in Claude, ChatGPT, Grok, Codex, Cursor and others | `apps/gateway/src/mcp.ts` |
+| Claude Code plugin | The MCP server plus a `runlater` skill that says when to use it, including the start-of-session inbox check | `plugins/runlater`, `.claude-plugin/marketplace.json` |
+| MCP Registry | `io.github.thachp/runlater`, pointing at the hosted server | `server.json` |
+| Agent Auth | Discovery at `/.well-known/agent-configuration`, then the SDK or the local bridge | `apps/gateway/src/auth.ts` |
+| Machine-readable pages | `/llms.txt` says what RunLater is and how to connect; `/openapi.json` advertises the paid MPP endpoint | `apps/gateway/src/discovery.ts` |
+| Site | Landing page and docs at `runlater.io` | `apps/web` |
+
 ## Core jobs (v1)
 
-1. **Schedule** an HTTP request to a public HTTPS URL, now or at a future time.
-2. **Check** a task's status and its delivery attempts.
-3. **List** recent tasks for the project.
-4. **Cancel** a task that hasn't run yet.
-5. **Redrive** a task that failed, to try it again.
-6. **Find out later** what happened while the agent was away, without a public URL of its own: the *Inbox*.
-7. **Be woken** when something lands there, instead of waiting for a person to open a session: *Wake*.
-8. **Use credentials without handling them**: *Secrets*, bound to the hosts they are for.
+**Act later**
+
+1. **Schedule** an HTTP request to a public HTTPS URL, now or at a future time, optionally in a *lane* so related requests run one at a time.
+2. **Repeat** it on a schedule, and hear when runs start failing: *Crons*.
+3. **Wait** on someone else's job by polling it, and optionally send the next request when it finishes: *Watches*.
+
+**Find out later**
+
+4. **Check** a task's status and its delivery attempts; **list** recent tasks for the project.
+5. **Read results** from a later session, without a public URL of its own: the *Inbox*, with *captured responses*.
+6. **Be woken** when something lands there, instead of waiting for a person to open a session: *Wake*.
+7. **Receive webhooks** from GitHub, Stripe or CI, filtered to what matters: *Inbound hooks*.
+
+**Stay in control**
+
+8. **Cancel** a task that hasn't run yet; **redrive** one that failed.
+9. **Use credentials without handling them**: *Secrets*, bound to the hosts they are for.
+10. **Buy more attempts**, through the agent's person or over MPP: *Buying attempts*.
 
 That's the whole product for v1.
 
 ## How it works (user's view)
 
 ```
-Agent ──discover──▶ RunLater           "what can you do?"
-Agent ──register──▶ Agent Auth         gets an identity + keys
+Agent ──connect──▶ RunLater            hosted MCP: a person clicks Connect once
+                                       Agent Auth: discover, register, get keys
 Agent ──create_project──▶ RunLater     gets a free trial (finite budget, 7 days)
-Agent ──schedule_http──▶ RunLater      { url, method, headers, body, run_at }
+Agent ──schedule_http──▶ RunLater      { url, method, headers, body, delay, callback_url: "inbox" }
                                        ← task_id, status: scheduled
           … time passes …
 RunLater ──signed HTTPS request──▶ destination   (retries on failure)
-Agent ──get_task──▶ RunLater           ← status: succeeded, attempts: [...]
+RunLater ──task.finished──▶ inbox
+Next session ──get_project──▶ RunLater ← inbox_unread: 1
+Next session ──read_inbox──▶ RunLater  ← the report (or get_task: status, attempts)
 ```
 
 ## Concepts
 
 | Term | Meaning |
 | --- | --- |
-| **Agent identity** | An Agent Auth host + agent keypair. The only way to authenticate. |
-| **Project** | Owned by exactly one agent host. Holds tasks, budget, and the signing secret. One project per host in v1. |
+| **Owner** | Who holds a project: an Agent Auth host (host + agent keypair), or a hosted MCP connection (an OAuth grant). There are no other ways to authenticate. |
+| **Project** | Owned by exactly one owner, and never reassigned. Holds tasks, budget, the signing secret and everything below. One project per owner in v1. |
 | **Trial** | A project's free allocation: N delivery attempts, expires after 7 days. No refills. |
 | **Attempt pack** | Delivery attempts bought for a project: 50,000 for $5. See *Buying attempts*. |
 | **Task** | One HTTP request to make at `run_at`, with a retry policy. |
-| **Attempt** | One try at delivering a task: time, response status, duration, error. |
+| **Attempt** | One try at delivering a task: time, response status or error. The billing unit. |
+| **Lane** | A name that makes tasks run one at a time. |
+| **Cron** | A request on a UTC schedule; each run is a task. |
+| **Watch** | A task whose attempts are polls, ending when `until` matches. `on_match` is the one request it may send then. |
+| **Inbox** | One log of events per project, with a cursor RunLater keeps. |
+| **Wake** | One URL per project that RunLater calls to start the agent when the inbox has something. |
+| **Secret** | A credential stored once, sent only to its allowed hosts, referred to as `{{secret:NAME}}`. |
+| **Hook** | A public URL that turns requests from outside into inbox events. |
 
 ## Task lifecycle
 
@@ -96,7 +133,7 @@ The bridge keeps the agent's keys in `~/.agent-auth`. Losing them loses access t
 | `create_project` | — | project id, trial budget, expiry |
 | `get_project` | — | budget used/remaining, expiry, `paid`, signing secret, `inbox_unread`, `wake` |
 | `get_payment_link` | — | `payment_url` for a person to buy a pack, `mpp_url` for the agent to buy one over MPP, expiries, price |
-| `schedule_http` | `url`, `method`, `headers?`, `body?`, `run_at?` or `delay?`, `idempotency_key?`, `max_attempts?`, `callback_url?`, `capture?`, `lane?` | `task_id`, `status` |
+| `schedule_http` | `url`, `method`, `headers?`, `body?`, `run_at_ms?` or `delay?`, `idempotency_key?`, `max_attempts?`, `callback_url?`, `capture?`, `lane?` | `task_id`, `status` |
 | `get_task` | `task_id` | task + attempts |
 | `list_tasks` | `status?`, `lane?`, `cursor?` | page of tasks |
 | `cancel_task` | `task_id` | task |
@@ -249,7 +286,7 @@ An agent cannot pay, so a person pays for it. Stripe takes the payment; RunLater
 - **Validity:** each purchase makes the project's whole balance valid for 12 months from that day. Attempts not yet expired, from the trial or an earlier pack, carry over; expired ones do not come back.
 - **A purchase reopens a project:** a project whose trial or attempts expired takes new work again, and crons stopped by expiry start again from their next slot.
 - **Paid projects hold more:** up to 20,000 tasks instead of 1,000.
-- Other limits are unchanged; `run_at`, watch deadlines and cron runs still cannot fall after the project's expiry.
+- Other limits are unchanged; `run_at_ms`, watch deadlines and cron runs still cannot fall after the project's expiry.
 - Billing is off until Stripe keys are configured (`billing_unavailable`).
 
 ## v1 limits
@@ -258,12 +295,12 @@ An agent cannot pay, so a person pays for it. Stripe takes the payment; RunLater
 | --- | --- |
 | Request body | 64 KB |
 | Headers | 32 headers, 8 KB total |
-| Furthest `run_at` | 7 days out (bounded by trial expiry) |
+| Furthest `run_at_ms` | 7 days out (bounded by trial expiry) |
 | Trial | 100 delivery attempts, 7 days |
 | Attempt pack | 50,000 delivery attempts for $5; balance valid 12 months from the latest purchase |
 | Retention | Task + attempts kept 30 days after terminal state |
 | Tasks held per project | 1,000 (20,000 once a pack is bought), finished ones included until purged. A task's body is dropped once it succeeds or is canceled; failed tasks keep it for redrive. |
-| Projects | 1 per agent host |
+| Projects | 1 per owner (Agent Auth host or hosted MCP connection) |
 | Crons | 10 per project, at most one run an hour each |
 | Watches | One poll every 5 min to 24 h, for at most 7 days; first 64 KB of a response read |
 | Captured response | First 16 KiB and 4 headers; deleted 7 days after the task finishes |
@@ -280,18 +317,33 @@ An agent cannot pay, so a person pays for it. Stripe takes the payment; RunLater
 | Subscriptions, invoices, larger packs | One pack size, paid by card, covers launch. |
 | SDKs | A packaged npm client. Agents use capabilities/MCP directly. |
 | API keys, invitations, receiver pairing | Replaced by Agent Auth and hosted MCP's one-click OAuth. |
-| Workflows, fan-out, ordering across lanes | Different product. Lanes give one-at-a-time order within a lane only. |
+| Workflows, fan-out, ordering across lanes | Different product. Lanes give one-at-a-time order within a lane only. `on_match` is one request and doesn't chain. |
+| Hooks that send requests | Anyone with a hook's URL could spend the project's attempts. It needs `verify` to be required and its own spec. |
+| Synchronous hook challenges (Slack `url_verification`, Meta `hub.challenge`) | They need RunLater to echo sender input, per scheme. |
+| Notes an agent writes to its own future inbox | RunLater as timed memory is a product decision of its own. |
 
 ## Success criteria for v1 launch
 
 - An agent goes from zero to a delivered, signed request in under 5 tool calls, without human help.
 - Accepted tasks are never lost: every one reaches `succeeded`, `failed` or `canceled`.
 - No task can reach a private network or another project's data (tested).
-- p95 delivery lateness under 60 s for tasks due "now", measured on a real deployment.
+- p95 delivery lateness under 60 s for tasks due "now", measured on a real deployment. **Not measured yet:** the journey and `monitor.yml` check that deliveries arrive, not how late.
+
+"Under 5 tool calls" holds for hosted MCP (`create_project`, `schedule_http`) after one human click on the consent page. Agent Auth needs no human at all.
 
 ## Open questions
 
 1. ~~**Remote-only MCP clients.**~~ Resolved: a hosted `/mcp` with one-click OAuth consent (no account), one project per connection.
 2. **Key loss.** If an agent loses its keys, its project is gone, inbox included. Acceptable for a trial?
-3. **Abuse.** New keys are new identities (Sybil). Is a global trial cap + per-IP registration limit enough for launch?
+3. **Abuse.** New keys are new identities (Sybil). Today there are per-IP limits on registration (10 a minute) and on OAuth client registration and consent (20 a minute each), but no global trial cap. Is that enough while the trial is free?
 4. ~~**What happens after the trial?**~~ Resolved: the agent's person buys attempt packs (*Buying attempts*).
+5. **Rate of calls on `/mcp`.** The gateway has no per-grant limit on tool calls; budgets bound what costs attempts, but reads and rejected calls are unbounded. Add one before it's needed, or wait for evidence?
+6. **Measuring lateness.** What should measure the p95 in the success criteria: the daily journey, or a metric from the ledger?
+
+## The other specs
+
+| Spec | Covers |
+| --- | --- |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | The Workers, where data lives, trust boundaries, testing and deploys |
+| [DESIGN.md](DESIGN.md) | Design for agents (tools, errors, defaults) and for people (the site, consent and pay pages) |
+| [INBOX.md](INBOX.md) · [HOOKS.md](HOOKS.md) · [HOOK_FILTERS.md](HOOK_FILTERS.md) | Why each of those features is the way it is. This file holds the rules; when they disagree, this file wins. |
