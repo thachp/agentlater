@@ -62,16 +62,16 @@ flowchart LR
 | Path | Serves | Auth |
 | --- | --- | --- |
 | `/mcp` | Hosted MCP: Streamable HTTP, stateless, POST only. Tools are the capabilities. | OAuth 2.1 bearer token (`@cloudflare/workers-oauth-provider`) |
-| `/authorize`, `/oauth/*` | Dynamic client registration, PKCE, the one-click consent page | Rate limited per IP |
+| `/authorize`, `/oauth/*` | Dynamic client registration, PKCE, the one-click consent page | `/authorize` and `/oauth/register` are rate limited per IP; `/oauth/token` isn't |
 | `/.well-known/agent-configuration`, Agent Auth routes under its base path | Discovery, registration, capability execution | Agent Auth JWTs, single-use `jti` |
 | `/h/{project}/{token}` | Inbound hooks. The only thing the hooks host serves. | The token, checked in the ledger |
 | `/billing/webhook` | Stripe events | `Stripe-Signature` |
 | `/billing/mpp/{link}` | An agent buying a pack | HMAC in the link, then the payment challenge |
 | `/openapi.json`, `/llms.txt`, `/health` | Discovery documents; `/health` also checks the API | None |
 
-- **Two identities, one path.** `runCapability` (`src/projects.ts`) takes an owner, either an Agent Auth host id or `mcp:<id>` from a grant, finds its project in `runlater_project`, and maps the capability to exactly one API call (`src/capabilities.ts`). A project id is never taken from the caller.
+- **Two identities, one path.** `runCapability` (`src/projects.ts`) takes an owner, either an Agent Auth host id or `mcp:<id>` from a grant, finds its project in `runlater_project`, and maps the capability to exactly one API call (`src/capabilities.ts`). The exception is `get_payment_link`, which the gateway answers itself. A project id is never taken from the caller.
 - **The local bridge.** `@auth/agent-cli mcp --url <gateway>` is a stdio MCP server that holds an agent's keys and exposes generic tools (`execute_capability`, …). Nothing in the gateway is specific to it.
-- **Rate limits** are Workers Rate Limiting bindings: registration 10/min per IP; OAuth registration and consent 20/min per IP and path; MPP 10/min; hooks 120/min per IP and 600/min per project. `/mcp` tool calls have none ([open question](PRODUCT.md#open-questions)).
+- **Rate limits** are Workers Rate Limiting bindings, alongside Better Auth's own limiter on the Agent Auth routes: registration 10/min per IP; OAuth registration and consent 20/min per IP and path; MPP 10/min; hooks 120/min per IP and 600/min per project. `/mcp` tool calls have none ([open question](PRODUCT.md#open-questions)).
 - **Billing.** `get_payment_link` creates a Checkout Session and returns `runlater.io/pay#key=…&secret=…` and an `mpp_url`. Payments reach the ledger through `POST /v1/projects/self/credits` (scope `billing`), keyed by session or PaymentIntent id, so a retried webhook adds nothing. `payment_intent.succeeded` is the backstop if an MPP credit fails after the charge.
 
 ### `apps/api`: the task authority
@@ -80,7 +80,7 @@ Not on any public route (`workers_dev: false`, no custom domain). It is reached 
 
 - **Assertions.** Each request carries `RunLater-Assertion`: `{aud, sub: project_id, scope, iat, exp}` signed with Ed25519 by the gateway, living at most 5 minutes. The route table in `worker_entry.rs` names the scope each route needs. Scopes: `project`, `schedule`, `read`, `cancel`, `secrets`, plus two no agent is granted: `billing` and `hooks.receive`. A shared test vector pins the format across TypeScript and Rust.
 - **The ledger.** `src/ledger.rs` is plain synchronous Rust behind a small `Db` trait, so the same code runs against rusqlite in `cargo test` and against Durable Object SQLite in workerd. A run of storage calls with no `await` between them commits atomically, and that is what makes "record the match and queue the action" one transaction.
-- **Sealing.** `src/sealing.rs` holds AES-256-GCM with a per-project key derived by HKDF from `SECRETS_KEY`. The API seals before the ledger stores and the consumer opens at send time, so the ledger never holds plaintext.
+- **Sealing.** `src/sealing.rs` holds AES-256-GCM with a per-project key derived by HKDF from `SECRETS_KEY`. The API seals before the ledger stores, so `ledger.rs` never holds plaintext. Two places open sealed values: the consumer at send time, and the Durable Object's entry code when it checks a hook's signature.
 - **Glue.** `src/worker_entry.rs` is the HTTP entry, the `TaskLedger` class, its alarm and the queue consumer.
 
 ### `apps/web`
@@ -107,6 +107,8 @@ Schema changes:
 
 ## How work moves
 
+**Admission.** Before accepting work, the ledger refuses it if the project has expired (`403 trial_expired`), if the task cap would be exceeded (`429 task_limit`), or if waiting tasks plus the new one would need more attempts than are left (`402 budget_exhausted`). A waiting task reserves one attempt, plus one for a callback to a URL and any for its `on_match` action. This keeps storage bounded by what the project has paid for or been given.
+
 **Delivery.** The task rows are the outbox; there is no separate table.
 
 1. Scheduling writes the task and arms the DO's alarm for the earliest due time.
@@ -116,7 +118,7 @@ Schema changes:
 
 **Inbox and wake.** Writing an event happens in the transaction that finishes the task. If a wake is set, the same step queues a `wake_call` task, debounced, delivered like any other.
 
-**Hooks.** The gateway applies its rate limits, reads at most 256 KiB and checks the project exists in D1, so a made-up id never creates a Durable Object. Then it forwards with a `hooks.receive` assertion. The ledger handles the rest in one transaction: token hash, signature, rate limit, filter, dedupe, caps, event.
+**Hooks.** The gateway applies its rate limits, reads at most 256 KiB and checks the project exists in D1, so a made-up id never creates a Durable Object. Then it forwards with a `hooks.receive` assertion. In the Durable Object, the entry code finds the hook by its token hash, opens the verify secret and checks the signature. The ledger then applies the rate limit, filter, dedupe and caps, and writes the event.
 
 **Secrets at send time.** The ledger re-checks each reference and hands over sealed values; the consumer opens them, fills headers, sends, and redacts echoes before anything is stored.
 
@@ -139,7 +141,7 @@ POST   /v1/projects                    create (idempotent)
 GET    /v1/projects/self
 POST   /v1/projects/self/credits       scope: billing
 POST   /v1/tasks                       schedule
-GET    /v1/tasks?status=&lane=&cursor=
+GET    /v1/tasks?status=&lane=&cursor=&limit=
 GET    /v1/tasks/{id}                  includes attempts
 POST   /v1/tasks/{id}/cancel
 POST   /v1/tasks/{id}/redrive
@@ -199,7 +201,7 @@ runlater/
 
 1. Change the rules in `PRODUCT.md` first; `crates/core/src/limits.rs` follows it.
 2. Define it in `packages/contracts/src/capabilities.ts`. That is what agents read and what the docs render.
-3. Map it to one API call in `apps/gateway/src/capabilities.ts`.
+3. Map it to one API call in `apps/gateway/src/capabilities.ts`, unless the gateway can answer it alone, as with `get_payment_link`.
 4. Add the route and its scope in `worker_entry.rs`, the logic in the ledger, and any schema change as a new `MIGRATIONS` entry.
 5. Add a D1 migration granting it to existing hosts. `test/host-capabilities.test.ts` fails until there is one.
 6. Update `openapi.yaml`, the delivery docs and `lib/site.ts` (the web test checks the stated limits against `crates/core`), then the plugin's `SKILL.md` and `reference.md`, bumping its version in both manifests.
@@ -207,7 +209,7 @@ runlater/
 
 ## Environments
 
-One `wrangler.jsonc` per app with `env.staging` and `env.production`. The Rust build has no Cargo feature flags of its own. Staging and production have separate D1, KV, queues and hostnames; see [DEPLOY.md](../DEPLOY.md).
+One `wrangler.jsonc` per app with `env.staging` and `env.production` (the receiver has staging only). The Rust build has no Cargo feature flags of its own. Staging and production have separate D1, KV, queues and hostnames; see [DEPLOY.md](../DEPLOY.md).
 
 ## Testing
 
@@ -224,7 +226,7 @@ One `wrangler.jsonc` per app with `env.staging` and `env.production`. The Rust b
 
 - **`ci.yml`** on every PR and on `main`: `cargo fmt`, `clippy` (native and wasm), `cargo test`; `typecheck`, `test`; then `wrangler deploy --dry-run` per Worker and both e2e suites.
 - **`deploy.yml`** after CI passes on `main`, if `DEPLOY_ENABLED`: staging, then production behind the environment's required reviewer. Order within an environment: API, D1 migrations, gateway, web, receiver (staging only), health check, journey (staging only). A failed journey stops production.
-- **`monitor.yml`**: health and the main site pages every 15 minutes, the journey against production daily. A failed run emails whoever last changed the workflow, and that is the only alert. Workers Logs are on for each Worker.
+- **`monitor.yml`**: health and the main site pages every 15 minutes, the journey against production daily. A failed run emails whoever last changed the workflow, and that is the only alert. Workers Logs are on for the API, gateway and web Workers.
 
 ## Risks
 

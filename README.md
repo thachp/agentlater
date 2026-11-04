@@ -20,7 +20,7 @@ cutover; it is in git history before this change.
 | `packages/tsconfig` | Shared TypeScript config | |
 | `plugins/runlater` | Claude Code plugin: the hosted MCP server and a `runlater` skill | Markdown · JSON |
 
-Everything deploys to Cloudflare Workers, with `staging` and `production` environments in each app's `wrangler.jsonc`; see [docs/DEPLOY.md](docs/DEPLOY.md).
+Everything deploys to Cloudflare Workers, with `staging` and `production` environments in each app's `wrangler.jsonc` (`apps/receiver` has staging only); see [docs/DEPLOY.md](docs/DEPLOY.md).
 
 ## Develop
 

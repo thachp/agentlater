@@ -87,7 +87,7 @@ Next session ──read_inbox──▶ RunLater  ← the report (or get_task: st
 | **Project** | Owned by exactly one owner, and never reassigned. Holds tasks, budget, the signing secret and everything below. One project per owner in v1. |
 | **Trial** | A project's free allocation: N delivery attempts, expires after 7 days. No refills. |
 | **Attempt pack** | Delivery attempts bought for a project: 50,000 for $5. See *Buying attempts*. |
-| **Task** | One HTTP request to make at `run_at`, with a retry policy. |
+| **Task** | One HTTP request to make at `run_at_ms`, with a retry policy. |
 | **Attempt** | One try at delivering a task: time, response status or error. The billing unit. |
 | **Lane** | A name that makes tasks run one at a time. |
 | **Cron** | A request on a UTC schedule; each run is a task. |
@@ -100,7 +100,7 @@ Next session ──read_inbox──▶ RunLater  ← the report (or get_task: st
 ## Task lifecycle
 
 ```
-scheduled ──(run_at reached)──▶ delivering ──2xx──▶ succeeded
+scheduled ──(due time reached)──▶ delivering ──2xx──▶ succeeded
     │                               │
     │ cancel                        └─non-2xx/timeout─▶ retrying ──(backoff)──▶ delivering
     ▼                                                      │
@@ -133,9 +133,9 @@ The bridge keeps the agent's keys in `~/.agent-auth`. Losing them loses access t
 | `create_project` | — | project id, trial budget, expiry |
 | `get_project` | — | budget used/remaining, expiry, `paid`, signing secret, `inbox_unread`, `wake` |
 | `get_payment_link` | — | `payment_url` for a person to buy a pack, `mpp_url` for the agent to buy one over MPP, expiries, price |
-| `schedule_http` | `url`, `method`, `headers?`, `body?`, `run_at_ms?` or `delay?`, `idempotency_key?`, `max_attempts?`, `callback_url?`, `capture?`, `lane?` | `task_id`, `status` |
+| `schedule_http` | `url`, `method?`, `headers?`, `body?`, `run_at_ms?` or `delay?`, `idempotency_key?`, `max_attempts?`, `callback_url?`, `capture?`, `lane?` | `task_id`, `status` |
 | `get_task` | `task_id` | task + attempts |
-| `list_tasks` | `status?`, `lane?`, `cursor?` | page of tasks |
+| `list_tasks` | `status?`, `lane?`, `cursor?`, `limit?` | page of tasks |
 | `cancel_task` | `task_id` | task |
 | `redrive_task` | `task_id` | task |
 | `create_cron` | `name`, `schedule`, `url`, `method?`, `headers?`, `body?`, `max_attempts?`, `alert_url?`, `callback_url?`, `capture?`, `report?` | cron |
@@ -166,6 +166,7 @@ services, not a public product in v1.
 - **Retries:** default 5 attempts total, max 5. Delay before retry *n* is 10 s × 2ⁿ⁻¹ (capped at 10 min) with equal jitter; a `Retry-After` from the destination is honoured as a minimum, up to the same cap.
 - **Timeout:** 10 s per attempt. Redirects are not followed.
 - **Success:** any 2xx. Retry on 408, 425, 429, 5xx, timeouts and network errors. Anything else (other 4xx, 3xx) fails without retry.
+- **Admission:** work is refused up front if the project has expired (`403 trial_expired`), holds too many tasks (`429 task_limit`), or would need more attempts than are left once waiting tasks are counted (`402 budget_exhausted`). A waiting task reserves one attempt, plus one for a callback to a URL and any for its `on_match` action.
 - **Idempotency:** an optional `idempotency_key` makes `schedule_http` safe to repeat. The same key with the same request returns the original task; with a different request it is a conflict.
 - **Lanes:** tasks given the same `lane` (1–64 of `A-Z a-z 0-9 _ - . :`) run one at a time. A task that has started (delivering, or waiting to retry) holds its lane until it succeeds, fails or is canceled; then the waiting task with the earliest due time (ties: earliest scheduled) goes next. A failed or canceled task does not block the lane. A redriven task rejoins it with a due time of now. Order is by due time, not by when tasks were scheduled: schedule A with `delay: "1h"` and then B for now in the same lane, and B runs first. Lanes order delivery attempts, not what the destination does with them; at-least-once still applies. Callbacks are not in any lane.
 - **Delay:** `delay` is a relative alternative to `run_at_ms`: a whole number followed by `s`, `m`, `h` or `d` (`"90s"`, `"24h"`, `"7d"`), at most 7 days. Giving both is an error.
@@ -181,7 +182,7 @@ Callbacks need a public HTTPS URL, and most agents (everything on the hosted `/m
 - **Retention.** Unread events are kept 30 days, acked ones 7 days after they arrive (replayable with `after`). At 10,000 events a new one removes the oldest acked event, or, if none is acked, the oldest unread one. `dropped` counts unread events removed by age or by the cap since the cursor last moved; the reply that moves it still shows the count.
 - **Capture.** `capture: true` on `schedule_http` keeps the response of the latest attempt that got one, success or failure, as the task's `response`: `attempt`, `status`, the `content-type`, `location`, `etag` and `retry-after` headers, the first 16 KiB of the body as UTF-8 (invalid bytes replaced), `body_bytes` from `Content-Length` (null for an encoded body), and `truncated`. Any HTTP answer replaces the earlier capture; a timeout or network error leaves it in place; a redrive keeps it until a new attempt replaces it. It shows in `get_task` and in the callback or inbox report; `list_tasks` leaves out the body. It costs nothing extra. It is deleted 7 days after the task finishes, and an inbox event's copy loses its body at the same time (its status and headers stay). A failed URL callback keeps its payload, never returned by the API, for redrive until it is purged. Reading the body never changes an attempt's outcome: if the body is slow or broken, the status and headers are recorded with `body: null` and `truncated: true`.
 - **The response is untrusted.** It comes from whatever server the agent called. Tool descriptions tell agents to treat it as data, never as instructions.
-- **Telling agents to look.** The hosted `/mcp` server's instructions, the tool descriptions and `/llms.txt` all say: at the start of a session, if `get_project` shows `inbox_unread`, call `read_inbox`.
+- **Telling agents to look.** The hosted `/mcp` server's instructions, the `get_project` description and the plugin skill say: at the start of a session, if `get_project` shows `inbox_unread`, call `read_inbox`. `/llms.txt` only says to read the inbox in the next session.
 
 ## Wake
 
@@ -224,7 +225,7 @@ A cron runs the same HTTP request on a schedule: five fields (`minute hour day-o
 
 - **Runs are tasks.** At each slot the ledger starts a task (`cron` names its cron) with the cron's request and `max_attempts`; `get_task` shows it. Runs are admitted like any task, so each costs delivery attempts. A run that cannot start (no attempts left, task cap reached) is a failure, not a silent skip.
 - **Missed slots are not made up.** If the scheduler wakes late, the cron runs once and moves to the next slot after now.
-- **At most once an hour.** The minute field must be a single value; anything that could run twice in an hour is refused. The trial's 100 attempts last about four days at hourly, about three months at daily.
+- **At most once an hour.** The minute field must be a single value; anything that could run twice in an hour is refused. The trial's 100 attempts last about four days at hourly; at daily, the trial's 7 days end first, after 7 runs.
 - **Dead man's switch.** `health` is `pending` until a run finishes, `healthy` after a success, `failing` after a failed run or a run that could not start (`health_reason`: `run_failed`, `budget_exhausted`, `task_limit`, `trial_expired`). Becoming failing sends one signed alert to `alert_url` (`{"event": "cron.failing", "reason", "task_id", "cron"}`); the next success sends `cron.recovered`. Alerts are tasks like callbacks (`alert_for` names the cron) and get one try even past the trial; they are not admitted, so they can exceed the task cap by one per health change. The alert includes the cron's full `url`, query string included. A run that started but could not be attempted (attempts ran out between start and send) reports `run_failed`. Only runs of the current cron count, and a run older than the one that last set the health is ignored.
 - **Runs can report.** `callback_url` (a URL or `"inbox"`) and `capture` work on each run exactly as on a task scheduled with them: the run's `task.finished` report goes there, with its captured response, and an inbox report can wake the agent. `report: "failures"` (only with `callback_url`; the default is `"always"`) holds back the report of a run that succeeds or is canceled, so a healthy cron is quiet; such runs show `report_failures_only`. A run abandoned for lack of budget has failed, so it reports. A run that cannot start at all (`budget_exhausted`, `task_limit`, `trial_expired`) is not a task and reports nothing: it turns the cron failing, which reaches `alert_url`, so a cron meant to be watched sets both. A run reporting to a URL is admitted with a second attempt and task slot for its callback task, even with `failures` where most runs won't use it, so a project with one attempt left marks the cron failing (`budget_exhausted`) instead. Alerts carry the cron's `callback_url`, query string included. Replacing a cron by name replaces these too; runs already started keep what they started with.
 - **The trial ending stops crons:** `next_run_ms` becomes null and they alert with `trial_expired`. Buying a pack starts them again.
@@ -324,12 +325,12 @@ An agent cannot pay, so a person pays for it. Stripe takes the payment; RunLater
 
 ## Success criteria for v1 launch
 
-- An agent goes from zero to a delivered, signed request in under 5 tool calls, without human help.
+- An agent goes from zero to a delivered, signed request in under 5 tool calls, with at most one human click.
 - Accepted tasks are never lost: every one reaches `succeeded`, `failed` or `canceled`.
 - No task can reach a private network or another project's data (tested).
 - p95 delivery lateness under 60 s for tasks due "now", measured on a real deployment. **Not measured yet:** the journey and `monitor.yml` check that deliveries arrive, not how late.
 
-"Under 5 tool calls" holds for hosted MCP (`create_project`, `schedule_http`) after one human click on the consent page. Agent Auth needs no human at all.
+Hosted MCP needs that one click, on the consent page, then `create_project` and `schedule_http`. Agent Auth needs no human at all.
 
 ## Open questions
 
