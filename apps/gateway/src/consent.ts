@@ -14,6 +14,9 @@ export interface ConsentEnv {
 const escape = (s: string) =>
   s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
 
+/** The site's icon (apps/web/app/icon.svg), inline because the CSP allows no images. */
+const ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" aria-hidden="true"><rect width="40" height="40" rx="10" fill="#db4b27"/><path d="M29 13a12 12 0 1 0 3 9M20 10v11l7 4M25 8h8v8" fill="none" stroke="#fffefa" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
 function page(title: string, body: string, headers: Headers = new Headers(), status = 200): Response {
   headers.set("Content-Type", "text/html; charset=utf-8");
   headers.set("Cache-Control", "no-store");
@@ -22,17 +25,21 @@ function page(title: string, body: string, headers: Headers = new Headers(), sta
   // is what stops a forged post.
   headers.set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'");
   headers.set("X-Frame-Options", "DENY");
+  // Colors copy the site's tokens (apps/web/app/globals.css); this page can't load its stylesheet.
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${escape(title)} · RunLater</title><style>
-:root{color-scheme:light dark;--fg:#16181d;--muted:#5d6370;--bg:#f7f7f5;--card:#fff;--line:#e3e3df;--accent:#2f5bd3}
-@media (prefers-color-scheme:dark){:root{--fg:#ecedf0;--muted:#a0a5b0;--bg:#121318;--card:#1b1d24;--line:#2c2f39;--accent:#7d9cf0}}
-body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;padding:16px;box-sizing:border-box}
-main{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:28px;max-width:440px;width:100%;box-sizing:border-box}
-h1{font-size:21px;margin:0 0 12px}p{margin:0 0 12px}.muted{color:var(--muted);font-size:14px}code{font-size:14px;overflow-wrap:anywhere}
-.warn{border-left:3px solid #c98a12;padding:6px 12px;font-size:14px}
-.actions{display:flex;gap:10px;margin-top:20px}button{font:inherit;border-radius:8px;padding:9px 16px;cursor:pointer;border:1px solid var(--line);background:transparent;color:var(--fg)}
-button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-</style></head><body><main>${body}</main></body></html>`;
+:root{color-scheme:light dark;--paper:#f5f3ee;--card:#fffefa;--ink:#20231f;--muted:#5d635a;--line:#dedfd6;--accent:#bf4325;--soft:#fce7dd}
+@media (prefers-color-scheme:dark){:root{--paper:#161816;--card:#1e211e;--ink:#ecebe4;--muted:#a3a99f;--line:#2f332e;--accent:#e3693f;--soft:#3a2219}}
+body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;display:grid;place-items:center;min-height:100vh;padding:16px;box-sizing:border-box}
+.shell{max-width:440px;width:100%}
+.brand{display:flex;align-items:center;gap:10px;font-weight:650;font-size:17px;margin:0 0 16px}.brand svg{width:28px;height:28px;flex:none}
+main{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:28px;box-sizing:border-box}
+h1{font-size:22px;line-height:1.15;font-weight:600;letter-spacing:-0.02em;margin:0 0 14px;overflow-wrap:anywhere}p{margin:0 0 12px}.muted{color:var(--muted);font-size:14px}
+code{font:0.9em ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--soft);padding:0.1em 0.35em;border-radius:5px;overflow-wrap:anywhere}
+.warn{border-left:3px solid var(--accent);padding:6px 12px;font-size:14px}
+.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}button{font:inherit;font-weight:600;border-radius:10px;padding:9px 16px;cursor:pointer;border:1px solid var(--ink);background:transparent;color:var(--ink)}
+button.primary{background:var(--ink);color:var(--paper)}button:hover{opacity:0.88}button:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
+</style></head><body><div class="shell"><p class="brand">${ICON}RunLater</p><main>${body}</main></div></body></html>`;
   return new Response(html, { status, headers });
 }
 
