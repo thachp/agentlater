@@ -443,7 +443,12 @@ impl TaskLedger {
                 match body::<CreditBody>(req).await {
                     Ok(c) => ledger
                         .add_credit(&c.payment_id, c.attempts, t)
-                        .map(|(p, added)| created(&p, added)),
+                        .map(|(p, added)| {
+                            if added {
+                                record_stat(&self.env, &p.id, "payment", "real", c.attempts as f64);
+                            }
+                            created(&p, added)
+                        }),
                     Err(e) => Err(e),
                 }
             }
@@ -743,6 +748,42 @@ async fn call<T: DeserializeOwned>(
     res.json().await
 }
 
+/// `double1` of an attempt whose lateness says nothing about RunLater ([`Delivery::late_ms`]).
+const NOT_MEASURED: f64 = -1.0;
+
+/// Whether an attempt is real use or the monitor's journey, which delivers to our own receiver.
+fn attempt_source(url: &str) -> &'static str {
+    let probe = Url::parse(url)
+        .ok()
+        .and_then(|u| {
+            u.host_str()
+                .map(|h| h.starts_with("runlater-receiver-") && h.ends_with(".workers.dev"))
+        })
+        .unwrap_or(false);
+    if probe {
+        "probe"
+    } else {
+        "real"
+    }
+}
+
+/// Adds a row to the numbers `scripts/stats.mjs` reports. Holds no URLs or contents. A failed
+/// write loses one row of a statistic, so it never gets in the way of the work being counted.
+fn record_stat(env: &Env, project_id: &str, event: &str, source: &str, value: f64) {
+    let point = AnalyticsEngineDataPointBuilder::new()
+        .indexes([project_id])
+        .add_blob(event)
+        .add_blob(source)
+        .add_double(value)
+        .build();
+    if let Err(e) = env
+        .analytics_engine("STATS")
+        .and_then(|stats| stats.write_data_point(&point))
+    {
+        console_error!("recording a {event} stat failed: {e}");
+    }
+}
+
 async fn process(env: &Env, d: &Dispatch) -> Result<()> {
     if !assertion::valid_project_id(&d.project_id) {
         return Ok(());
@@ -758,6 +799,13 @@ async fn process(env: &Env, d: &Dispatch) -> Result<()> {
     let Some(delivery) = claim.deliver else {
         return Ok(());
     };
+    record_stat(
+        env,
+        &d.project_id,
+        "attempt",
+        attempt_source(&delivery.url),
+        delivery.late_ms.map_or(NOT_MEASURED, |ms| ms as f64),
+    );
     // Secrets are opened only here, and only for as long as this attempt takes.
     let values = match open_secrets(env, &d.project_id, &delivery.secrets) {
         Some(values) => values,
