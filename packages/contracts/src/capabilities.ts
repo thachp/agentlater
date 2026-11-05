@@ -155,7 +155,7 @@ export const capabilities: CapabilityDefinition[] = [
       required: ["url"],
       properties: {
         ...HTTP_REQUEST,
-        run_at_ms: { type: "integer", minimum: 0, description: "When to send, unix ms. Omit to send now. Not with delay." },
+        run_at_ms: { type: "integer", minimum: 0, description: "When to send, unix ms. Not with delay. With neither, it sends now, but prefer queue_http for that." },
         delay: {
           type: "string",
           pattern: "^[0-9]{1,7}[smhd]$",

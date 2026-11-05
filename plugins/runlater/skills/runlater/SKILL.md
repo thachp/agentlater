@@ -1,6 +1,6 @@
 ---
 name: runlater
-description: Use RunLater's MCP tools to make an HTTP request later, retry it until it succeeds, run it on a schedule, poll a status URL until a job finishes, receive webhooks, or find out in a later session what happened. Use when the user asks to call a URL at a time ("at 9am", "in 2 hours", "tomorrow"), repeat a request (cron, "every day"), wait on a deploy, build or job and act when it's done, retry a flaky webhook, get notified by GitHub, Stripe or CI, or check on something scheduled earlier. Also use at the start of a session when RunLater is connected, to check the inbox.
+description: Use RunLater's MCP tools to make an HTTP request later or in the background, run related requests one at a time, retry it until it succeeds, run it on a schedule, poll a status URL until a job finishes, receive webhooks, or find out in a later session what happened. Use when the user asks to call a URL at a time ("at 9am", "in 2 hours", "tomorrow"), repeat a request (cron, "every day"), wait on a deploy, build or job and act when it's done, retry a flaky webhook, get notified by GitHub, Stripe or CI, or check on something scheduled earlier. Also use at the start of a session when RunLater is connected, to check the inbox.
 ---
 
 # RunLater

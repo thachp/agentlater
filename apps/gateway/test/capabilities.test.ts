@@ -98,6 +98,16 @@ describe("capabilities", () => {
     }
   });
 
+  it("accept every argument queue_http advertises", () => {
+    const { properties } = capabilities.find((c) => c.name === "queue_http")!.input;
+    for (const field of Object.keys(properties)) {
+      expect(() => route("queue_http", { url: "https://a.example.com/", [field]: field === "url" ? "https://a.example.com/" : "x" })).not.toThrow(/unknown argument/);
+    }
+    // Everything but the queue goes to the API as given, and schedule_http takes the same fields.
+    const schedule = capabilities.find((c) => c.name === "schedule_http")!.input.properties;
+    for (const field of Object.keys(properties)) if (field !== "queue") expect(schedule[field]).toEqual(properties[field]);
+  });
+
   it("refuse unknown or invalid arguments", () => {
     expect(() => route("get_project", { project_id: "other" })).toThrow(/unknown argument/);
     expect(() => route("get_task", { task_id: ID, extra: 1 })).toThrow(ArgumentError);
@@ -111,7 +121,13 @@ describe("capabilities", () => {
     expect(() => route("list_tasks", { queue: "a", lane: "b" })).toThrow(ArgumentError);
     expect(() => route("queue_http", { url: "https://a.example.com/", delay: "1h" })).toThrow(/schedule_http/);
     expect(() => route("queue_http", { url: "https://a.example.com/", run_at_ms: 1 })).toThrow(/schedule_http/);
-    expect(() => route("queue_http", { url: "https://a.example.com/", lane: "a" })).toThrow(/unknown argument/);
+    expect(() => route("queue_http", { url: "https://a.example.com/", lane: "a" })).toThrow(/takes queue/);
+    expect(() => route("queue_http", { url: "https://a.example.com/", extra: 1 })).toThrow(/unknown argument/);
+    expect(route("queue_http", { url: "https://a.example.com/", queue: null, delay: null, run_at_ms: null }).body).toEqual({
+      url: "https://a.example.com/",
+    });
+    expect(route("list_tasks", { queue: null, lane: "a" }).path).toBe("/v1/tasks?lane=a");
+    expect(route("list_tasks", { queue: "a", lane: null }).path).toBe("/v1/tasks?lane=a");
     expect(() => route("queue_http", { url: "https://a.example.com/", queue: "a b" })).toThrow(ArgumentError);
     expect(() => route("nope", {})).toThrow(ArgumentError);
   });
