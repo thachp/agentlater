@@ -29,9 +29,25 @@ jobs:
         run: curl --fail --silent --show-error --max-time 10 --retry 3 --retry-all-errors "$GATEWAY_URL/health"
       - name: Site
         run: |
-          for path in / /docs /docs/capabilities /docs/delivery; do
+          for path in / /docs /docs/capabilities /docs/delivery /pay /terms /privacy; do
             curl --fail --silent --show-error --output /dev/null --max-time 10 --retry 3 --retry-all-errors "$SITE_URL$path"
           done
+
+  billing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Fails if a deploy drops the Stripe settings: without them the paid endpoint leaves
+      # /openapi.json and the webhook answers 404 rather than rejecting the missing signature.
+      # Spends nothing: no payment link is made and no charge is started.
+      - name: Billing
+        run: |
+          curl --fail --silent --show-error --max-time 10 --retry 3 --retry-all-errors "$GATEWAY_URL/openapi.json" \
+            | jq --exit-status '.paths["/billing/mpp/{link}"].post["x-payment-info"]' > /dev/null
+          curl --fail --silent --show-error --output /dev/null --max-time 10 --retry 3 --retry-all-errors "$GATEWAY_URL/llms.txt"
+          status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 10 --retry 3 --retry-all-errors \
+            --request POST --data '{}' "$GATEWAY_URL/billing/webhook")
+          test "$status" = 400 || { echo "unsigned webhook answered $status, expected 400"; exit 1; }
 
   # A real agent registers with production, creates a project and schedules deliveries. The
   # receiver is the staging fixture (a public workers.dev URL); its token lives in the staging

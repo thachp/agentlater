@@ -191,7 +191,9 @@ on 2026-10-28/29; everything after was scanners. The `harimu-*` Workers in the s
 
 [`monitor.yml`](../.github/workflows/monitor.yml) probes production:
 
-- Every 15 minutes: `gateway.runlater.io/health` (which also checks the API) and the site's main pages.
+- Every 15 minutes: `gateway.runlater.io/health` (which also checks the API), the site's main, pay and
+  legal pages, and that billing is configured: the paid endpoint in `/openapi.json`, and a 400 for an
+  unsigned webhook. This doesn't catch a missing `STRIPE_PUBLISHABLE_KEY`, or prove a charge works.
 - Daily, and on manual dispatch: the full agent journey against production, delivering to the staging
   receiver. Each run leaves one agent, two trial projects (Agent Auth and hosted MCP) and one OAuth
   client and grant in production.
