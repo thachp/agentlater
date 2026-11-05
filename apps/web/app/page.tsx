@@ -57,7 +57,7 @@ const CONNECT = [
 
 const CAPABILITIES = [
   ["Do it later", "Send a signed HTTPS request in 90 seconds or 7 days, retried with backoff until it lands.", "schedule_http"],
-  ["Do it in order", "Tasks in one lane run one at a time, in order, even through retries.", "lane"],
+  ["Do it now, in order", "Queue a request to run in the background. Requests in one queue run one at a time, in order, even through retries.", "queue_http"],
   ["Do it every day", "Crons on a UTC schedule, with an alert when runs start failing.", "create_cron"],
   ["Wait for a job, then act", "Poll a status URL until it says done, then send the next request itself.", "watch_http · on_match"],
   ["Hear back without a server", "Results, captured responses and alerts land in an inbox the next session reads.", "read_inbox · capture"],

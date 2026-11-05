@@ -10,6 +10,7 @@ describe("capabilities", () => {
       "get_project",
       "get_payment_link",
       "schedule_http",
+      "queue_http",
       "get_task",
       "list_tasks",
       "cancel_task",
@@ -46,6 +47,13 @@ describe("capabilities", () => {
       scope: "schedule",
       body: { url: "https://a.example.com/" },
     });
+    expect(route("queue_http", { url: "https://a.example.com/", queue: "payments" })).toEqual({
+      method: "POST",
+      path: "/v1/tasks",
+      scope: "schedule",
+      body: { url: "https://a.example.com/", lane: "payments" },
+    });
+    expect(route("queue_http", { url: "https://a.example.com/" }).body).toEqual({ url: "https://a.example.com/" });
     expect(route("get_task", { task_id: ID })).toMatchObject({ method: "GET", path: `/v1/tasks/${ID}`, scope: "read" });
     expect(route("cancel_task", { task_id: ID })).toMatchObject({ path: `/v1/tasks/${ID}/cancel`, scope: "cancel" });
     expect(route("redrive_task", { task_id: ID })).toMatchObject({ path: `/v1/tasks/${ID}/redrive`, scope: "schedule" });
@@ -98,6 +106,13 @@ describe("capabilities", () => {
     expect(() => route("list_tasks", { limit: 500 })).toThrow(ArgumentError);
     expect(() => route("list_tasks", { lane: "a&status=x" })).toThrow(ArgumentError);
     expect(route("list_tasks", { lane: "payments:eu" }).path).toBe("/v1/tasks?lane=payments%3Aeu");
+    expect(route("list_tasks", { queue: "payments:eu" }).path).toBe("/v1/tasks?lane=payments%3Aeu");
+    expect(() => route("list_tasks", { queue: "a&status=x" })).toThrow(ArgumentError);
+    expect(() => route("list_tasks", { queue: "a", lane: "b" })).toThrow(ArgumentError);
+    expect(() => route("queue_http", { url: "https://a.example.com/", delay: "1h" })).toThrow(/schedule_http/);
+    expect(() => route("queue_http", { url: "https://a.example.com/", run_at_ms: 1 })).toThrow(/schedule_http/);
+    expect(() => route("queue_http", { url: "https://a.example.com/", lane: "a" })).toThrow(/unknown argument/);
+    expect(() => route("queue_http", { url: "https://a.example.com/", queue: "a b" })).toThrow(ArgumentError);
     expect(() => route("nope", {})).toThrow(ArgumentError);
   });
 });

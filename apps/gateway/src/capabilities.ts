@@ -59,15 +59,18 @@ function secretName(args: Args): string {
 }
 
 function listQuery(args: Args): string {
-  only(args, ["status", "lane", "cursor", "limit"]);
+  only(args, ["status", "queue", "lane", "cursor", "limit"]);
+  if (args.queue !== undefined && args.lane !== undefined) throw new ArgumentError("pass queue or lane, not both", "queue");
   const q = new URLSearchParams();
   if (args.status !== undefined) {
     if (typeof args.status !== "string" || !STATUSES.includes(args.status)) throw new ArgumentError("unknown status", "status");
     q.set("status", args.status);
   }
-  if (args.lane !== undefined) {
-    if (typeof args.lane !== "string" || !new RegExp(LANE_PATTERN).test(args.lane)) throw new ArgumentError("invalid lane", "lane");
-    q.set("lane", args.lane);
+  const field = args.queue !== undefined ? "queue" : "lane";
+  if (args[field] !== undefined) {
+    const value = args[field];
+    if (typeof value !== "string" || !new RegExp(LANE_PATTERN).test(value)) throw new ArgumentError(`invalid ${field}`, field);
+    q.set("lane", value);
   }
   if (args.cursor !== undefined) {
     if (typeof args.cursor !== "string" || !/^[0-9]{1,16}$/.test(args.cursor)) throw new ArgumentError("invalid cursor", "cursor");
@@ -95,6 +98,17 @@ export function route(capability: string, args: Args): { method: "GET" | "POST";
     case "schedule_http":
       // The API validates the request fully and names the failing field.
       return { method: "POST", path: "/v1/tasks", scope: "schedule", body: args };
+    case "queue_http": {
+      // A queue is a lane to the API, which validates the rest of the request.
+      for (const field of ["run_at_ms", "delay"]) {
+        if (args[field] !== undefined) throw new ArgumentError("queue_http sends as soon as possible; use schedule_http for a later time", field);
+      }
+      only(args, ["url", "method", "headers", "body", "callback_url", "capture", "idempotency_key", "max_attempts", "queue"]);
+      const { queue, ...request } = args;
+      if (queue === undefined) return { method: "POST", path: "/v1/tasks", scope: "schedule", body: request };
+      if (typeof queue !== "string" || !new RegExp(LANE_PATTERN).test(queue)) throw new ArgumentError("invalid queue", "queue");
+      return { method: "POST", path: "/v1/tasks", scope: "schedule", body: { ...request, lane: queue } };
+    }
     case "get_task":
       return { method: "GET", path: `/v1/tasks/${taskId(args)}`, scope: "read" };
     case "list_tasks":

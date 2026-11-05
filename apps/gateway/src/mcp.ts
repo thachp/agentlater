@@ -25,7 +25,7 @@ export interface McpEnv extends BillingEnv {
 
 const INSTRUCTIONS =
   "RunLater makes HTTP requests later and records whether they happened. Call create_project once, " +
-  "then schedule_http (one request), create_cron (a repeating one) or watch_http (poll until done; on_match sends the next request itself when it matches). " +
+  "then schedule_http (one request at a time you choose), queue_http (one request as soon as possible; a named queue runs related ones one at a time), create_cron (a repeating one) or watch_http (poll until done; on_match sends the next request itself when it matches). " +
   "To learn the result in a later session without a public URL of your own, pass callback_url: \"inbox\" " +
   "(and capture: true to keep the response). At the start of a session, if get_project shows inbox_unread above 0, " +
   "call read_inbox and ack what you handle. If something can start you without a person (a routine or workflow trigger), " +

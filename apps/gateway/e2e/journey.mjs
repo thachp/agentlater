@@ -10,7 +10,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { connectHosted } from "./oauth.mjs";
 
 const CAPABILITIES = [
-  "create_project", "get_project", "schedule_http", "get_task", "list_tasks", "cancel_task", "redrive_task",
+  "create_project", "get_project", "schedule_http", "queue_http", "get_task", "list_tasks", "cancel_task", "redrive_task",
   "create_cron", "get_cron", "list_crons", "delete_cron", "watch_http",
   "read_inbox", "ack_inbox", "set_wake", "delete_wake",
   "set_secret", "list_secrets", "delete_secret",
@@ -125,9 +125,9 @@ export async function runJourney(c) {
   // 2. A 503 is retried with backoff and then succeeds. It holds its lane meanwhile: the
   //    task queued behind it is delivered only after the retry.
   const lane = `journey-${run}`;
-  const flaky = await exec("schedule_http", { url: hook("flaky"), lane });
+  const flaky = await exec("queue_http", { url: hook("flaky"), queue: lane });
   const behind = await exec("schedule_http", { url: hook("behind"), lane });
-  check(flaky.lane === lane && behind.lane === lane, "schedule_http did not keep the lane");
+  check(flaky.lane === lane && behind.lane === lane, "queue_http and schedule_http did not share the queue");
   const flakyDone = await settled(flaky, ["succeeded", "failed"]);
   const outcomes = flakyDone.attempts.map((a) => a.outcome);
   check(

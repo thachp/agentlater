@@ -60,7 +60,7 @@ export default function Quickstart() {
       </p>
       <p>
         Each RunLater capability is a tool: <code>create_project</code>, then <code>schedule_http</code>,{" "}
-        <code>create_cron</code> or <code>watch_http</code>, and later <code>get_task</code>. If the connection is
+        <code>queue_http</code>, <code>create_cron</code> or <code>watch_http</code>, and later <code>get_task</code>. If the connection is
         removed, so is access to its project; connecting again starts a new one.
       </p>
 
