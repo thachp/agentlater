@@ -569,6 +569,11 @@ pub struct Delivery {
     /// just before sending, and redacts their values from any response it reports.
     #[serde(default)]
     pub secrets: Vec<SealedSecret>,
+    /// How long after its scheduled time this attempt started, when that says something about
+    /// RunLater: only a first attempt at the task's original time. A task waiting its turn in a
+    /// lane, a wake held back on purpose, a retry and a redrive are late by design.
+    #[serde(default)]
+    pub late_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1668,6 +1673,7 @@ impl<'a, D: Db> Ledger<'a, D> {
                 return Ok(Claimed::Skip("stale"));
             }
         };
+        let on_schedule = task.due_ms == row.run_at_ms && row.lane.is_none() && row.wake_call == 0;
         let attempt: Attempt = match task.claim(generation, now) {
             Ok(a) => a,
             Err(ClaimError::Stale) => return Ok(Claimed::Skip("stale")),
@@ -1704,6 +1710,7 @@ impl<'a, D: Db> Ledger<'a, D> {
             read_body: row.watch.is_some() || row.capture != 0,
             capture: row.capture != 0,
             secrets,
+            late_ms: (on_schedule && attempt.number == 1).then(|| (now - row.run_at_ms).max(0)),
         })))
     }
 
@@ -3318,6 +3325,52 @@ mod tests {
             Claimed::Deliver(d) => *d,
             other => panic!("expected delivery, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_first_attempt_reports_how_late_it_started() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let (t, _) = l
+            .schedule(req("https://api.stripe.com/"), "t1", T0)
+            .unwrap();
+        let d = l.publish_due(P, T0 + 40).unwrap().remove(0);
+        let first = deliver(&l, &d, T0 + 40);
+        assert_eq!(first.late_ms, Some(40));
+
+        l.finish(&t.id, first.fence, http(500), T0 + 50, 0.0)
+            .unwrap();
+        let due = l.task(&t.id).unwrap().next_attempt_ms.unwrap();
+        let d = l.publish_due(P, due).unwrap().remove(0);
+        assert_eq!(
+            deliver(&l, &d, due + 5).late_ms,
+            None,
+            "a retry is late by design"
+        );
+    }
+
+    #[test]
+    fn a_redrive_or_a_lane_does_not_count_as_late() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let once = ScheduleRequest {
+            max_attempts: Some(1),
+            ..req("https://api.stripe.com/")
+        };
+        let (t, _) = l.schedule(once, "t1", T0).unwrap();
+        let d = l.publish_due(P, T0).unwrap().remove(0);
+        let first = deliver(&l, &d, T0);
+        l.finish(&t.id, first.fence, http(500), T0 + 1, 0.0)
+            .unwrap();
+        l.redrive(&t.id, T0 + 1_000).unwrap();
+        let d = l.publish_due(P, T0 + 1_000).unwrap().remove(0);
+        assert_eq!(deliver(&l, &d, T0 + 1_000).late_ms, None);
+
+        let db = Memory::new();
+        let l = setup(&db);
+        l.schedule(in_lane("a", T0), "t1", T0).unwrap();
+        let d = l.publish_due(P, T0 + 40).unwrap().remove(0);
+        assert_eq!(deliver(&l, &d, T0 + 40).late_ms, None);
     }
 
     #[test]

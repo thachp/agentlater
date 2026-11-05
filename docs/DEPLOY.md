@@ -200,6 +200,18 @@ workflows after 60 days without repository activity; re-enable it under Actions 
 The API, gateway and web Workers have Workers Logs on (`observability` in each `wrangler.jsonc`), so
 request logs and exceptions are searchable in the Cloudflare dashboard.
 
+### Numbers
+
+Delivery lateness and usage come from Workers Analytics Engine, which keeps about three months. The
+token needs Account Analytics Read, which is not in the deploy token's permissions:
+
+```bash
+CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_STATS_TOKEN=... node scripts/stats.mjs --days 7
+```
+
+Add `--env staging` for staging. `probe` rows are the monitor's journey, delivering to the staging
+receiver; `real` rows are everything else.
+
 ## Rollback
 
 ```bash

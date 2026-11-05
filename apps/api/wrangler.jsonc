@@ -14,6 +14,8 @@
   // GATEWAY_PUBLIC_KEY (hex Ed25519 public key) is passed with `--var` at deploy (docs/DEPLOY.md).
   "durable_objects": { "bindings": [{ "name": "LEDGER", "class_name": "TaskLedger" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TaskLedger"] }],
+  // Delivery lateness and usage, per project and without URLs or contents; scripts/stats.mjs reads them.
+  "analytics_engine_datasets": [{ "binding": "STATS", "dataset": "runlater_stats" }],
   "queues": {
     "producers": [{ "binding": "READY", "queue": "runlater-ready" }],
     "consumers": [{ "queue": "runlater-ready", "max_batch_size": 10, "max_batch_timeout": 1, "max_retries": 5 }]
@@ -22,6 +24,7 @@
     "staging": {
       "name": "runlater-api-staging",
       "durable_objects": { "bindings": [{ "name": "LEDGER", "class_name": "TaskLedger" }] },
+      "analytics_engine_datasets": [{ "binding": "STATS", "dataset": "runlater_stats_staging" }],
       "queues": {
         "producers": [{ "binding": "READY", "queue": "runlater-ready-staging" }],
         "consumers": [{ "queue": "runlater-ready-staging", "max_batch_size": 10, "max_batch_timeout": 1, "max_retries": 5 }]
@@ -30,6 +33,7 @@
     "production": {
       "name": "runlater-api-production",
       "durable_objects": { "bindings": [{ "name": "LEDGER", "class_name": "TaskLedger" }] },
+      "analytics_engine_datasets": [{ "binding": "STATS", "dataset": "runlater_stats_production" }],
       "queues": {
         "producers": [{ "binding": "READY", "queue": "runlater-ready-production" }],
         "consumers": [{ "queue": "runlater-ready-production", "max_batch_size": 10, "max_batch_timeout": 1, "max_retries": 5 }]

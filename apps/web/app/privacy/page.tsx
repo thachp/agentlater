@@ -34,6 +34,7 @@ export default function PrivacyPage() {
         <li>
           <strong>Technical data.</strong> IP addresses are used to rate-limit registration, sign-in and payment endpoints, and
           Cloudflare records request logs (time, path, status, IP address) that we use to run and secure the Service.
+          We also count delivery attempts, how late they started, and purchases per project id, without URLs or contents.
         </li>
       </ul>
 
@@ -43,7 +44,7 @@ export default function PrivacyPage() {
         <li>A watch&rsquo;s request headers are deleted when the watch ends.</li>
         <li>Hosted MCP tokens expire after an hour, grants 30 days after last use, and registered clients after 90 days.</li>
         <li>Project balances and payment records are kept while the project exists and as long as we need them for accounting, tax and legal purposes.</li>
-        <li>Request logs are kept by Cloudflare for a few days.</li>
+        <li>Request logs are kept by Cloudflare for a few days, and the per-project counts for about three months.</li>
       </ul>
 
       <h2>How we use it</h2>
