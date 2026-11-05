@@ -226,7 +226,7 @@ One `wrangler.jsonc` per app with `env.staging` and `env.production` (the receiv
 
 - **`ci.yml`** on every PR and on `main`: `cargo fmt`, `clippy` (native and wasm), `cargo test`; `typecheck`, `test`; then `wrangler deploy --dry-run` per Worker and both e2e suites.
 - **`deploy.yml`** after CI passes on `main`, if `DEPLOY_ENABLED`: staging, then production behind the environment's required reviewer. Order within an environment: API, D1 migrations, gateway, web, receiver (staging only), health check, journey (staging only). A failed journey stops production.
-- **`monitor.yml`**: health and the main site pages every 15 minutes, the journey against production daily. A failed run emails whoever last changed the workflow, and that is the only alert. Workers Logs are on for the API, gateway and web Workers.
+- **`monitor.yml`**: health, the main, pay and legal pages, and billing configuration every 15 minutes, the journey against production daily. A failed run emails whoever last changed the workflow, and that is the only alert. Workers Logs are on for the API, gateway and web Workers.
 
 ## Risks
 

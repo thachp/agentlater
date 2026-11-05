@@ -32,6 +32,11 @@ jobs:
           for path in / /docs /docs/capabilities /docs/delivery /pay /terms /privacy; do
             curl --fail --silent --show-error --output /dev/null --max-time 10 --retry 3 --retry-all-errors "$SITE_URL$path"
           done
+
+  billing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
       # Fails if a deploy drops the Stripe settings: without them the paid endpoint leaves
       # /openapi.json and the webhook answers 404 rather than rejecting the missing signature.
       # Spends nothing: no payment link is made and no charge is started.
