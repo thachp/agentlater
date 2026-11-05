@@ -62,6 +62,8 @@ and `env.production`, with that environment's resource name.
 
 - `compatibility_flags: ["global_fetch_strictly_public"]` on the API Worker.
 - `durable_objects.bindings` for `TaskLedger`, plus `migrations: [{ "tag": "v1", "new_sqlite_classes": ["TaskLedger"] }]`.
+- `analytics_engine_datasets` for `STATS`: `runlater_stats_staging` and `runlater_stats_production`. Each is
+  created by its first write.
 - Queues `runlater-ready-staging` and `runlater-ready-production` exist (created 2026-10-31). Each queue
   must exist before the first deploy that references it.
 - Ed25519 assertion public key as a `vars` entry on the API (it's not secret).
@@ -211,6 +213,14 @@ CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_STATS_TOKEN=... node scripts/stats.mjs --da
 
 Add `--env staging` for staging. `probe` rows are the monitor's journey, delivering to the staging
 receiver; `real` rows are everything else.
+
+Reading them:
+
+- A row is written when an attempt is claimed, so a stuck queue writes nothing until it clears, and a
+  task abandoned before its first attempt never counts as late. In an outage, falling volume is the
+  signal, not p95.
+- p95 is weighted by volume, so one project's burst can drive it.
+- Under heavy sampling `max_ms` is a lower bound and `packs` an estimate. Stripe has the true payments.
 
 ## Rollback
 

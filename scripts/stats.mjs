@@ -38,23 +38,28 @@ async function query(sql) {
   return (await res.json()).data;
 }
 
-const usage = await query(
-  `SELECT blob2 AS source, COUNT(DISTINCT index1) AS projects, SUM(_sample_interval) AS attempts ${from} AND blob1 = 'attempt' GROUP BY source ORDER BY source`,
-);
-const lateness = await query(
-  `SELECT blob2 AS source, SUM(_sample_interval) AS measured, ` +
-    `quantileExactWeighted(0.5, double1, _sample_interval) AS p50_ms, ` +
-    `quantileExactWeighted(0.95, double1, _sample_interval) AS p95_ms, ` +
-    `MAX(double1) AS max_ms ${from} AND blob1 = 'attempt' AND double1 >= 0 GROUP BY source ORDER BY source`,
-);
-const payments = await query(
-  `SELECT COUNT(DISTINCT index1) AS projects, SUM(_sample_interval) AS packs ${from} AND blob1 = 'payment'`,
+console.log(`${values.env}, last ${days} days`);
+
+console.log("\nUsage");
+console.table(
+  await query(
+    `SELECT blob2 AS source, COUNT(DISTINCT index1) AS projects, SUM(_sample_interval) AS attempts ${from} AND blob1 = 'attempt' GROUP BY source ORDER BY source`,
+  ),
 );
 
-console.log(`${values.env}, last ${days} days`);
-console.log("\nUsage");
-console.table(usage);
-console.log("Lateness of first attempts (launch target: real p95 under 60000 ms)");
-console.table(lateness);
 console.log("Payments");
-console.table(payments);
+console.table(
+  await query(
+    `SELECT COUNT(DISTINCT index1) AS projects, SUM(_sample_interval) AS packs, SUM(_sample_interval * double1) AS attempts_bought ${from} AND blob1 = 'payment'`,
+  ),
+);
+
+console.log("Lateness of first attempts (launch target: real p95 under 60000 ms)");
+console.table(
+  await query(
+    `SELECT blob2 AS source, SUM(_sample_interval) AS measured, ` +
+      `quantileExactWeighted(0.5)(double1, _sample_interval) AS p50_ms, ` +
+      `quantileExactWeighted(0.95)(double1, _sample_interval) AS p95_ms, ` +
+      `MAX(double1) AS max_ms ${from} AND blob1 = 'attempt' AND double1 >= 0 GROUP BY source ORDER BY source`,
+  ),
+);

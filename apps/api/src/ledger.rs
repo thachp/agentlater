@@ -1673,7 +1673,8 @@ impl<'a, D: Db> Ledger<'a, D> {
                 return Ok(Claimed::Skip("stale"));
             }
         };
-        let on_schedule = task.due_ms == row.run_at_ms && row.lane.is_none() && row.wake_call == 0;
+        // Every retry, repoll, abandon and redrive moves the generation on.
+        let on_schedule = task.generation == 1 && row.lane.is_none() && row.wake_call == 0;
         let attempt: Attempt = match task.claim(generation, now) {
             Ok(a) => a,
             Err(ClaimError::Stale) => return Ok(Claimed::Skip("stale")),
@@ -3371,6 +3372,46 @@ mod tests {
         l.schedule(in_lane("a", T0), "t1", T0).unwrap();
         let d = l.publish_due(P, T0 + 40).unwrap().remove(0);
         assert_eq!(deliver(&l, &d, T0 + 40).late_ms, None);
+    }
+
+    #[test]
+    fn a_task_abandoned_before_its_first_attempt_is_not_late_when_redriven() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let (t, _) = l
+            .schedule(req("https://api.stripe.com/"), "t1", T0)
+            .unwrap();
+        let d = l.publish_due(P, T0).unwrap().remove(0);
+        db.0.execute("UPDATE project SET attempts_used = attempt_budget", [])
+            .unwrap();
+        assert!(matches!(
+            l.claim(&d.task_id, d.generation, T0 + 1).unwrap(),
+            Claimed::Skip("budget_exhausted")
+        ));
+        db.0.execute("UPDATE project SET attempts_used = 0", [])
+            .unwrap();
+        l.redrive(&t.id, T0 + 1_000).unwrap();
+        let d = l.publish_due(P, T0 + 1_000).unwrap().remove(0);
+        let a = deliver(&l, &d, T0 + 1_000);
+        assert_eq!(a.attempt, 1);
+        assert_eq!(a.late_ms, None);
+    }
+
+    #[test]
+    fn a_cron_run_is_late_from_its_slot() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.put_cron(daily("backup"), T0).unwrap();
+        // An alarm an hour late is real lateness, even though the task was due when created.
+        assert_eq!(l.fire_crons(SIX + 3_600_000).unwrap(), 1);
+        let id = l.cron("backup").unwrap().last_run_task_id.unwrap();
+        let d = l
+            .publish_due(P, SIX + 3_600_000)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.task_id == id)
+            .unwrap();
+        assert_eq!(deliver(&l, &d, SIX + 3_600_040).late_ms, Some(3_600_040));
     }
 
     #[test]

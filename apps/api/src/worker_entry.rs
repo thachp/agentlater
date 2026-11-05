@@ -755,7 +755,10 @@ const NOT_MEASURED: f64 = -1.0;
 fn attempt_source(url: &str) -> &'static str {
     let probe = Url::parse(url)
         .ok()
-        .and_then(|u| u.host_str().map(|h| h.starts_with("runlater-receiver-")))
+        .and_then(|u| {
+            u.host_str()
+                .map(|h| h.starts_with("runlater-receiver-") && h.ends_with(".workers.dev"))
+        })
         .unwrap_or(false);
     if probe {
         "probe"
