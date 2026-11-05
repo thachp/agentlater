@@ -34,6 +34,7 @@ export default function PrivacyPage() {
         <li>
           <strong>Technical data.</strong> IP addresses are used to rate-limit registration, sign-in and payment endpoints, and
           Cloudflare records request logs (time, path, status, IP address) that we use to run and secure the Service.
+          We also record a row for each delivery attempt and purchase: the project id, the time, how late the attempt started or how many attempts were bought, without URLs or contents.
         </li>
       </ul>
 
@@ -43,7 +44,7 @@ export default function PrivacyPage() {
         <li>A watch&rsquo;s request headers are deleted when the watch ends.</li>
         <li>Hosted MCP tokens expire after an hour, grants 30 days after last use, and registered clients after 90 days.</li>
         <li>Project balances and payment records are kept while the project exists and as long as we need them for accounting, tax and legal purposes.</li>
-        <li>Request logs are kept by Cloudflare for a few days.</li>
+        <li>Request logs are kept by Cloudflare for a few days, and the delivery and purchase rows for about three months.</li>
       </ul>
 
       <h2>How we use it</h2>
@@ -55,7 +56,7 @@ export default function PrivacyPage() {
 
       <h2>Who processes it for us</h2>
       <ul>
-        <li><strong>Cloudflare</strong> hosts the Service and stores its data (Workers, Durable Objects, D1, KV, Queues, logs).</li>
+        <li><strong>Cloudflare</strong> hosts the Service and stores its data (Workers, Durable Objects, D1, KV, Queues, Analytics Engine, logs).</li>
         <li><strong>Stripe</strong> processes payments.</li>
       </ul>
       <p>

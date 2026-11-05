@@ -328,7 +328,7 @@ An agent cannot pay, so a person pays for it. Stripe takes the payment; RunLater
 - An agent goes from zero to a delivered, signed request in under 5 tool calls, with at most one human click.
 - Accepted tasks are never lost: every one reaches `succeeded`, `failed` or `canceled`.
 - No task can reach a private network or another project's data (tested).
-- p95 delivery lateness under 60 s for tasks due "now", measured on a real deployment. **Not measured yet:** the journey and `monitor.yml` check that deliveries arrive, not how late.
+- p95 delivery lateness under 60 s for tasks due "now", measured on a real deployment. Measured from the first attempt of each task at its original time (`scripts/stats.mjs`); retries, redrives, lanes and wakes are late by design and are left out.
 
 Hosted MCP needs that one click, on the consent page, then `create_project` and `schedule_http`. Agent Auth needs no human at all.
 
@@ -339,7 +339,7 @@ Hosted MCP needs that one click, on the consent page, then `create_project` and 
 3. **Abuse.** New keys are new identities (Sybil). Today there are per-IP limits on registration (10 a minute) and on OAuth client registration and consent (20 a minute each), but no global trial cap. Is that enough while the trial is free?
 4. ~~**What happens after the trial?**~~ Resolved: the agent's person buys attempt packs (*Buying attempts*).
 5. **Rate of calls on `/mcp`.** The gateway has no per-grant limit on tool calls; budgets bound what costs attempts, but reads and rejected calls are unbounded. Add one before it's needed, or wait for evidence?
-6. **Measuring lateness.** What should measure the p95 in the success criteria: the daily journey, or a metric from the ledger?
+6. ~~**Measuring lateness.**~~ Resolved: a metric recorded with each attempt, in Workers Analytics Engine, separating real use from the monitor's journey.
 
 ## The other specs
 
