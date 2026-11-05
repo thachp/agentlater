@@ -7,6 +7,7 @@ import type { ApiClient, Scope } from "./api";
 export { capabilities, capabilityNames } from "@runlater/contracts/capabilities";
 
 const TASK_ID_RE = /^task_[0-9a-f]{20}$/;
+const LANE_RULE = "1-64 of A-Z a-z 0-9 _ - . :";
 
 /** Raised for bad arguments before anything reaches the API. */
 export class ArgumentError extends Error {
@@ -59,15 +60,18 @@ function secretName(args: Args): string {
 }
 
 function listQuery(args: Args): string {
-  only(args, ["status", "lane", "cursor", "limit"]);
+  only(args, ["status", "queue", "lane", "cursor", "limit"]);
+  if (args.queue != null && args.lane != null) throw new ArgumentError("pass queue or lane, not both", "queue");
   const q = new URLSearchParams();
   if (args.status !== undefined) {
     if (typeof args.status !== "string" || !STATUSES.includes(args.status)) throw new ArgumentError("unknown status", "status");
     q.set("status", args.status);
   }
-  if (args.lane !== undefined) {
-    if (typeof args.lane !== "string" || !new RegExp(LANE_PATTERN).test(args.lane)) throw new ArgumentError("invalid lane", "lane");
-    q.set("lane", args.lane);
+  const field = args.queue != null ? "queue" : "lane";
+  const value = args[field];
+  if (value != null) {
+    if (typeof value !== "string" || !new RegExp(LANE_PATTERN).test(value)) throw new ArgumentError(`invalid ${field}: ${LANE_RULE}`, field);
+    q.set("lane", value);
   }
   if (args.cursor !== undefined) {
     if (typeof args.cursor !== "string" || !/^[0-9]{1,16}$/.test(args.cursor)) throw new ArgumentError("invalid cursor", "cursor");
@@ -95,6 +99,18 @@ export function route(capability: string, args: Args): { method: "GET" | "POST";
     case "schedule_http":
       // The API validates the request fully and names the failing field.
       return { method: "POST", path: "/v1/tasks", scope: "schedule", body: args };
+    case "queue_http": {
+      // A queue is a lane to the API, which validates the rest of the request.
+      const { run_at_ms, delay, queue, ...request } = args;
+      for (const [field, value] of Object.entries({ run_at_ms, delay })) {
+        if (value != null) throw new ArgumentError("queue_http sends as soon as possible; use schedule_http for a later time", field);
+      }
+      if ("lane" in request) throw new ArgumentError("queue_http takes queue, not lane", "lane");
+      only(request, ["url", "method", "headers", "body", "callback_url", "capture", "idempotency_key", "max_attempts"]);
+      if (queue == null) return { method: "POST", path: "/v1/tasks", scope: "schedule", body: request };
+      if (typeof queue !== "string" || !new RegExp(LANE_PATTERN).test(queue)) throw new ArgumentError(`invalid queue: ${LANE_RULE}`, "queue");
+      return { method: "POST", path: "/v1/tasks", scope: "schedule", body: { ...request, lane: queue } };
+    }
     case "get_task":
       return { method: "GET", path: `/v1/tasks/${taskId(args)}`, scope: "read" };
     case "list_tasks":

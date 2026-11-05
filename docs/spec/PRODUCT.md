@@ -45,7 +45,7 @@ There is no human sign-up, password, or dashboard in v1. The agent *is* the cust
 
 **Act later**
 
-1. **Schedule** an HTTP request to a public HTTPS URL, now or at a future time, optionally in a *lane* so related requests run one at a time.
+1. **Schedule or queue** an HTTP request to a public HTTPS URL: `schedule_http` at a time, `queue_http` as soon as possible, optionally in a named queue (a *lane* in the API) so related requests run one at a time.
 2. **Repeat** it on a schedule, and hear when runs start failing: *Crons*.
 3. **Wait** on someone else's job by polling it, and optionally send the next request when it finishes: *Watches*.
 
@@ -134,8 +134,9 @@ The bridge keeps the agent's keys in `~/.agent-auth`. Losing them loses access t
 | `get_project` | — | budget used/remaining, expiry, `paid`, signing secret, `inbox_unread`, `wake` |
 | `get_payment_link` | — | `payment_url` for a person to buy a pack, `mpp_url` for the agent to buy one over MPP, expiries, price |
 | `schedule_http` | `url`, `method?`, `headers?`, `body?`, `run_at_ms?` or `delay?`, `idempotency_key?`, `max_attempts?`, `callback_url?`, `capture?`, `lane?` | `task_id`, `status` |
+| `queue_http` | `url`, `method?`, `headers?`, `body?`, `idempotency_key?`, `max_attempts?`, `callback_url?`, `capture?`, `queue?` | `task_id`, `status` |
 | `get_task` | `task_id` | task + attempts |
-| `list_tasks` | `status?`, `lane?`, `cursor?`, `limit?` | page of tasks |
+| `list_tasks` | `status?`, `queue?` or `lane?`, `cursor?`, `limit?` | page of tasks |
 | `cancel_task` | `task_id` | task |
 | `redrive_task` | `task_id` | task |
 | `create_cron` | `name`, `schedule`, `url`, `method?`, `headers?`, `body?`, `max_attempts?`, `alert_url?`, `callback_url?`, `capture?`, `report?` | cron |
@@ -167,8 +168,8 @@ services, not a public product in v1.
 - **Timeout:** 10 s per attempt. Redirects are not followed.
 - **Success:** any 2xx. Retry on 408, 425, 429, 5xx, timeouts and network errors. Anything else (other 4xx, 3xx) fails without retry.
 - **Admission:** work is refused up front if the project has expired (`403 trial_expired`), holds too many tasks (`429 task_limit`), or would need more attempts than are left once waiting tasks are counted (`402 budget_exhausted`). A waiting task reserves one attempt, plus one for a callback to a URL and any for its `on_match` action.
-- **Idempotency:** an optional `idempotency_key` makes `schedule_http` safe to repeat. The same key with the same request returns the original task; with a different request it is a conflict.
-- **Lanes:** tasks given the same `lane` (1–64 of `A-Z a-z 0-9 _ - . :`) run one at a time. A task that has started (delivering, or waiting to retry) holds its lane until it succeeds, fails or is canceled; then the waiting task with the earliest due time (ties: earliest scheduled) goes next. A failed or canceled task does not block the lane. A redriven task rejoins it with a due time of now. Order is by due time, not by when tasks were scheduled: schedule A with `delay: "1h"` and then B for now in the same lane, and B runs first. Lanes order delivery attempts, not what the destination does with them; at-least-once still applies. Callbacks are not in any lane.
+- **Idempotency:** an optional `idempotency_key` makes `schedule_http` and `queue_http` safe to repeat. The same key with the same request returns the original task; with a different request it is a conflict.
+- **Queues:** `queue_http`'s `queue` and `schedule_http`'s `lane` are the same thing; a task shows it as `lane`, and `schedule_http` without a time still sends now. Tasks given the same one (1–64 of `A-Z a-z 0-9 _ - . :`) run one at a time. A task that has started (delivering, or waiting to retry) holds its lane until it succeeds, fails or is canceled; then the waiting task with the earliest due time (ties: earliest scheduled) goes next. A failed or canceled task does not block the lane. A redriven task rejoins it with a due time of now. Order is by due time, not by when tasks were scheduled: schedule A with `delay: "1h"` and then B for now in the same lane, and B runs first. Lanes order delivery attempts, not what the destination does with them; at-least-once still applies. Callbacks are not in any lane.
 - **Delay:** `delay` is a relative alternative to `run_at_ms`: a whole number followed by `s`, `m`, `h` or `d` (`"90s"`, `"24h"`, `"7d"`), at most 7 days. Giving both is an error.
 - **Callbacks:** with `callback_url`, every time the task finishes (succeeded, failed or canceled) RunLater queues a *callback task*: a signed `POST` of `{"event": "task.finished", "task": {…}}` (the task as `get_task` returns it) to that URL. It follows the same destination rules, retries and signing, and is visible with `get_task` (`callback_task_id` on the task, `callback_for` on the callback). Each callback try costs one delivery attempt, so scheduling a task with a callback reserves two attempts and two task slots. Callbacks do not themselves call back. A callback always gets at least one try, even after the trial's attempts run out or it expires (but no retries then, and `max_attempts` shows 1); so `attempts_used` can go over the budget by one attempt per such callback. The report includes the task's full `url`, query string included, so don't put secrets there if the callback goes to another party. Callback tasks appear in `list_tasks` like any other.
 

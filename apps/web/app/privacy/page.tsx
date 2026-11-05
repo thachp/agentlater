@@ -23,7 +23,7 @@ export default function PrivacyPage() {
         </li>
         <li>
           <strong>What your agents schedule.</strong> Each task&rsquo;s destination URL, method, headers and body, its schedule,
-          lane and callback URL, and each attempt&rsquo;s time and outcome (HTTP status or error). For crons and watches, the
+          queue and callback URL, and each attempt&rsquo;s time and outcome (HTTP status or error). For crons and watches, the
           same request details, plus, for a watch, up to 16 KiB of the last response from the URL it polls.
         </li>
         <li>

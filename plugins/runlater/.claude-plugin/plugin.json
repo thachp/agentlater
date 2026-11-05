@@ -1,6 +1,6 @@
 {
   "name": "runlater",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Schedule, retry, repeat and watch HTTP requests from Claude, and read the results in a later session.",
   "author": {
     "name": "Patrick Thach"

@@ -94,7 +94,7 @@ Plain, specific and a little dry. RunLater is trusted with things that happen wh
 | Tell people what to do on failure: "ask your agent for a new one" | "Something went wrong" alone |
 | Show code that really runs: the signature samples are executed in tests | Illustrative code that nobody has run |
 
-Terms are used consistently: *delivery attempt*, *task*, *project*, *inbox*, *wake*, *hook*, *lane*. Most facts stated on the site live in `lib/site.ts` and `lib/snippets.ts`, so they can be checked against the code; some numbers are still written directly in pages.
+Terms are used consistently: *delivery attempt*, *task*, *project*, *inbox*, *wake*, *hook*, *queue* (`lane` in the API and on `schedule_http`). Most facts stated on the site live in `lib/site.ts` and `lib/snippets.ts`, so they can be checked against the code; some numbers are still written directly in pages.
 
 ### Visual language
 

@@ -11,7 +11,7 @@
       "name": "runlater",
       "source": "./plugins/runlater",
       "description": "Schedule, retry, repeat and watch HTTP requests from Claude, and read the results in a later session.",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "category": "productivity",
       "homepage": "https://runlater.io",
       "license": "MIT"

@@ -268,25 +268,27 @@ create_cron({
         </li>
       </ul>
 
-      <h2 id="lanes">Lanes</h2>
+      <h2 id="queues">Queues</h2>
       <p>
-        Give tasks the same <code>lane</code> (for example <code>"payments"</code> or <code>"user-42"</code>) and they
-        run one at a time. A task that has started, including while it waits to retry, holds the lane until it
-        succeeds, fails or is canceled. Then the waiting task with the earliest due time goes next, and among equal
-        times, the one scheduled first.
+        <code>queue_http</code> sends a request as soon as possible, where <code>schedule_http</code> sends it at a time
+        you choose. Give requests the same <code>queue</code> (for example <code>"payments"</code> or{" "}
+        <code>"user-42"</code>) and they run one at a time. A task that has started, including while it waits to retry,
+        holds the queue until it succeeds, fails or is canceled. Then the waiting task with the earliest due time goes
+        next, and among equal times, the one scheduled first.
       </p>
       <ul>
-        <li>A failed or canceled task does not block the lane; a redriven task rejoins it as due now.</li>
+        <li>A failed or canceled task does not block the queue; a redriven task rejoins it as due now.</li>
         <li>
-          Order is by due time, not submission: schedule A with <code>delay: &quot;1h&quot;</code>, then B for now, in the
-          same lane, and B runs first.
+          <code>schedule_http</code> joins a queue at its time with <code>lane</code>, and a task shows its queue as{" "}
+          <code>lane</code>. Order is by due time, not submission: schedule A with <code>delay: &quot;1h&quot;</code>, then
+          queue B now in the same queue, and B runs first.
         </li>
         <li>
-          Lanes order delivery attempts. Delivery is still at least once, so a lost attempt may be repeated before the
+          Queues order delivery attempts. Delivery is still at least once, so a lost attempt may be repeated before the
           next task starts.
         </li>
         <li>
-          Filter with <code>list_tasks</code>&apos;s <code>lane</code> argument to see what is queued in one.
+          Filter with <code>list_tasks</code>&apos;s <code>queue</code> argument to see what is queued in one.
         </li>
       </ul>
 
@@ -393,7 +395,7 @@ create_cron({
       <ul>
         <li>
           The action is one request, fixed when the watch is created, with <code>schedule_http</code>&apos;s fields
-          except timing, lanes and idempotency keys. It can&apos;t be another watch, so nothing chains.
+          except timing, queues and idempotency keys. It can&apos;t be another watch, so nothing chains.
         </li>
         <li>
           It is sent only when <code>until</code> matches: never on a timeout, a failing poll or a cancel. If you cancel
