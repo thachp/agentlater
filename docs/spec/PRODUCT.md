@@ -299,7 +299,7 @@ An agent cannot pay, so a person pays for it. Stripe takes the payment; AgentLat
 | Headers | 32 headers, 8 KB total |
 | Furthest `run_at_ms` | 7 days out (bounded by trial expiry) |
 | Trial | 1,000 delivery attempts, 7 days |
-| New trials | 1,000 a day across the service (`NEW_TRIALS_PER_DAY`), counted over the last 24 hours; beyond that `create_project` answers `429 trials_paused` for new owners |
+| New trials | 100 a day across the service (`NEW_TRIALS_PER_DAY`), counted over the last 24 hours; beyond that `create_project` answers `429 trials_paused` for new owners |
 | Attempt pack | 50,000 delivery attempts for $5; balance valid 12 months from the latest purchase |
 | Retention | Task + attempts kept 30 days after terminal state |
 | Tasks held per project | 1,000 (20,000 once a pack is bought), finished ones included until purged. A task's body is dropped once it succeeds or is canceled; failed tasks keep it for redrive. |
@@ -338,7 +338,7 @@ Hosted MCP needs that one click, on the consent page, then `create_project` and 
 
 1. ~~**Remote-only MCP clients.**~~ Resolved: a hosted `/mcp` with one-click OAuth consent (no account), one project per connection.
 2. ~~**Key loss.**~~ Resolved: the project is gone with its keys, inbox included, and is never moved to a new owner: paying for a project doesn't prove owning it, and payment links are meant to be passed around. The unused part of its purchased attempts may be refunded to the original payment method by hand, at our discretion ([DEPLOY.md](../DEPLOY.md#lost-keys-refund-the-unused-attempts)).
-3. **Abuse.** New keys are new identities (Sybil). Today there are per-IP limits on registration (10 a minute) and on OAuth client registration and consent (20 a minute each), and a global cap on new trials (`NEW_TRIALS_PER_DAY`). The cap bounds the cost of free identities at about $30 a day at $0.03 per 1,000 attempts, but one abuser can use it up and block real sign-ups. Is that enough while the trial is free?
+3. **Abuse.** New keys are new identities (Sybil). Today there are per-IP limits on registration (10 a minute) and on OAuth client registration and consent (20 a minute each), and a global cap on new trials (`NEW_TRIALS_PER_DAY`). The cap bounds the cost of free identities at about $3 a day at $0.03 per 1,000 attempts, but one abuser can use it up and block real sign-ups. Is that enough while the trial is free?
 4. ~~**What happens after the trial?**~~ Resolved: the agent's person buys attempt packs (*Buying attempts*).
 5. **Rate of calls on `/mcp`.** The gateway has no per-grant limit on tool calls; budgets bound what costs attempts, but reads and rejected calls are unbounded. Add one before it's needed, or wait for evidence?
 6. ~~**Measuring lateness.**~~ Resolved: a metric recorded with each attempt, in Workers Analytics Engine, separating real use from the monitor's journey.

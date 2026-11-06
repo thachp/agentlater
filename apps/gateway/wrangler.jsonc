@@ -37,7 +37,7 @@
         "HOOKS_URL": "https://hooks-staging.agentlater.io",
         "ALT_PUBLIC_URL": "https://gateway-staging.runlater.io",
         "ALT_HOOKS_URL": "https://hooks-staging.runlater.io",
-        "NEW_TRIALS_PER_DAY": "1000"
+        "NEW_TRIALS_PER_DAY": "100"
       },
       // Must match PUBLIC_URL or ALT_PUBLIC_URL: Agent Auth checks token audiences against the one
       // for the request's host (src/hosts.ts). The hooks hosts serve inbound hooks only.
@@ -68,7 +68,7 @@
         "HOOKS_URL": "https://hooks.agentlater.io",
         "ALT_PUBLIC_URL": "https://gateway.runlater.io",
         "ALT_HOOKS_URL": "https://hooks.runlater.io",
-        "NEW_TRIALS_PER_DAY": "1000"
+        "NEW_TRIALS_PER_DAY": "100"
       },
       "routes": [
         { "pattern": "gateway.runlater.io", "custom_domain": true },
