@@ -1,19 +1,28 @@
 {
-  "name": "runlater",
+  "name": "agentlater",
   "owner": {
     "name": "Patrick Thach"
   },
   "metadata": {
-    "description": "RunLater for Claude Code: make an HTTP request later, and check whether it happened."
+    "description": "AgentLater for Claude Code: let Claude make HTTP requests later, then pick up results, webhooks and wake-ups in a later session."
   },
   "plugins": [
     {
+      "name": "agentlater",
+      "source": "./plugins/agentlater",
+      "description": "Let Claude make HTTP requests later, then pick up results, webhooks and wake-ups in a later session.",
+      "version": "1.2.0",
+      "category": "productivity",
+      "homepage": "https://agentlater.io",
+      "license": "MIT"
+    },
+    {
       "name": "runlater",
       "source": "./plugins/runlater",
-      "description": "Schedule, retry, repeat and watch HTTP requests from Claude, and read the results in a later session.",
-      "version": "1.1.0",
+      "description": "Deprecated: RunLater is now AgentLater. Keeps working for existing projects; install agentlater for new work.",
+      "version": "1.1.1",
       "category": "productivity",
-      "homepage": "https://runlater.io",
+      "homepage": "https://agentlater.io",
       "license": "MIT"
     }
   ]

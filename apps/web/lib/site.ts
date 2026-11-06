@@ -2,7 +2,7 @@
 
 /** Where agents connect once the gateway is deployed (docs/DEPLOY.md, phase 4). */
 export const GATEWAY_URL = "https://gateway.agentlater.io";
-export const REPO_URL = "https://github.com/thachp/runlater";
+export const REPO_URL = "https://github.com/thachp/agentlater";
 
 /** Who operates the hosted service, named in the Terms and Privacy Policy. */
 export const OPERATOR = "OM.Network, LLC";

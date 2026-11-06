@@ -1,5 +1,7 @@
 # RunLater plugin for Claude Code
 
+**Deprecated: RunLater is now [AgentLater](../agentlater/README.md).** This plugin stays frozen, and its server address `https://gateway.runlater.io/mcp` keeps working, so existing connections and projects are unaffected. Install `agentlater` for new work.
+
 Connects Claude Code to RunLater's hosted MCP server and adds a `runlater` skill that teaches Claude
 when and how to use it: scheduling, crons, watches, hooks, secrets, and checking the inbox at the
 start of a session.

@@ -306,3 +306,5 @@ These kept the old name on purpose:
 | D1, KV, queue and dataset names; `runlater_project` | `wrangler.jsonc`, migrations | Data is orphaned |
 | `runlater-api` audience, `RunLater-Assertion`, `RunLater-Project` | Gateway and API | Internal only; no benefit |
 | `@runlater/*` packages, `runlater-*` crates | Workspace | Internal only; no benefit |
+
+The Claude Code plugin `plugins/runlater` and registry entry `io.github.thachp/runlater` are deprecated rather than removed. Installed copies keep the server address they were given.
