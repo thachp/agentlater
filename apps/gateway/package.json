@@ -10,6 +10,7 @@
     "test:e2e": "node --test --test-timeout=240000 e2e/agent.e2e.mjs"
   },
   "devDependencies": {
+    "@types/node": "26.6.6",
     "@auth/agent": "0.6.2",
     "@auth/agent-cli": "0.5.1",
     "@cloudflare/workers-types": "5.20261001.1",
