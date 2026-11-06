@@ -21,7 +21,7 @@ url = "2"
 base64 = "0.23"
 aes-gcm = { version = "=0.11.1", default-features = false, features = ["aes", "alloc"] }
 hkdf = "0.13"
-ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["alloc", "zeroize"] }
+ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["alloc", "zeroize"] }
 
 [profile.release]
 lto = true
