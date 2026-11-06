@@ -789,6 +789,15 @@ mod tests {
     }
 
     #[test]
+    fn matches_a_fixed_hmac_vector() {
+        // Same as Node: createHmac("sha256", secret).update(body).digest("hex")
+        assert_eq!(
+            sign("hook-secret-0123456789", &[br#"{"ok":true}"#]),
+            "2c3ffff5c757b038ae1facbd577bfdf43474acc7559feefbc6f53a0d4a0c336d"
+        );
+    }
+
+    #[test]
     fn checks_github_signatures() {
         let body = br#"{"action":"completed"}"#;
         let good = format!("sha256={}", sign(SECRET, &[body]));

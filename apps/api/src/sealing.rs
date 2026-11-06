@@ -110,6 +110,24 @@ mod tests {
         assert_eq!(key.open("prj_a", "GH", "garbage"), None);
     }
 
+    /// Secrets already in the ledger must still open after any crypto upgrade. Sealed by the
+    /// code as it first shipped, and opened separately with Node's crypto to confirm the format.
+    #[test]
+    fn opens_a_value_sealed_by_the_released_format() {
+        const SEALED: &str = "v1:AQIDBAUGBwgJCgsMdZDKCgeVMo35Ijj3xxEI/F9rHzcusZa9J0LJ09IBuqT4";
+        const PROJECT: &str = "prj_0123456789abcdef01234567";
+        let key = SealingKey::parse(KEY).unwrap();
+        assert_eq!(
+            key.open(PROJECT, "GITHUB_TOKEN", SEALED).as_deref(),
+            Some("ghp_example-value")
+        );
+        let nonce = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        assert_eq!(
+            key.seal(PROJECT, "GITHUB_TOKEN", "ghp_example-value", nonce),
+            SEALED
+        );
+    }
+
     #[test]
     fn fresh_nonces_give_different_ciphertexts() {
         let key = SealingKey::parse(KEY).unwrap();
