@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "agentlater": {
+      "type": "http",
+      "url": "https://gateway.agentlater.io/mcp"
+    }
+  }
+}

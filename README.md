@@ -18,7 +18,8 @@ cutover; it is in git history before this change.
 | `crates/egress` | Destination policy and request signing | Rust |
 | `packages/contracts` | Capability definitions, and the OpenAPI contract between gateway and API | TypeScript · OpenAPI 3.1 |
 | `packages/tsconfig` | Shared TypeScript config | |
-| `plugins/runlater` | Claude Code plugin: the hosted MCP server and a `runlater` skill | Markdown · JSON |
+| `plugins/agentlater` | Claude Code plugin: the hosted MCP server and an `agentlater` skill | Markdown · JSON |
+| `plugins/runlater` | The old plugin, deprecated and frozen so existing installs keep working | Markdown · JSON |
 
 Everything deploys to Cloudflare Workers, with `staging` and `production` environments in each app's `wrangler.jsonc` (`apps/receiver` has staging only); see [docs/DEPLOY.md](docs/DEPLOY.md).
 

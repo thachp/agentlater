@@ -187,7 +187,8 @@ runlater/
 ├── packages/
 │   ├── contracts/           capabilities.ts (shared by gateway and web), billing.ts, openapi.yaml
 │   └── tsconfig/            shared TS config
-├── plugins/runlater/        Claude Code plugin: MCP config and skill
+├── plugins/agentlater/      Claude Code plugin: MCP config and skill
+├── plugins/runlater/        The old plugin, deprecated and frozen
 ├── .claude-plugin/          Plugin marketplace manifest
 ├── server.json              MCP Registry entry
 ├── scripts/                 setup-deploy-secrets.mjs

@@ -21,7 +21,7 @@
 import { execFileSync } from "node:child_process";
 import { createPrivateKey, createPublicKey, randomBytes } from "node:crypto";
 
-const REPO = "thachp/runlater";
+const REPO = "thachp/agentlater";
 const ENVS = ["staging", "production"];
 const args = process.argv.slice(2);
 const rotate = args.includes("--rotate");

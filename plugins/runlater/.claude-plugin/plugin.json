@@ -1,13 +1,20 @@
 {
   "name": "runlater",
-  "version": "1.1.0",
-  "description": "Schedule, retry, repeat and watch HTTP requests from Claude, and read the results in a later session.",
+  "version": "1.1.1",
+  "description": "Deprecated: RunLater is now AgentLater. This plugin keeps working; install agentlater for new work.",
   "author": {
     "name": "Patrick Thach"
   },
-  "homepage": "https://runlater.io",
-  "repository": "https://github.com/thachp/runlater",
-  "privacyPolicyUrl": "https://runlater.io/privacy",
+  "homepage": "https://agentlater.io",
+  "repository": "https://github.com/thachp/agentlater",
+  "privacyPolicyUrl": "https://agentlater.io/privacy",
   "license": "MIT",
-  "keywords": ["scheduling", "cron", "webhooks", "http", "retries", "mcp"]
+  "keywords": [
+    "scheduling",
+    "cron",
+    "webhooks",
+    "http",
+    "retries",
+    "mcp"
+  ]
 }
