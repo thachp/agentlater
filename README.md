@@ -63,31 +63,60 @@ See the [plugin README](plugins/agentlater/README.md) for installation and migra
 Autonomous integrations can also use [Agent Auth](docs/spec/PRODUCT.md#capabilities-the-api-surface) at the gateway;
 that identity and its project are separate from a hosted MCP connection.
 
-## Example: request a URL in 15 minutes
+## Example: trigger a background job through a webhook
+
+A common use is calling your application's job endpoint after a delay—for example, generating
+an export in 15 minutes without keeping the agent session open.
 
 After connecting, ask your agent:
 
-> Create my AgentLater project, then in 15 minutes GET my public HTTPS status URL.
-> Capture the response and put the result in my inbox so we can check it next session.
+> Create my AgentLater project, then POST to my export webhook in 15 minutes with
+> `{"report": "daily-sales", "format": "csv"}`. Use my stored webhook token, capture the response,
+> and put the delivery result in my inbox.
 
-The agent calls `create_project` with `{}`, then `schedule_http` with arguments like these
-(replace the example URL with your own public HTTPS endpoint):
+The agent calls `create_project` with `{}`. If the endpoint requires a bearer token, first call
+`set_secret` with these arguments, replacing the placeholder with your endpoint's actual token
+and the host with your own:
 
 ```json
 {
-  "url": "https://status.example.com/health",
-  "method": "GET",
+  "name": "WEBHOOK_TOKEN",
+  "value": "<your-webhook-token>",
+  "allowed_hosts": ["api.example.com"]
+}
+```
+
+Then call `schedule_http` with the following arguments. Replace the example URL with your own
+public HTTPS job endpoint. `body` is a JSON-encoded **string**, not an object.
+
+```json
+{
+  "url": "https://api.example.com/jobs/export",
+  "method": "POST",
+  "headers": {
+    "Content-Type": "application/json",
+    "Authorization": "Bearer {{secret:WEBHOOK_TOKEN}}"
+  },
+  "body": "{\"report\":\"daily-sales\",\"format\":\"csv\"}",
   "delay": "15m",
+  "idempotency_key": "daily-sales-export-001",
   "capture": true,
   "callback_url": "inbox"
 }
 ```
 
+Use a new `idempotency_key` for each intended job; reusing the same key and request returns the
+original task. Your endpoint should also deduplicate deliveries using `RunLater-Task-Id` because
+delivery retries can reach it more than once. For an endpoint without authentication, omit the
+secret setup and the `Authorization` header.
+
 Save the returned `task_id` and inspect it with `get_task({"task_id": "<returned task_id>"})`.
 In a later session, call `get_project` with `{}`, then `read_inbox` with `{}` if `inbox_unread`
 is above zero. After handling the events, call `ack_inbox({"up_to": 1})`, replacing `1` with the
 last `seq` you handled. These are MCP tool names and argument objects, not shell commands.
-No public callback URL is needed to receive the report in the inbox.
+No public callback URL is needed to receive the delivery report in the inbox. If the endpoint
+returns `202 Accepted`, that confirms it accepted the job; use `watch_http` on its status URL
+when you also need to wait for the export to finish.
 
 Delivery is **at least once**; `succeeded` means the destination returned HTTP 2xx. Destinations must
 be public HTTPS URLs, not localhost or private IP addresses. For authenticated requests, store the
