@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Code } from "../../components/Code";
-import { GATEWAY_URL } from "../../lib/site";
+import { CONTACT_EMAIL, GATEWAY_URL } from "../../lib/site";
 import {
   mcpChatGpt,
   mcpClaudeCode,
@@ -40,7 +40,9 @@ export default function Quickstart() {
       </p>
       <p>
         <strong>Keep the keys.</strong> The project belongs to the key that created it. If the keys are lost, so is
-        access to the project.
+        access to the project. If you bought attempts, email{" "}
+        <a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a> from the address on the payment, with the project id of a
+        new connection that has only called <code>create_project</code>, and we can move the paid project to it.
       </p>
 
       <h2 id="mcp">From an MCP client</h2>

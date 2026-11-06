@@ -126,7 +126,7 @@ Each one is an Agent Auth capability. MCP clients reach them two ways:
 } } }
 ```
 
-The bridge keeps the agent's keys in `~/.agent-auth`. Losing them loses access to the project.
+The bridge keeps the agent's keys in `~/.agent-auth`. Losing them loses access to the project, unless it has purchased attempts (*Key loss* below).
 
 | Capability | Input | Output |
 | --- | --- | --- |
@@ -336,7 +336,7 @@ Hosted MCP needs that one click, on the consent page, then `create_project` and 
 ## Open questions
 
 1. ~~**Remote-only MCP clients.**~~ Resolved: a hosted `/mcp` with one-click OAuth consent (no account), one project per connection.
-2. **Key loss.** If an agent loses its keys, its project is gone, inbox included. Acceptable for a trial?
+2. ~~**Key loss.**~~ Resolved: a trial project is gone with its keys. A project with purchased attempts can be moved by hand to a new owner if the person proves the purchase (`scripts/recover-project.mjs`, [DEPLOY.md](../DEPLOY.md#recovering-a-paid-project)). There is no self-service path, because anything automatic would be a way to take over a project.
 3. **Abuse.** New keys are new identities (Sybil). Today there are per-IP limits on registration (10 a minute) and on OAuth client registration and consent (20 a minute each), but no global trial cap. Is that enough while the trial is free?
 4. ~~**What happens after the trial?**~~ Resolved: the agent's person buys attempt packs (*Buying attempts*).
 5. **Rate of calls on `/mcp`.** The gateway has no per-grant limit on tool calls; budgets bound what costs attempts, but reads and rejected calls are unbounded. Add one before it's needed, or wait for evidence?

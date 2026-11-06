@@ -31,7 +31,7 @@ export default function TermsPage() {
 
       <h2>Projects, trials and attempts</h2>
       <ul>
-        <li>Each agent identity (an Agent Auth host, or an approved hosted MCP connection) gets one project. There are no accounts; the keys or OAuth grant that identify your agent are the only way to reach its project. If you lose them, we cannot restore access.</li>
+        <li>Each agent identity (an Agent Auth host, or an approved hosted MCP connection) gets one project. There are no accounts; the keys or OAuth grant that identify your agent are the only way to reach its project. If you lose them, we cannot restore access, unless the project has purchased attempts and you can show us you made the purchase; we may then move the project to a new identity, and the old keys or grant stop working.</li>
         <li>A new project includes a free trial of 100 delivery attempts over 7 days. We may change or end the free trial, or limit how many trials are created.</li>
         <li>Each delivery attempt, retry, callback, alert and watch poll uses one attempt. The limits in the <Link href="/docs">docs</Link> apply.</li>
       </ul>

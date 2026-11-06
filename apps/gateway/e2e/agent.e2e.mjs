@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
+import { recoverySql } from "../../../scripts/recover-project.mjs";
 import { AgentAuthClient, MemoryStorage } from "@auth/agent";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -615,6 +616,28 @@ describe("hosted MCP at /mcp", () => {
     const as = await (await fetch(`${origin}/.well-known/oauth-authorization-server`)).json();
     assert.equal(as.authorization_endpoint, `${origin}/authorize`);
     assert.equal(as.registration_endpoint, `${origin}/oauth/register`);
+  });
+
+  test("a project moves to a new connection, and the old one loses it", async () => {
+    const lost = await mcpClient((await connect("Lost")).access_token);
+    const paid = value(await lost.callTool({ name: "create_project", arguments: {} }));
+    const task = value(await lost.callTool({ name: "schedule_http", arguments: { url: "https://dest.example.com/recovered", delay: "1h" } }));
+    const fresh = await mcpClient((await connect("Fresh")).access_token);
+    const empty = value(await fresh.callTool({ name: "create_project", arguments: {} }));
+
+    const db = await mf.getD1Database("DB", "gateway");
+    await db.prepare(recoverySql(paid.id, empty.id)).run();
+
+    assert.equal(value(await fresh.callTool({ name: "get_project", arguments: {} })).id, paid.id);
+    assert.equal(value(await fresh.callTool({ name: "get_task", arguments: { task_id: task.id } })).id, task.id);
+    const gone = await lost.callTool({ name: "get_project", arguments: {} });
+    assert.equal(value(gone).error.code, "project_not_found");
+
+    // Repeating it changes nothing, and a project that doesn't exist can't take one over.
+    await db.prepare(recoverySql(paid.id, empty.id)).run();
+    assert.equal(value(await fresh.callTool({ name: "get_project", arguments: {} })).id, paid.id);
+    assert.throws(() => recoverySql(paid.id, paid.id));
+    assert.throws(() => recoverySql(paid.id, "prj_1' OR '1'='1"));
   });
 
   test("a client connects through the consent page and uses the capabilities as tools", async () => {
