@@ -36,7 +36,7 @@ There is no human sign-up, password, or dashboard in v1. The agent *is* the cust
 | --- | --- | --- |
 | Hosted MCP | `https://gateway.agentlater.io/mcp`, added as a custom connector or remote server in Claude, ChatGPT, Grok, Codex, Cursor and others | `apps/gateway/src/mcp.ts` |
 | Claude Code plugin | The MCP server plus an `agentlater` skill that says when to use it, including the start-of-session inbox check | `plugins/agentlater`, `.claude-plugin/marketplace.json` |
-| MCP Registry | `io.github.thachp/agentlater`, pointing at the hosted server | `server.json` |
+| MCP Registry | `io.agentlater/agentlater`, pointing at the hosted server | `server.json` |
 | Agent Auth | Discovery at `/.well-known/agent-configuration`, then the SDK or the local bridge | `apps/gateway/src/auth.ts` |
 | Machine-readable pages | `/llms.txt` says what AgentLater is and how to connect; `/openapi.json` advertises the paid MPP endpoint | `apps/gateway/src/discovery.ts` |
 | Site | Landing page and docs at `agentlater.io` | `apps/web` |

@@ -1,6 +1,6 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.thachp/agentlater",
+  "name": "io.agentlater/agentlater",
   "title": "AgentLater",
   "description": "Agents make HTTP requests later, then get results, webhooks and wake-ups in a later session.",
   "repository": {
