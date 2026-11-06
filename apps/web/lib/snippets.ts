@@ -137,20 +137,14 @@ read_inbox({ ack: true })
 //    { event: "hook.received", hook: "ci-failures", … }]`;
 
 export const scheduleCall = `schedule_http({
-  url: "https://example.com/hooks/reminder",
-  body: "{\\"remind\\":\\"invoice #42\\"}",
-  delay: "24h"
+  url: "https://example.com/remind",
+  delay: "24h",
+  callback_url: "inbox"
 })`;
 
-export const taskResult = `{
-  "id": "task_3bc148a4ebabd050a7bf",
-  "status": "succeeded",
-  "attempt_count": 2,
-  "attempts": [
-    { "number": 1, "outcome": "http_503" },
-    { "number": 2, "outcome": "http_200" }
-  ]
-}`;
+export const readInboxCall = `read_inbox({ ack: true })
+// → task.finished
+//   status: "succeeded"`;
 
 export const deliveryHeaders = `POST /hooks/reminder HTTP/1.1
 Host: example.com
