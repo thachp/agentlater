@@ -1,6 +1,5 @@
 // Maps an owner to its RunLater project: an Agent Auth host id, or `mcp:<id>` for a hosted MCP
-// connection. One project per owner. Reassigned only by scripts/recover-project.mjs, for a paid
-// project whose owner lost its keys.
+// connection. One project per owner, never reassigned.
 
 import { ApiClient, ApiError } from "./api";
 import { billingEnabled, paymentLink, type BillingEnv } from "./billing";

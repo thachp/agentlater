@@ -224,37 +224,6 @@ Reading them:
 - p95 is weighted by volume, so one project's burst can drive it.
 - Under heavy sampling `max_ms` is a lower bound and `packs` an estimate. Stripe has the true payments.
 
-## Recovering a paid project
-
-Someone lost the keys or OAuth grant of a project with purchased attempts. A trial project isn't
-recovered: there's nothing to prove and little to lose.
-
-Moving a project hands over its balance, inbox, stored secrets and signing secret, so check first:
-
-1. **Find the payment in Stripe.** Its metadata names the project: `project_id` on a Checkout session,
-   `runlater_project_id` on an MPP PaymentIntent.
-2. **Prove the purchase.** The request must come from the email address on the payment, and you reply
-   only to that address. An MPP payment may have no email; without proof you can check, say no.
-   Knowing a project id or a payment id isn't proof.
-3. **Get the new project.** Ask them to make a new connection, call `create_project` and nothing else, and
-   send you the id from `get_project`. Anything else in that project is left behind.
-4. **Move it.** Run without `--apply`, read the two rows, then apply. Needs a wrangler login that can
-   write to the D1 database:
-
-   ```bash
-   node scripts/recover-project.mjs --from prj_old --to prj_new
-   ```
-
-   ```bash
-   node scripts/recover-project.mjs --from prj_old --to prj_new --apply
-   ```
-
-5. **Confirm and record.** Ask them to run `get_project` and check the id and balance. Keep the email and
-   the printed rows, because nothing else records the move.
-
-The old keys or grant get `project_not_found` from then on. A Checkout link made by the old owner no
-longer credits the project; if one is paid, Stripe records the money and the webhook logs a mismatch.
-
 ## Rollback
 
 ```bash
