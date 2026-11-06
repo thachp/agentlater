@@ -1,4 +1,4 @@
-use crate::limits::{RETRY_BASE_MS, RETRY_CAP_MS};
+use crate::limits::{RETRY_CAP_MS, RETRY_DELAYS_MS};
 use serde::{Deserialize, Serialize};
 
 /// What happened on one delivery attempt.
@@ -57,12 +57,12 @@ pub fn classify(outcome: &Outcome) -> Verdict {
 
 /// Delay before the next attempt, after `failed_attempts` failures (1 for the first).
 ///
-/// Exponential from [`RETRY_BASE_MS`], capped at [`RETRY_CAP_MS`], with "equal jitter":
+/// Follows [`RETRY_DELAYS_MS`], staying on the last entry after that, with "equal jitter":
 /// half the delay is fixed and half scales with `jitter` in `[0, 1)`. A destination's
-/// `Retry-After` is honoured as a floor, up to the same cap.
+/// `Retry-After` is honoured as a floor, up to [`RETRY_CAP_MS`].
 pub fn backoff_ms(failed_attempts: u32, retry_after_ms: Option<i64>, jitter: f64) -> i64 {
-    let exp = failed_attempts.saturating_sub(1).min(20);
-    let delay = RETRY_BASE_MS.saturating_mul(1 << exp).min(RETRY_CAP_MS);
+    let step = (failed_attempts.saturating_sub(1) as usize).min(RETRY_DELAYS_MS.len() - 1);
+    let delay = RETRY_DELAYS_MS[step];
     let jitter = if jitter.is_finite() {
         jitter.clamp(0.0, 1.0)
     } else {
@@ -100,14 +100,26 @@ mod tests {
     }
 
     #[test]
-    fn backoff_doubles_and_caps() {
-        let full: Vec<_> = (1..=8).map(|n| backoff_ms(n, None, 1.0)).collect();
+    fn backoff_follows_the_schedule_then_stays_on_its_last_step() {
+        let full: Vec<_> = (1..=6).map(|n| backoff_ms(n, None, 1.0)).collect();
         assert_eq!(
             full,
-            [10_000, 20_000, 40_000, 80_000, 160_000, 320_000, 600_000, 600_000]
+            [10_000, 120_000, 1_200_000, 2_400_000, 2_400_000, 2_400_000]
         );
         assert_eq!(backoff_ms(1, None, 0.0), 5_000);
-        assert_eq!(backoff_ms(u32::MAX, None, 0.5), 450_000);
+        assert_eq!(backoff_ms(u32::MAX, None, 0.5), 1_800_000);
+    }
+
+    #[test]
+    fn default_attempts_outlast_a_thirty_minute_outage() {
+        let retries = crate::limits::DEFAULT_MAX_ATTEMPTS - 1;
+        let span = |jitter| {
+            (1..=retries)
+                .map(|n| backoff_ms(n, None, jitter))
+                .sum::<i64>()
+        };
+        assert!(span(0.0) > 30 * 60_000, "shortest span: {}", span(0.0));
+        assert_eq!(span(1.0), 3_730_000);
     }
 
     #[test]
