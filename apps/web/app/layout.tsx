@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { REPO_URL } from "../lib/site";
+import { GATEWAY_URL, REPO_URL } from "../lib/site";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -39,7 +39,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             <span>RunLater — make an HTTP request later, and know whether it happened.</span>
             <span>
               <Link href="/docs">Docs</Link> · <Link href="/terms">Terms</Link> · <Link href="/privacy">Privacy</Link> ·{" "}
-              <a href={REPO_URL}>Source</a>
+              <a href={REPO_URL}>Source</a> · <a href={`${GATEWAY_URL}/llms.txt`}>llms.txt</a>
             </span>
           </div>
         </footer>
