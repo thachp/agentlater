@@ -34,7 +34,7 @@ impl SealingKey {
         Hkdf::<Sha256>::new(Some(SALT), &self.0)
             .expand(project_id.as_bytes(), &mut key)
             .expect("32 bytes is a valid HKDF-SHA256 output length");
-        Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key))
+        Aes256Gcm::new(&Key::<Aes256Gcm>::from(key))
     }
 
     /// `nonce` must be fresh random bytes for every call.
@@ -48,7 +48,7 @@ impl SealingKey {
         let sealed = self
             .project(project_id)
             .encrypt(
-                Nonce::from_slice(&nonce),
+                &Nonce::from(nonce),
                 Payload {
                     msg: value.as_bytes(),
                     aad: name.as_bytes(),
@@ -67,10 +67,11 @@ impl SealingKey {
             return None;
         }
         let (nonce, ciphertext) = raw.split_at(NONCE_BYTES);
+        let nonce = Nonce::try_from(nonce).ok()?;
         let plain = self
             .project(project_id)
             .decrypt(
-                Nonce::from_slice(nonce),
+                &nonce,
                 Payload {
                     msg: ciphertext,
                     aad: name.as_bytes(),

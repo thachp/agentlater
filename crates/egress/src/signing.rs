@@ -13,7 +13,7 @@
 //! keyed with the project's signing secret. During key rotation the signature header
 //! holds several comma-separated `v1=` entries; a receiver accepts if any one matches.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use std::fmt;
 

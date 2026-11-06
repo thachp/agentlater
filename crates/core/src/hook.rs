@@ -12,7 +12,7 @@ use crate::limits::{
 use crate::watch::Until;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sha2::Sha256;
