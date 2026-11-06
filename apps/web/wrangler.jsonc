@@ -16,7 +16,9 @@
       // Taken over from the legacy runlater-web-landing Worker on deploy.
       "routes": [
         { "pattern": "runlater.io", "custom_domain": true },
-        { "pattern": "www.runlater.io", "custom_domain": true }
+        { "pattern": "www.runlater.io", "custom_domain": true },
+        { "pattern": "agentlater.io", "custom_domain": true },
+        { "pattern": "www.agentlater.io", "custom_domain": true }
       ]
     }
   }

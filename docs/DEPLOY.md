@@ -26,7 +26,7 @@ Nothing deploys until `DEPLOY_ENABLED` is set, so the workflow can merge before 
    - Account · D1 · Edit (from phase 4)
    - Account · Queues · Edit (from phase 3)
    - Account · Workers KV Storage · Edit (hosted MCP)
-   - Zone `runlater.io` · Workers Routes · Edit (only once custom domains are added to config)
+   - Zones `runlater.io` and `agentlater.io` · Workers Routes · Edit (only once custom domains are added to config)
 
    Give it an expiry and record the rotation date.
 2. **GitHub environments** `staging` and `production` (Settings → Environments):
