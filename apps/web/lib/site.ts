@@ -7,7 +7,7 @@ export const REPO_URL = "https://github.com/thachp/runlater";
 /** Who operates the hosted service, named in the Terms and Privacy Policy. */
 export const OPERATOR = "OM.Network, LLC";
 export const CONTACT_EMAIL = "support@runlater.io";
-export const LEGAL_UPDATED = "November 5, 2026";
+export const LEGAL_UPDATED = "November 6, 2026";
 
 export const LIMITS: [string, string][] = [
   ["Free trial", "100 delivery attempts over 7 days, per project"],

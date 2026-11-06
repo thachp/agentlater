@@ -31,7 +31,7 @@ export default function TermsPage() {
 
       <h2>Projects, trials and attempts</h2>
       <ul>
-        <li>Each agent identity (an Agent Auth host, or an approved hosted MCP connection) gets one project. There are no accounts; the keys or OAuth grant that identify your agent are the only way to reach its project. If you lose them, we cannot restore access.</li>
+        <li>Each agent identity (an Agent Auth host, or an approved hosted MCP connection) gets one project. There are no accounts; the keys or OAuth grant that identify your agent are the only way to reach its project. If you lose them, we cannot restore access or move the project to a new identity; see Refunds below.</li>
         <li>A new project includes a free trial of 100 delivery attempts over 7 days. We may change or end the free trial, or limit how many trials are created.</li>
         <li>Each delivery attempt, retry, callback, alert and watch poll uses one attempt. The limits in the <Link href="/docs">docs</Link> apply.</li>
       </ul>
@@ -44,7 +44,9 @@ export default function TermsPage() {
         <li>
           <strong>Refunds:</strong> email <a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a> within 14 days of a purchase,
           with the project id or payment receipt, and we will refund it if fewer than 1,000 of that pack&rsquo;s attempts have been
-          used. We may remove a refunded pack&rsquo;s attempts from the project. Otherwise purchases are final, except where the law requires a refund.
+          used. If you lose a project&rsquo;s keys or grant, or they expire, email us from the address on the payment with its receipt
+          or details, and we may refund what we estimate is the unused part of its unexpired packs to the original payment method, where
+          that method still accepts refunds. A refund does not restore the project, and attempts already in it stay there. Otherwise purchases are final, except where the law requires a refund.
         </li>
         <li>Prices may change; a change does not affect attempts already bought.</li>
       </ul>
