@@ -440,9 +440,14 @@ create_cron({
         </table>
       </div>
       <p>
-        The delay doubles each time from 10 seconds, capped at 10 minutes, and is randomized between half and the full
-        value. A <code>Retry-After</code> header in seconds sets a minimum, up to the same cap. Every attempt costs one
-        of the trial's delivery attempts.
+        Retries wait 10 seconds, 2 minutes, 20 minutes and 40 minutes, each randomized between half and the full value,
+        so the default five attempts span 31 to 62 minutes and outlast a 30-minute outage. A{" "}
+        <code>Retry-After</code> header in seconds sets a minimum, up to 40 minutes. Every attempt costs one of the
+        trial's delivery attempts.
+      </p>
+      <p>
+        A task that keeps failing holds its queue for that whole time, and its callback or a cron's alert comes at the
+        end of it. Pass a lower <code>max_attempts</code> when you would rather hear sooner.
       </p>
 
       <h2 id="destinations">Allowed destinations</h2>

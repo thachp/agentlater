@@ -95,8 +95,16 @@ pub const ATTEMPT_TIMEOUT_MS: i64 = 10 * SECOND_MS;
 /// Must comfortably exceed the attempt timeout.
 pub const LEASE_MS: i64 = 30 * SECOND_MS;
 
-pub const RETRY_BASE_MS: i64 = 10 * SECOND_MS;
-pub const RETRY_CAP_MS: i64 = 10 * MINUTE_MS;
+/// Delay before each retry, before jitter. The first stays short for a blip; the rest are spread
+/// out so the default five attempts outlast a 30-minute outage, at 31 to 62 minutes end to end.
+pub const RETRY_DELAYS_MS: [i64; 4] = [
+    10 * SECOND_MS,
+    2 * MINUTE_MS,
+    20 * MINUTE_MS,
+    40 * MINUTE_MS,
+];
+/// The longest wait between attempts. A destination's `Retry-After` can't ask for more.
+pub const RETRY_CAP_MS: i64 = RETRY_DELAYS_MS[RETRY_DELAYS_MS.len() - 1];
 
 /// Tasks a project may hold at once, finished ones included until they are purged.
 /// Bounds storage even when tasks are scheduled and canceled without using attempts.

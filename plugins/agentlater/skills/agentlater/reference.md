@@ -12,7 +12,7 @@ scheduled ──(run_at reached)──▶ delivering ──2xx──▶ succeede
  canceled                                     attempts exhausted ──▶ failed ──redrive──▶ scheduled
 ```
 
-- Retries: 5 attempts by default (`max_attempts` 1–5). Delay before retry *n* is 10 s × 2ⁿ⁻¹, capped at 10 min, with jitter; `Retry-After` is honoured.
+- Retries: 5 attempts by default (`max_attempts` 1–5). Retries wait 10 s, 2 min, 20 min and 40 min, with jitter, so five attempts span 31 to 62 minutes; `Retry-After` is honoured up to 40 min. A task that keeps failing holds its queue and delays its callback or alert for that long, so pass a lower `max_attempts` when you need to hear sooner.
 - Retried: 408, 425, 429, 5xx, timeouts (10 s), network errors. Other 4xx and 3xx fail at once. Redirects are not followed.
 - Watches and wakes can't be redriven; start a new watch instead.
 

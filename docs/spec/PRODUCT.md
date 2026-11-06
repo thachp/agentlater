@@ -11,7 +11,7 @@ Publicly: *your agent's session ends; the work doesn't.* The request is the unit
 ## Problem
 
 Agents work in short sessions. They cannot sleep for an hour, wake up tomorrow, or
-retry a flaky webhook five times over twenty minutes. Today an agent that needs
+retry a flaky webhook over the next hour. Today an agent that needs
 "call this URL at 9am" or "retry this until it succeeds" has nowhere to put that
 intent. Developers solve it with cron boxes, queues, or QStash-style services that
 assume a human signed up, pasted an API key, and wired a dashboard.
@@ -164,7 +164,7 @@ services, not a public product in v1.
 - **Destinations:** `https://` on the default port to a public DNS name. No IP literals, credentials in the URL, fragments, or non-public names (`localhost`, `*.local`, `*.internal`, `*.test`, …). Checked when the task is accepted and again before every attempt. Resolved addresses are restricted to the public internet by Cloudflare (`global_fetch_strictly_public`).
 - **Methods and headers:** `GET`, `POST` (default), `PUT`, `PATCH`, `DELETE`. Callers may set any header except hop-by-hop/framing headers (`Host`, `Content-Length`, `Transfer-Encoding`, …) and the `RunLater-*`, `CF-*`, `X-Forwarded-*` and `Proxy-*` families. `GET` cannot have a body.
 - **Signing:** every outbound request carries `RunLater-Task-Id`, `RunLater-Attempt`, `RunLater-Timestamp` (unix seconds) and `RunLater-Signature: v1=<hex>`, an HMAC-SHA256 with the project's signing secret over `"{timestamp}.{task_id}.{attempt}."` followed by the raw body. While a secret is being rotated, the header carries one comma-separated `v1=` entry per active secret. Receivers should reject timestamps more than 5 minutes off.
-- **Retries:** default 5 attempts total, max 5. Delay before retry *n* is 10 s × 2ⁿ⁻¹ (capped at 10 min) with equal jitter; a `Retry-After` from the destination is honoured as a minimum, up to the same cap.
+- **Retries:** default 5 attempts total, max 5. Delays before retries 1 to 4 are 10 s, 2 min, 20 min and 40 min, with equal jitter, so five attempts span 31 to 62 minutes and outlast a 30-minute outage. A `Retry-After` from the destination is honoured as a minimum, up to 40 min. A task that keeps failing holds its lane, and delays its callback, a cron's `failing` alert or a failed wake's count, for that whole span; pass a lower `max_attempts` where speed matters more.
 - **Timeout:** 10 s per attempt. Redirects are not followed.
 - **Success:** any 2xx. Retry on 408, 425, 429, 5xx, timeouts and network errors. Anything else (other 4xx, 3xx) fails without retry.
 - **Admission:** work is refused up front if the project has expired (`403 trial_expired`), holds too many tasks (`429 task_limit`), or would need more attempts than are left once waiting tasks are counted (`402 budget_exhausted`). A waiting task reserves one attempt, plus one for a callback to a URL and any for its `on_match` action.
