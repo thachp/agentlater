@@ -44,9 +44,9 @@ export default function TermsPage() {
         <li>
           <strong>Refunds:</strong> email <a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a> within 14 days of a purchase,
           with the project id or payment receipt, and we will refund it if fewer than 1,000 of that pack&rsquo;s attempts have been
-          used. We may remove a refunded pack&rsquo;s attempts from the project. If you lose a project&rsquo;s keys or grant, email us with the payment receipt and we will refund the unused part of its
-          unexpired packs to the original payment method, unless we reasonably believe the request is abusive. We measure what is
-          unused from our records, and we may remove the refunded attempts from the project. Otherwise purchases are final, except where the law requires a refund.
+          used. If you lose a project&rsquo;s keys or grant, or they expire, email us from the address on the payment with its receipt
+          or details, and we may refund what we estimate is the unused part of its unexpired packs to the original payment method, where
+          that method still accepts refunds. A refund does not restore the project, and attempts already in it stay there. Otherwise purchases are final, except where the law requires a refund.
         </li>
         <li>Prices may change; a change does not affect attempts already bought.</li>
       </ul>

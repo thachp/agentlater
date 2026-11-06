@@ -29,7 +29,7 @@ export default function PrivacyPage() {
         <li>
           <strong>Payments.</strong> When someone buys attempts, Stripe collects their card details, email and billing information
           under <a href="https://stripe.com/privacy">Stripe&rsquo;s privacy policy</a>; we do not receive or store card numbers.
-          We keep the payment&rsquo;s Stripe id, amount, status, and which project it was for.
+          We keep the payment&rsquo;s Stripe id, amount, status, and which project it was for, and the emails and records of any refund request.
         </li>
         <li>
           <strong>Technical data.</strong> IP addresses are used to rate-limit registration, sign-in and payment endpoints, and

@@ -41,7 +41,8 @@ export default function Quickstart() {
       <p>
         <strong>Keep the keys.</strong> The project belongs to the key that created it. If the keys are lost, so is
         access to the project, and it can&apos;t be moved to new keys. If it had purchased attempts, email{" "}
-        <a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a> with the payment receipt to have the unused part refunded.
+        <a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a> from the address on the payment about a refund of the unused
+        part (<Link href="/terms">Terms</Link>).
       </p>
 
       <h2 id="mcp">From an MCP client</h2>
@@ -62,7 +63,8 @@ export default function Quickstart() {
       <p>
         Each RunLater capability is a tool: <code>create_project</code>, then <code>schedule_http</code>,{" "}
         <code>queue_http</code>, <code>create_cron</code> or <code>watch_http</code>, and later <code>get_task</code>. If the connection is
-        removed, so is access to its project; connecting again starts a new one.
+        removed, or its grant expires after 30 days without use, so is access to its project; connecting again starts a new
+        one. Purchased attempts left behind are treated as for lost keys above.
       </p>
 
       <h3 id="mcp-bridge">Or run the Agent Auth bridge locally</h3>

@@ -138,7 +138,10 @@ the link, so a test-mode link shows Stripe's test form.
    account is enabled for machine payments. MPP links are signed with a key derived from
    `STRIPE_SECRET_KEY`, so rotating that key invalidates outstanding `mpp_url`s (they last 7 days).
 
-3. Redeploy. To test on staging: ask for a link with `get_payment_link`, pay with card
+3. Turn on successful-payment emails under Settings → Customer emails in the live Stripe Dashboard, so buyers
+   get the receipt a refund asks for.
+
+4. Redeploy. To test on staging: ask for a link with `get_payment_link`, pay with card
    `4242 4242 4242 4242`, then check `get_project` shows `paid: true` and 50,000 more attempts.
    For MPP in test mode, Link's wallet refuses test profiles; use Stripe's validator with a test key
    instead: `MPPX_STRIPE_SECRET_KEY=sk_test_… npx mppx@0.13.5 validate <gateway origin> --endpoint "POST:/billing/mpp/<link>" --body '{}'`.
@@ -226,30 +229,43 @@ Reading them:
 
 ## Lost keys: refund the unused attempts
 
-Someone lost a project's keys or OAuth grant and bought attempts for it. Never move the project to a new
-owner: a payment shows who paid, not who owns it, and whoever holds the project gets its signing secret,
-inbox and the use of its stored secrets. The money goes back to the card that paid, so a mistaken or
-dishonest request can't gain more than it paid.
+Someone lost a project's keys or OAuth grant, or the grant expired, and attempts were bought for it. Never
+move the project to a new owner: a payment shows who paid, not who owns it, and whoever holds the project
+gets its signing secret, inbox and the use of its stored secrets.
 
-1. **Find the payments in Stripe**, from the receipt they send. Metadata names the project: `project_id` on
-   a Checkout session, `runlater_project_id` on an MPP PaymentIntent. Search the same email for earlier
-   claims. Skip anything already refunded. If the latest payment is over 12 months old, the balance has
-   expired and there's nothing to refund.
-2. **Look up its use.** `--project` limits the report to one project. Use `--days 92` for everything still
-   kept:
+A refund is at our discretion and is our estimate. It costs little to get wrong: it goes to the card that
+paid, but **it doesn't take the attempts back**, because nothing can remove them, and the project stays on
+the paid tier. So someone could claim lost keys and keep spending. That's the risk accepted at $5 a pack;
+the rules below limit how often. If claims become common, build a debit first, with safeguards so a payer
+can't wipe an owner's balance.
+
+1. **Check the request.** Reply only to the email on the Stripe payment, and say nothing about the project's
+   activity before that address confirms. An MPP payment may have no email; decline unless you can tell who
+   paid. Refund only what that payment made.
+2. **Refuse if:** the project already had a lost-key refund, whoever paid; this payer has claimed before; the
+   project was ended for breaking the Terms; or the latest payment is over 12 months old, because the balance
+   has expired.
+3. **Apply the 14-day refund first.** Within 14 days and under 1,000 of the pack's attempts used, the Terms
+   promise the whole pack back.
+4. **Count what was bought.** Use Stripe, not the report. Metadata names the project: `project_id` on a
+   Checkout session, `runlater_project_id` on an MPP PaymentIntent. Leave out packs already refunded, and any
+   pack that expired before the next purchase, because it was forfeited then. Compare with the report's
+   Payments row to spot another payer.
+5. **Count what was used**, adding the `real` and `probe` rows, with `--project` limiting the report to one
+   project. An empty table means no rows, which isn't proof of no use:
 
    ```bash
    CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_STATS_TOKEN=... node scripts/stats.mjs --days 92 --project prj_...
    ```
 
-3. **Work out the refund.** Attempts bought (from Stripe, not the report) minus attempts used, leaving out the 100 free trial attempts, at
-   10¢ per 1,000, rounded down, and never more than was paid. Analytics Engine keeps about three months and
-   started on 2026-11-05, so for an older payment the count can be too low: decide those case by case.
-4. **Check it's quiet.** A lost project shouldn't get new work, so ask about attempts still appearing. A
-   cron left running looks the same as an agent still in use, and refunds don't take attempts back, so
-   someone could claim lost keys and keep spending. At $5 a pack that's a small loss, so refuse repeat
-   claims from one payer rather than every doubtful one.
-5. **Refund it in the Stripe Dashboard**, as a partial refund on the payment. It goes to the original card.
+   This keeps about three months and starts on 2026-11-05, and a lost write can only make it low. For a
+   payment older than that the count can't be trusted, so offer a refund only if you have other evidence
+   of what's left. The Terms make no promise beyond 14 days.
+6. **Work out the refund.** Bought minus used, leaving out the 100 free trial attempts, at 10¢ per 1,000,
+   rounded down to the cent. Take it from the newest payment first, never more than a payment's amount.
+7. **Refund it in the Stripe Dashboard**, as a partial refund, and keep the emails. A cron left running keeps
+   spending, and there's no way to stop it without the keys, so a project with crons may use attempts you
+   refunded.
 
 ## Rollback
 

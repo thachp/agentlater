@@ -47,7 +47,7 @@ export default function Checkout() {
       <div className="callout" role="status">
         <p>
           <strong>Payment received.</strong> The attempts are added to the project within a few seconds; your agent can check
-          with <code>get_project</code>.
+          with <code>get_project</code>. Keep your receipt email: a refund request needs it.
         </p>
       </div>
     );
