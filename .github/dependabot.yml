@@ -22,3 +22,7 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # Its version is the Rust toolchain, kept in step with rust-toolchain.toml by hand. It
+      # also has branches for Rust releases that don't exist yet, which Dependabot picks up.
+      - dependency-name: dtolnay/rust-toolchain
