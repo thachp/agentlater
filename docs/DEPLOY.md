@@ -224,6 +224,33 @@ Reading them:
 - p95 is weighted by volume, so one project's burst can drive it.
 - Under heavy sampling `max_ms` is a lower bound and `packs` an estimate. Stripe has the true payments.
 
+## Lost keys: refund the unused attempts
+
+Someone lost a project's keys or OAuth grant and bought attempts for it. Never move the project to a new
+owner: a payment shows who paid, not who owns it, and whoever holds the project gets its signing secret,
+inbox and the use of its stored secrets. The money goes back to the card that paid, so a mistaken or
+dishonest request can't gain more than it paid.
+
+1. **Find the payments in Stripe**, from the receipt they send. Metadata names the project: `project_id` on
+   a Checkout session, `runlater_project_id` on an MPP PaymentIntent. Search the same email for earlier
+   claims. Skip anything already refunded. If the latest payment is over 12 months old, the balance has
+   expired and there's nothing to refund.
+2. **Look up its use.** `--project` limits the report to one project. Use `--days 92` for everything still
+   kept:
+
+   ```bash
+   CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_STATS_TOKEN=... node scripts/stats.mjs --days 92 --project prj_...
+   ```
+
+3. **Work out the refund.** Attempts bought (from Stripe, not the report) minus attempts used, leaving out the 100 free trial attempts, at
+   10¢ per 1,000, rounded down, and never more than was paid. Analytics Engine keeps about three months and
+   started on 2026-11-05, so for an older payment the count can be too low: decide those case by case.
+4. **Check it's quiet.** A lost project shouldn't get new work, so ask about attempts still appearing. A
+   cron left running looks the same as an agent still in use, and refunds don't take attempts back, so
+   someone could claim lost keys and keep spending. At $5 a pack that's a small loss, so refuse repeat
+   claims from one payer rather than every doubtful one.
+5. **Refund it in the Stripe Dashboard**, as a partial refund on the payment. It goes to the original card.
+
 ## Rollback
 
 ```bash

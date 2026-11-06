@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Delivery lateness and usage from Workers Analytics Engine. See docs/DEPLOY.md.
 //
-//   CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_STATS_TOKEN=... node scripts/stats.mjs [--days 7] [--env production]
+//   CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_STATS_TOKEN=... node scripts/stats.mjs [--days 7] [--env production] [--project prj_...]
 //
 // The token needs Account Analytics Read. Rows are written by the API's record_stat:
 //   index1 project id, blob1 "attempt" or "payment", blob2 "real" or "probe",
@@ -10,7 +10,11 @@
 import { parseArgs } from "node:util";
 
 const { values } = parseArgs({
-  options: { days: { type: "string", default: "7" }, env: { type: "string", default: "production" } },
+  options: {
+    days: { type: "string", default: "7" },
+    env: { type: "string", default: "production" },
+    project: { type: "string" },
+  },
 });
 const { CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_STATS_TOKEN: token } = process.env;
 const days = Number(values.days);
@@ -26,7 +30,12 @@ if (!["staging", "production"].includes(values.env)) {
   console.error("--env must be staging or production");
   process.exit(1);
 }
-const from = `FROM runlater_stats_${values.env} WHERE timestamp > NOW() - INTERVAL '${days}' DAY`;
+if (values.project !== undefined && !/^prj_[0-9a-f]{24}$/.test(values.project)) {
+  console.error("--project must be a project id");
+  process.exit(1);
+}
+const one = values.project ? ` AND index1 = '${values.project}'` : "";
+const from = `FROM runlater_stats_${values.env} WHERE timestamp > NOW() - INTERVAL '${days}' DAY${one}`;
 
 async function query(sql) {
   const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/analytics_engine/sql`, {
@@ -38,7 +47,7 @@ async function query(sql) {
   return (await res.json()).data;
 }
 
-console.log(`${values.env}, last ${days} days`);
+console.log(`${values.env}, last ${days} days${values.project ? `, ${values.project}` : ""}`);
 
 console.log("\nUsage");
 console.table(
