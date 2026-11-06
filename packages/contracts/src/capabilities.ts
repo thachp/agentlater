@@ -117,7 +117,7 @@ export const capabilities: CapabilityDefinition[] = [
   {
     name: "create_project",
     description:
-      "Create this agent's AgentLater project with a free trial (100 delivery attempts, 7 days). " +
+      "Create this agent's AgentLater project with a free trial (1,000 delivery attempts, 7 days). " +
       "Call once before scheduling; calling again returns the same project and never resets the trial. " +
       "The returned signing_secret lets the destination verify RunLater-Signature on each delivery.",
     input: noArgs,

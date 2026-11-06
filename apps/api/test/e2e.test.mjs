@@ -113,7 +113,7 @@ describe("api", () => {
     const first = await api("POST", "/v1/projects");
     assert.equal(first.status, 201);
     assert.match(first.json.signing_secret, /^rls_[0-9a-f]{64}$/);
-    assert.equal(first.json.attempts_remaining, 100);
+    assert.equal(first.json.attempts_remaining, 1_000);
     const again = await api("POST", "/v1/projects");
     assert.equal(again.status, 200);
     assert.equal(again.json.signing_secret, first.json.signing_secret);

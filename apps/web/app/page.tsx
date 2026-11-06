@@ -74,7 +74,7 @@ const EXAMPLES = [
 
 const STEPS = [
   ["Connect", <>Add AgentLater to your MCP client, or register from code. The agent gets its own identity.</>],
-  ["Create a project", <><code>create_project</code> starts a free trial: 100 delivery attempts over 7 days.</>],
+  ["Create a project", <><code>create_project</code> starts a free trial: 1,000 delivery attempts over 7 days.</>],
   ["Hand it the waiting", <>Schedule, watch, run a cron or open a hook. Then the session can end.</>],
   ["Hear back", <>Read the inbox next session, get woken up, or check <code>get_task</code>.</>],
 ] as const;

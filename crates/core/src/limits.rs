@@ -15,8 +15,7 @@ pub const MAX_LANE_BYTES: usize = 64;
 
 /// Crons a project may hold.
 pub const MAX_CRONS: i64 = 10;
-/// Shortest gap allowed between two runs of one cron. The trial has 100 attempts over 7
-/// days, so an hourly cron already uses it up in about four days.
+/// Shortest gap allowed between two runs of one cron.
 pub const MIN_CRON_INTERVAL_MS: i64 = HOUR_MS;
 
 /// Shortest and longest gap between two polls of a watch. Every poll costs an attempt.
@@ -115,7 +114,7 @@ pub const MAX_RETAINED_TASKS_PAID: i64 = 20_000;
 /// Terminal tasks and their attempts are kept this long, then purged.
 pub const RETENTION_MS: i64 = 30 * DAY_MS;
 
-pub const TRIAL_ATTEMPTS: u32 = 100;
+pub const TRIAL_ATTEMPTS: u32 = 1_000;
 pub const TRIAL_DURATION_MS: i64 = 7 * DAY_MS;
 
 /// Bought attempts, and any still unused, stay valid this long after each purchase.

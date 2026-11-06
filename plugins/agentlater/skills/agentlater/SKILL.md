@@ -9,7 +9,7 @@ AgentLater makes HTTP requests for you after this session ends, retries them, an
 
 ## Start of every session
 
-1. Call `get_project`. On `project_not_found`, call `create_project` (free trial: 100 delivery attempts, 7 days). Calling it again returns the same project and never resets the trial.
+1. Call `get_project`. On `project_not_found`, call `create_project` (free trial: 1,000 delivery attempts, 7 days; on `trials_paused`, new trials are full for today, so try again later). Calling it again returns the same project and never resets the trial.
 2. If `inbox_unread` is above 0, call `read_inbox`, handle each event, then `ack_inbox` up to the last `seq` you handled (or pass `ack: true` to `read_inbox`). Tell the user what came in.
 
 Don't skip the inbox check: it's how earlier work reports back.

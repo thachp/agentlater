@@ -263,7 +263,7 @@ describe("agent journey through the gateway", () => {
   test("create_project is idempotent", async () => {
     project = data(await client.executeCapability({ agentId, capability: "create_project", arguments: {} }));
     assert.match(project.id, /^prj_[0-9a-f]{24}$/);
-    assert.equal(project.attempts_remaining, 100);
+    assert.equal(project.attempts_remaining, 1_000);
     const again = data(await client.executeCapability({ agentId, capability: "create_project", arguments: {} }));
     assert.equal(again.id, project.id);
     assert.equal(again.signing_secret, project.signing_secret);

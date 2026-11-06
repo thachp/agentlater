@@ -113,9 +113,9 @@ describe("stated limits", () => {
     expect(constant("MAX_HEADERS")).toBe("32");
     expect(constant("MAX_HEADER_BYTES")).toBe("8 * 1024");
     expect(stated["Headers"]).toBe("32 headers, 8 KiB in total");
-    expect(constant("TRIAL_ATTEMPTS")).toBe("100");
+    expect(constant("TRIAL_ATTEMPTS")).toBe("1_000");
     expect(constant("TRIAL_DURATION_MS")).toBe("7 * DAY_MS");
-    expect(stated["Free trial"]).toContain("100 delivery attempts over 7 days");
+    expect(stated["Free trial"]).toContain("1,000 delivery attempts over 7 days");
     expect(constant("MAX_ATTEMPTS")).toBe("5");
     expect(constant("DEFAULT_MAX_ATTEMPTS")).toBe("5");
     expect(stated["Attempts per task"]).toBe("1–5 (default 5)");
