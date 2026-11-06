@@ -27,7 +27,7 @@ function page(title: string, body: string, headers: Headers = new Headers(), sta
   headers.set("X-Frame-Options", "DENY");
   // Colors copy the site's tokens (apps/web/app/globals.css); this page can't load its stylesheet.
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${escape(title)} · RunLater</title><style>
+<title>${escape(title)} · AgentLater</title><style>
 :root{color-scheme:light dark;--paper:#f5f3ee;--card:#fffefa;--ink:#20231f;--muted:#5d635a;--line:#dedfd6;--accent:#bf4325;--soft:#fce7dd}
 @media (prefers-color-scheme:dark){:root{--paper:#161816;--card:#1e211e;--ink:#ecebe4;--muted:#a3a99f;--line:#2f332e;--accent:#e3693f;--soft:#3a2219}}
 body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;display:grid;place-items:center;min-height:100vh;padding:16px;box-sizing:border-box}
@@ -39,7 +39,7 @@ code{font:0.9em ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:
 .warn{border-left:3px solid var(--accent);padding:6px 12px;font-size:14px}
 .actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}button{font:inherit;font-weight:600;border-radius:10px;padding:9px 16px;cursor:pointer;border:1px solid var(--ink);background:transparent;color:var(--ink)}
 button.primary{background:var(--ink);color:var(--paper)}button:hover{opacity:0.88}button:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
-</style></head><body><div class="shell"><p class="brand">${ICON}RunLater</p><main>${body}</main></div></body></html>`;
+</style></head><body><div class="shell"><p class="brand">${ICON}AgentLater</p><main>${body}</main></div></body></html>`;
   return new Response(html, { status, headers });
 }
 
@@ -67,8 +67,8 @@ export async function handleAuthorize(request: Request, env: ConsentEnv): Promis
         : "";
       return page(
         "Connect",
-        `<h1>Connect ${escape(name)} to RunLater?</h1>
-<p>It will be able to schedule HTTP requests, crons and watches, and read their results. They run from a new RunLater project with a free trial: 100 delivery attempts over 7 days.</p>
+        `<h1>Connect ${escape(name)} to AgentLater?</h1>
+<p>It will be able to schedule HTTP requests, crons and watches, and read their results. They run from a new AgentLater project with a free trial: 100 delivery attempts over 7 days.</p>
 <p class="muted">There's no account. This connection is the project's only key: if it is removed, so is access to the project.</p>
 <p class="muted">You'll return to <code>${escape(about.redirectHost)}</code>.</p>${local}
 <form method="post"><input type="hidden" name="handle" value="${escape(handle)}">
@@ -94,6 +94,6 @@ export async function handleAuthorize(request: Request, env: ConsentEnv): Promis
   } catch (e) {
     if (e instanceof AuthorizationError) return failure("This sign-in link has expired or was already used. Start again from your app.");
     console.error("consent failed", e);
-    return failure("Something went wrong on RunLater's side. Start again from your app.", 500);
+    return failure("Something went wrong on AgentLater's side. Start again from your app.", 500);
   }
 }

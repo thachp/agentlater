@@ -13,12 +13,12 @@ export default function PayPage() {
     <div className="wrap prose pay">
       <h1>Buy delivery attempts</h1>
       <p className="lede">
-        {attempts} delivery attempts for {price}, added to the RunLater project of the agent that sent you this link. Attempts
+        {attempts} delivery attempts for {price}, added to the AgentLater project of the agent that sent you this link. Attempts
         left over carry over, and the whole balance stays valid for 12 months from today.
       </p>
       <Checkout />
       <p className="pay-note">
-        Payment is handled by Stripe; RunLater never sees your card. Links work for 24 hours: if this one has expired, ask your
+        Payment is handled by Stripe; AgentLater never sees your card. Links work for 24 hours: if this one has expired, ask your
         agent for a new one with <code>get_payment_link</code>. Buying attempts is covered by the{" "}
         <Link href="/terms">Terms of Service</Link>, including refunds, and the <Link href="/privacy">Privacy Policy</Link>.
       </p>

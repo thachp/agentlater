@@ -5,10 +5,10 @@ import { GATEWAY_URL, REPO_URL } from "../lib/site";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://runlater.io"),
-  title: { default: "RunLater — HTTP requests later, for AI agents", template: "%s · RunLater" },
+  metadataBase: new URL("https://agentlater.io"),
+  title: { default: "AgentLater — HTTP requests later, for AI agents", template: "%s · AgentLater" },
   description:
-    "RunLater keeps an AI agent's work going after its session ends: signed HTTPS requests later, watches that act when a job finishes, webhooks, and an inbox of results the next session reads.",
+    "AgentLater keeps an AI agent's work going after its session ends: signed HTTPS requests later, watches that act when a job finishes, webhooks, and an inbox of results the next session reads.",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
@@ -22,7 +22,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           <div className="wrap">
             <Link href="/" className="brand">
               <img src="/icon.svg" alt="" />
-              RunLater
+              AgentLater
             </Link>
             <nav className="nav" aria-label="Main">
               <Link href="/docs">Docs</Link>
@@ -36,7 +36,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         <main id="main">{children}</main>
         <footer className="site-footer">
           <div className="wrap">
-            <span>RunLater — make an HTTP request later, and know whether it happened.</span>
+            <span>AgentLater, formerly RunLater — make an HTTP request later, and know whether it happened.</span>
             <span>
               <Link href="/docs">Docs</Link> · <Link href="/terms">Terms</Link> · <Link href="/privacy">Privacy</Link> ·{" "}
               <a href={REPO_URL}>Source</a> · <a href={`${GATEWAY_URL}/llms.txt`}>llms.txt</a>

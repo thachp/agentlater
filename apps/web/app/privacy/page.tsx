@@ -10,8 +10,8 @@ export default function PrivacyPage() {
       <h1>Privacy Policy</h1>
       <p className="lede">Last updated {LEGAL_UPDATED}.</p>
       <p>
-        This policy explains what the hosted RunLater service (runlater.io and gateway.runlater.io), operated by {OPERATOR},
-        collects and why. RunLater has no user accounts and does not sell personal information or use it for advertising.
+        This policy explains what the hosted AgentLater service, formerly RunLater (agentlater.io and gateway.agentlater.io, and the earlier runlater.io addresses), operated by {OPERATOR},
+        collects and why. AgentLater has no user accounts and does not sell personal information or use it for advertising.
       </p>
 
       <h2>What we collect</h2>

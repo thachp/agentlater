@@ -8,6 +8,7 @@ import { ArgumentError, capabilities, capabilityNames } from "./capabilities";
 import { runCapability } from "./projects";
 import type { AuthStore } from "./store";
 import type { BillingEnv } from "./billing";
+import { providerNameFor } from "./hosts";
 
 export const BASE_PATH = "/api/auth";
 const WEEK_SECS = 7 * 24 * 3600;
@@ -25,6 +26,8 @@ type OnExecute = NonNullable<Parameters<typeof agentAuth>[0]>["onExecute"];
 /** Options shared by the Worker and the schema generator, which has no env. */
 export function authOptions(input: {
   baseURL: string;
+  /** Agent Auth's slug. Defaults to agentlater; see `createAuth`. */
+  providerName?: string;
   database: BetterAuthOptions["database"];
   secret: string;
   secondaryStorage?: BetterAuthOptions["secondaryStorage"];
@@ -45,7 +48,7 @@ export function authOptions(input: {
       // Better Auth's; the runtime contract is the same.
       agentAuth({
         // A slug: directories such as agent-auth.directory reject anything else.
-        providerName: "runlater",
+        providerName: input.providerName ?? "agentlater",
         providerDescription: "Make an HTTP request later, and check whether it happened.",
         modes: ["autonomous"],
         allowedKeyAlgorithms: ["Ed25519"],
@@ -63,7 +66,7 @@ export function authOptions(input: {
         // Autonomous agents have no human account; attribute them to their host.
         resolveAutonomousUser: ({ hostId }) => ({
           id: `agent-host:${hostId}`,
-          name: "Autonomous RunLater agent",
+          name: "Autonomous AgentLater agent",
           email: `${hostId}@agents.invalid`,
         }),
         onExecute: input.onExecute,
@@ -116,6 +119,7 @@ export function createAuth(env: AuthEnv, ctx: ExecutionContext, signingKey: Cryp
   const auth = betterAuth(
     authOptions({
       baseURL: env.PUBLIC_URL,
+      providerName: providerNameFor(env.PUBLIC_URL),
       database: env.DB,
       secret: env.BETTER_AUTH_SECRET,
       secondaryStorage: storage(env),

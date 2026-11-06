@@ -21,6 +21,9 @@ export function envForHost<E extends HostEnv>(env: E, host: string): E {
   return { ...env, PUBLIC_URL: env.ALT_PUBLIC_URL, HOOKS_URL: env.ALT_HOOKS_URL };
 }
 
+/** Agent Auth's slug: clients that connected before the rename keep seeing the name they registered with. */
+export const providerNameFor = (publicUrl: string) => (new URL(publicUrl).host.endsWith(".runlater.io") ? "runlater" : "agentlater");
+
 /** Whether this host serves inbound hooks and nothing else. */
 export function isHooksOnlyHost(env: HostEnv, host: string): boolean {
   const gateways = [hostOf(env.PUBLIC_URL), hostOf(env.ALT_PUBLIC_URL)];

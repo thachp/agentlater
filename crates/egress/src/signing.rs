@@ -90,7 +90,7 @@ pub fn sign(
     }
 }
 
-/// Receiver-side check, also used by RunLater's own tests and examples.
+/// Receiver-side check, also used by AgentLater's own tests and examples.
 pub fn verify(
     secret: &[u8],
     headers: &Signature,

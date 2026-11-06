@@ -205,7 +205,7 @@ function sdk() {
     fetch: transport,
     directoryUrl: null,
     allowDirectDiscovery: true,
-    hostName: "RunLater e2e",
+    hostName: "AgentLater e2e",
   });
 }
 
@@ -234,7 +234,7 @@ describe("agent journey through the gateway", () => {
 
   test("discovery advertises only the served endpoints", async () => {
     const config = await (await fetch(`${origin}/.well-known/agent-configuration`)).json();
-    assert.equal(config.provider_name, "runlater");
+    assert.equal(config.provider_name, "agentlater");
     const paths = Object.values(config.endpoints).map((u) => new URL(u).pathname);
     assert.ok(paths.includes("/api/auth/capability/execute"));
     assert.ok(paths.includes("/api/auth/agent/request-capability"));
@@ -589,7 +589,7 @@ describe("hosted MCP at /mcp", () => {
   async function connect(clientName = "Test Client") {
     const r = await connectHosted(origin, clientName);
     assert.equal(r.pageHeaders.get("x-frame-options"), "DENY");
-    assert.ok(r.html.includes(`Connect ${clientName} to RunLater?`), r.html);
+    assert.ok(r.html.includes(`Connect ${clientName} to AgentLater?`), r.html);
     assert.ok(r.html.includes("127.0.0.1"), "the page names where it returns to");
     assert.equal(`${r.redirect.origin}${r.redirect.pathname}`, REDIRECT);
     return r;
@@ -758,7 +758,7 @@ describe("hosted MCP at /mcp", () => {
     assert.equal(link.attempts, 50_000);
     assert.deepEqual(link.price, { amount_cents: 500, currency: "usd" });
     const url = new URL(link.payment_url);
-    assert.equal(`${url.origin}${url.pathname}`, "https://runlater.io/pay");
+    assert.equal(`${url.origin}${url.pathname}`, "https://agentlater.io/pay");
     assert.equal(url.search, "", "nothing secret in the query string");
     const fragment = new URLSearchParams(url.hash.slice(1));
     assert.equal(fragment.get("key"), "pk_test_e2e");

@@ -365,7 +365,7 @@ pub enum Poll {
     NotYet,
     /// Stop polling: `poll_failing` (too many failed polls in a row), `poll_rejected` (an
     /// answer that will not change, such as a 404 or a redirect) or `response_too_large` (the
-    /// condition needs a body longer than RunLater reads).
+    /// condition needs a body longer than AgentLater reads).
     Fail(&'static str),
 }
 

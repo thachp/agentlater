@@ -17,8 +17,12 @@ concurrency:
   group: monitor
   cancel-in-progress: false
 env:
-  SITE_URL: https://runlater.io
-  GATEWAY_URL: https://gateway.runlater.io
+  SITE_URL: https://agentlater.io
+  GATEWAY_URL: https://gateway.agentlater.io
+  # Hook URLs and connected clients keep these addresses, so they have to keep answering.
+  OLD_SITE_URL: https://runlater.io
+  OLD_GATEWAY_URL: https://gateway.runlater.io
+  OLD_HOOKS_URL: https://hooks.runlater.io
 jobs:
   health:
     runs-on: ubuntu-latest
@@ -27,6 +31,15 @@ jobs:
       # The gateway health check also reaches the API through its binding.
       - name: Gateway and API
         run: curl --fail --silent --show-error --max-time 10 --retry 3 --retry-all-errors "$GATEWAY_URL/health"
+      - name: Old gateway and hooks hosts
+        run: |
+          curl --fail --silent --show-error --max-time 10 --retry 3 --retry-all-errors "$OLD_GATEWAY_URL/health"
+          status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 10 --retry 3 --retry-all-errors "$OLD_HOOKS_URL/health")
+          test "$status" = 404 || { echo "old hooks host answered $status, expected 404"; exit 1; }
+      - name: Old site redirects
+        run: |
+          location=$(curl --silent --show-error --output /dev/null --write-out '%{http_code} %{redirect_url}' --max-time 10 --retry 3 --retry-all-errors "$OLD_SITE_URL/pay?check=1")
+          test "$location" = "308 $SITE_URL/pay?check=1" || { echo "old site answered: $location"; exit 1; }
       - name: Site
         run: |
           for path in / /docs /docs/capabilities /docs/delivery /pay /terms /privacy; do

@@ -4,5 +4,5 @@ import type { MetadataRoute } from "next";
 const PATHS = ["", "/docs", "/docs/capabilities", "/docs/delivery", "/terms", "/privacy"];
 
 export default function sitemap(): MetadataRoute.Sitemap {
-  return PATHS.map((path) => ({ url: `https://runlater.io${path}` }));
+  return PATHS.map((path) => ({ url: `https://agentlater.io${path}` }));
 }

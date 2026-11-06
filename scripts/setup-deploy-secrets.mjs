@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// One-time: generate RunLater's deploy secrets and store them in the GitHub environments.
+// One-time: generate AgentLater's deploy secrets and store them in the GitHub environments.
 // Nothing secret is printed or written to disk. Requires `gh` logged in with admin on the repo.
 //
 //   node scripts/setup-deploy-secrets.mjs            set anything missing

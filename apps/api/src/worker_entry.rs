@@ -30,7 +30,7 @@ use worker::*;
 
 /// Set by the entry Worker on requests it forwards to a ledger; never taken from callers.
 const PROJECT_HEADER: &str = "RunLater-Project";
-const USER_AGENT: &str = "RunLater/1 (+https://runlater.io)";
+const USER_AGENT: &str = "AgentLater/1 (+https://agentlater.io)";
 
 fn now() -> i64 {
     Date::now().as_millis() as i64
@@ -748,7 +748,7 @@ async fn call<T: DeserializeOwned>(
     res.json().await
 }
 
-/// `double1` of an attempt whose lateness says nothing about RunLater ([`Delivery::late_ms`]).
+/// `double1` of an attempt whose lateness says nothing about AgentLater ([`Delivery::late_ms`]).
 const NOT_MEASURED: f64 = -1.0;
 
 /// Whether an attempt is real use or the monitor's journey, which delivers to our own receiver.

@@ -22,17 +22,17 @@ const headers = (signature: string, ts = "1767225600") => ({
 describe("Node verification sample", async () => {
   const file = join(mkdtempSync(join(tmpdir(), "runlater-docs-")), "verify.mjs");
   writeFileSync(file, verifyNode);
-  const { verifyRunLater } = (await import(pathToFileURL(file).href)) as {
-    verifyRunLater: (h: Record<string, string>, body: string | Buffer, secret: string, tol?: number) => boolean;
+  const { verifyAgentLater } = (await import(pathToFileURL(file).href)) as {
+    verifyAgentLater: (h: Record<string, string>, body: string | Buffer, secret: string, tol?: number) => boolean;
   };
 
   it("accepts a genuine signature", () => {
-    expect(verifyRunLater(headers(`v1=${SIG}`), "{}", "secret", Infinity)).toBe(true);
-    expect(verifyRunLater(headers(`v1=${SIG}`), Buffer.from("{}"), "secret", Infinity)).toBe(true);
+    expect(verifyAgentLater(headers(`v1=${SIG}`), "{}", "secret", Infinity)).toBe(true);
+    expect(verifyAgentLater(headers(`v1=${SIG}`), Buffer.from("{}"), "secret", Infinity)).toBe(true);
   });
 
   it("accepts any entry during rotation", () => {
-    expect(verifyRunLater(headers(`v1=${"0".repeat(64)}, v1=${SIG}`), "{}", "secret", Infinity)).toBe(true);
+    expect(verifyAgentLater(headers(`v1=${"0".repeat(64)}, v1=${SIG}`), "{}", "secret", Infinity)).toBe(true);
   });
 
   it("returns false, never throws, on malformed headers", () => {
@@ -52,16 +52,16 @@ describe("Node verification sample", async () => {
       headers(""),
       {},
     ]) {
-      expect(verifyRunLater(h as Record<string, string>, "{}", "secret", Infinity)).toBe(false);
+      expect(verifyAgentLater(h as Record<string, string>, "{}", "secret", Infinity)).toBe(false);
     }
   });
 
   it("rejects tampering, wrong secrets, other schemes and stale timestamps", () => {
-    expect(verifyRunLater(headers(`v1=${SIG}`), "{ }", "secret", Infinity)).toBe(false);
-    expect(verifyRunLater(headers(`v1=${SIG}`), "{}", "other", Infinity)).toBe(false);
-    expect(verifyRunLater(headers(`v0=${SIG}`), "{}", "secret", Infinity)).toBe(false);
-    expect(verifyRunLater(headers("v1=abc"), "{}", "secret", Infinity)).toBe(false);
-    expect(verifyRunLater(headers(`v1=${SIG}`), "{}", "secret")).toBe(false);
+    expect(verifyAgentLater(headers(`v1=${SIG}`), "{ }", "secret", Infinity)).toBe(false);
+    expect(verifyAgentLater(headers(`v1=${SIG}`), "{}", "other", Infinity)).toBe(false);
+    expect(verifyAgentLater(headers(`v0=${SIG}`), "{}", "secret", Infinity)).toBe(false);
+    expect(verifyAgentLater(headers("v1=abc"), "{}", "secret", Infinity)).toBe(false);
+    expect(verifyAgentLater(headers(`v1=${SIG}`), "{}", "secret")).toBe(false);
   });
 });
 

@@ -14,7 +14,7 @@ pub enum Outcome {
     Timeout,
     /// Connection or TLS failure before a response.
     Network,
-    /// RunLater refused to send, or refused the response (destination failed policy on
+    /// AgentLater refused to send, or refused the response (destination failed policy on
     /// re-check, redirect, oversized response).
     Rejected,
     /// The worker holding the attempt vanished. The request may have had an effect.

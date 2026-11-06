@@ -1,12 +1,12 @@
 // Facts the site states. Keep in step with docs/spec/PRODUCT.md and crates/core/src/limits.rs.
 
 /** Where agents connect once the gateway is deployed (docs/DEPLOY.md, phase 4). */
-export const GATEWAY_URL = "https://gateway.runlater.io";
+export const GATEWAY_URL = "https://gateway.agentlater.io";
 export const REPO_URL = "https://github.com/thachp/runlater";
 
 /** Who operates the hosted service, named in the Terms and Privacy Policy. */
 export const OPERATOR = "OM.Network, LLC";
-export const CONTACT_EMAIL = "support@runlater.io";
+export const CONTACT_EMAIL = "support@agentlater.io";
 export const LEGAL_UPDATED = "November 6, 2026";
 
 export const LIMITS: [string, string][] = [

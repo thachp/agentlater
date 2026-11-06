@@ -1,4 +1,4 @@
-# RunLater — Architecture
+# AgentLater — Architecture
 
 Status: **current**, describes what runs in production · Owner: Patrick Thach · Last updated: 2026-11-04 · What it does: [PRODUCT.md](PRODUCT.md) · How it should feel: [DESIGN.md](DESIGN.md) · How to ship it: [DEPLOY.md](../DEPLOY.md)
 
@@ -25,10 +25,10 @@ flowchart LR
     Dest["Public HTTPS destination<br/>or wake URL"]
 
     subgraph CF["Cloudflare"]
-        Web["apps/web<br/>runlater.io"]
+        Web["apps/web<br/>agentlater.io"]
         subgraph GWW["apps/gateway (TypeScript)"]
-            GW["gateway.runlater.io<br/>/mcp · OAuth · Agent Auth · billing"]
-            HK["hooks.runlater.io<br/>/h/… only"]
+            GW["gateway.agentlater.io<br/>/mcp · OAuth · Agent Auth · billing"]
+            HK["hooks.agentlater.io<br/>/h/… only"]
         end
         ID[("D1: hosts, agents,<br/>owner → project")]
         KV[("KV: OAuth grants")]
@@ -72,7 +72,7 @@ flowchart LR
 - **Two identities, one path.** `runCapability` (`src/projects.ts`) takes an owner, either an Agent Auth host id or `mcp:<id>` from a grant, finds its project in `runlater_project`, and maps the capability to exactly one API call (`src/capabilities.ts`). The exception is `get_payment_link`, which the gateway answers itself. A project id is never taken from the caller.
 - **The local bridge.** `@auth/agent-cli mcp --url <gateway>` is a stdio MCP server that holds an agent's keys and exposes generic tools (`execute_capability`, …). Nothing in the gateway is specific to it.
 - **Rate limits** are Workers Rate Limiting bindings, alongside Better Auth's own limiter on the Agent Auth routes: registration 10/min per IP; OAuth registration and consent 20/min per IP and path; MPP 10/min; hooks 120/min per IP and 600/min per project. `/mcp` tool calls have none ([open question](PRODUCT.md#open-questions)).
-- **Billing.** `get_payment_link` creates a Checkout Session and returns `runlater.io/pay#key=…&secret=…` and an `mpp_url`. Payments reach the ledger through `POST /v1/projects/self/credits` (scope `billing`), keyed by session or PaymentIntent id, so a retried webhook adds nothing. `payment_intent.succeeded` is the backstop if an MPP credit fails after the charge.
+- **Billing.** `get_payment_link` creates a Checkout Session and returns `agentlater.io/pay#key=…&secret=…` and an `mpp_url`. Payments reach the ledger through `POST /v1/projects/self/credits` (scope `billing`), keyed by session or PaymentIntent id, so a retried webhook adds nothing. `payment_intent.succeeded` is the backstop if an MPP credit fails after the charge.
 
 ### `apps/api`: the task authority
 
@@ -242,4 +242,4 @@ One `wrangler.jsonc` per app with `env.staging` and `env.production` (the receiv
 
 ## History
 
-The rebuild replaced an earlier implementation in seven phases: skeleton, core crates, API, gateway, web, e2e and deploy, cutover. Cutover finished on 2026-11-01: `runlater.io` and `gateway.runlater.io` serve these Workers, and the legacy hostnames, Workers, queues and `legacy/` tree are gone. The phase plan and the port-or-delete table are in this file's git history.
+The rebuild replaced an earlier implementation in seven phases: skeleton, core crates, API, gateway, web, e2e and deploy, cutover. Cutover finished on 2026-11-01: `agentlater.io` and `gateway.agentlater.io` serve these Workers, and the legacy hostnames, Workers, queues and `legacy/` tree are gone. The phase plan and the port-or-delete table are in this file's git history.

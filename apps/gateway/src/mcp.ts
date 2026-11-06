@@ -24,12 +24,12 @@ export interface McpEnv extends BillingEnv {
 }
 
 const INSTRUCTIONS =
-  "RunLater makes HTTP requests later and records whether they happened. Call create_project once, " +
+  "AgentLater makes HTTP requests later and records whether they happened. Call create_project once, " +
   "then schedule_http (one request, at a time you choose), queue_http (one request as soon as possible; a named queue runs related ones one at a time), create_cron (a repeating one) or watch_http (poll until done; on_match sends the next request itself when it matches). " +
   "To learn the result in a later session without a public URL of your own, pass callback_url: \"inbox\" " +
   "(and capture: true to keep the response). At the start of a session, if get_project shows inbox_unread above 0, " +
   "call read_inbox and ack what you handle. If something can start you without a person (a routine or workflow trigger), " +
-  "give its URL to set_wake and RunLater starts you when results arrive. To hear from a service that sends webhooks " +
+  "give its URL to set_wake and AgentLater starts you when results arrive. To hear from a service that sends webhooks " +
   "(GitHub, Stripe, CI), register a create_hook URL with it instead of polling; requests arrive in the inbox. Never paste a credential into a request: store it " +
   "with set_secret (bound to the hosts it is for) and use {{secret:NAME}} in a header. Check a single task with get_task. " +
   "When the project runs out of attempts, get_payment_link gives your user a link to buy more.";
@@ -69,7 +69,7 @@ export async function handleMcp(request: Request, env: McpEnv, key: CryptoKey, p
         return result({ error: { code: "invalid_request", message: e.message, ...(e.field ? { field: e.field } : {}) } }, true);
       }
       console.error("tool failed", params.name, e);
-      return result({ error: { code: "internal_error", message: "RunLater could not complete this call; try again" } }, true);
+      return result({ error: { code: "internal_error", message: "AgentLater could not complete this call; try again" } }, true);
     }
   });
   const transport = new WebStandardStreamableHTTPServerTransport({

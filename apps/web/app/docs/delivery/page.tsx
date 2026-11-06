@@ -26,7 +26,7 @@ export default function Delivery() {
     <>
       <h1>Delivery &amp; signatures</h1>
       <p className="lede">
-        What the destination receives, how to check it came from RunLater, and what happens when it fails.
+        What the destination receives, how to check it came from AgentLater, and what happens when it fails.
       </p>
 
       <h2 id="lifecycle">Task lifecycle</h2>
@@ -52,8 +52,8 @@ export default function Delivery() {
 
       <h2 id="request">What the destination receives</h2>
       <p>
-        The method, headers and body you scheduled, plus four RunLater headers. Header values you set are sent as
-        given.
+        The method, headers and body you scheduled, plus four signature headers. They keep their <code>RunLater-</code> names from before the rename, so
+        existing receivers go on working. Header values you set are sent as given.
       </p>
       <Code label="example delivery">{deliveryHeaders}</Code>
       <ul>
@@ -78,11 +78,11 @@ export default function Delivery() {
       </p>
       <Code label="Node.js">{verifyNode}</Code>
       <Code label="Python">{verifyPython}</Code>
-      <p className="muted">Both samples are run in RunLater's test suite against a fixed signature.</p>
+      <p className="muted">Both samples are run in AgentLater's test suite against a fixed signature.</p>
 
       <h2 id="callbacks">Callbacks</h2>
       <p>
-        Pass <code>callback_url</code> to <code>schedule_http</code> and RunLater tells you how the task ended instead of
+        Pass <code>callback_url</code> to <code>schedule_http</code> and AgentLater tells you how the task ended instead of
         you polling <code>get_task</code>. Each time the task succeeds, fails or is canceled, a <em>callback task</em>{" "}
         <code>POST</code>s <code>{'{"event": "task.finished", "task": {…}}'}</code> to that URL, where{" "}
         <code>task</code> is the task as <code>get_task</code> returns it, attempts included.
@@ -150,7 +150,7 @@ read_inbox({ ack: true })
 
       <h2 id="wake">Wake</h2>
       <p>
-        The inbox holds results until a session reads them. <code>set_wake</code> makes RunLater start that session:
+        The inbox holds results until a session reads them. <code>set_wake</code> makes AgentLater start that session:
         give it the URL that starts an agent run (a routine or workflow trigger, a chat webhook, your own server) and
         whatever headers it needs.
       </p>
@@ -160,7 +160,7 @@ read_inbox({ ack: true })
   debounce: "15m"
 })`}</Code>
       <p>
-        When an event lands in the inbox, RunLater sends a signed <code>POST</code> carrying only{" "}
+        When an event lands in the inbox, AgentLater sends a signed <code>POST</code> carrying only{" "}
         <code>{'{"event": "inbox.unread", "project_id": "…", "unread": 3}'}</code>. The agent it starts calls{" "}
         <code>read_inbox</code> for the details, so the trigger never sees results or secrets.
       </p>
@@ -233,14 +233,14 @@ create_cron({
   name: "github-ci",
   verify: { scheme: "github", secret: "<the webhook secret you set on GitHub>" }
 })
-// → { name: "github-ci", url: "https://hooks.runlater.io/h/prj_…/hk_…", … }`}</Code>
+// → { name: "github-ci", url: "https://hooks.agentlater.io/h/prj_…/hk_…", … }`}</Code>
       <ul>
         <li>
-          The <code>url</code> is shown only this once; RunLater keeps just a hash of it. Register it with the sender
+          The <code>url</code> is shown only this once; AgentLater keeps just a hash of it. Register it with the sender
           right away. Creating the hook again under the same name gives a new URL and retires the old one.
         </li>
         <li>
-          With <code>verify</code>, RunLater checks the sender&apos;s signature (<code>github</code>,{" "}
+          With <code>verify</code>, AgentLater checks the sender&apos;s signature (<code>github</code>,{" "}
           <code>stripe</code>, or <code>hmac_sha256</code> in a header you name) and refuses anything else with a 401.
           Without it, anyone who learns the URL can write to your inbox, and events say{" "}
           <code>verified: false</code>.
@@ -301,7 +301,7 @@ create_cron({
       </p>
       <p>
         Give it an <code>alert_url</code> and it works as a dead man&apos;s switch. When a run fails, or cannot start
-        because the trial&apos;s attempts ran out or it ended, the cron turns <code>failing</code> and RunLater sends
+        because the trial&apos;s attempts ran out or it ended, the cron turns <code>failing</code> and AgentLater sends
         one signed <code>POST</code>:
       </p>
       <Code label="alert body">{`{
@@ -340,7 +340,7 @@ create_cron({
 
       <h2 id="watches">Watches</h2>
       <p>
-        <code>watch_http</code> hands off waiting on a long-running job, such as a render, a batch or a deploy. RunLater
+        <code>watch_http</code> hands off waiting on a long-running job, such as a render, a batch or a deploy. AgentLater
         polls a status URL now, then every <code>every</code> (5 minutes to 24 hours), until the response matches{" "}
         <code>until</code> or the <code>deadline</code> passes.
       </p>
@@ -377,7 +377,7 @@ create_cron({
       <h3 id="on-match">Acting on a match</h3>
       <p>
         <code>on_match</code> lets a watch take the next step itself, without waiting for your next turn. When the
-        deploy reports <code>SUCCEEDED</code>, RunLater starts the smoke tests:
+        deploy reports <code>SUCCEEDED</code>, AgentLater starts the smoke tests:
       </p>
       <Code label="watch_http with on_match">{`watch_http({
   url: "https://deploy.example.com/deployments/123",

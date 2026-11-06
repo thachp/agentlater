@@ -7,7 +7,7 @@ export const REDIRECT = "http://127.0.0.1:9/callback";
 const b64url = (b) => Buffer.from(b).toString("base64url");
 
 /** Returns the token response plus what the consent page showed. Throws on any step that fails. */
-export async function connectHosted(origin, clientName = "RunLater journey") {
+export async function connectHosted(origin, clientName = "AgentLater journey") {
   const step = async (what, res, status) => {
     if (res.status !== status) throw new Error(`${what} returned ${res.status}: ${(await res.text()).slice(0, 200)}`);
     return res;

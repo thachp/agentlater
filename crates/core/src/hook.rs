@@ -275,7 +275,7 @@ impl fmt::Display for HookError {
                 s.as_str(),
                 s.signature_header().unwrap_or_default()
             ),
-            Self::Header(h) => write!(f, "verify.header {h:?} is not a header name RunLater can check"),
+            Self::Header(h) => write!(f, "verify.header {h:?} is not a header name AgentLater can check"),
             Self::PrefixUse => f.write_str("verify.prefix is only for hmac_sha256"),
             Self::Prefix => write!(
                 f,

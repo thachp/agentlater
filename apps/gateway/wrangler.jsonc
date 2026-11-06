@@ -33,10 +33,10 @@
     "staging": {
       "name": "runlater-gateway-staging",
       "vars": {
-        "PUBLIC_URL": "https://gateway-staging.runlater.io",
-        "HOOKS_URL": "https://hooks-staging.runlater.io",
-        "ALT_PUBLIC_URL": "https://gateway-staging.agentlater.io",
-        "ALT_HOOKS_URL": "https://hooks-staging.agentlater.io"
+        "PUBLIC_URL": "https://gateway-staging.agentlater.io",
+        "HOOKS_URL": "https://hooks-staging.agentlater.io",
+        "ALT_PUBLIC_URL": "https://gateway-staging.runlater.io",
+        "ALT_HOOKS_URL": "https://hooks-staging.runlater.io"
       },
       // Must match PUBLIC_URL or ALT_PUBLIC_URL: Agent Auth checks token audiences against the one
       // for the request's host (src/hosts.ts). The hooks hosts serve inbound hooks only.
@@ -63,10 +63,10 @@
     "production": {
       "name": "runlater-gateway-production",
       "vars": {
-        "PUBLIC_URL": "https://gateway.runlater.io",
-        "HOOKS_URL": "https://hooks.runlater.io",
-        "ALT_PUBLIC_URL": "https://gateway.agentlater.io",
-        "ALT_HOOKS_URL": "https://hooks.agentlater.io"
+        "PUBLIC_URL": "https://gateway.agentlater.io",
+        "HOOKS_URL": "https://hooks.agentlater.io",
+        "ALT_PUBLIC_URL": "https://gateway.runlater.io",
+        "ALT_HOOKS_URL": "https://hooks.runlater.io"
       },
       "routes": [
         { "pattern": "gateway.runlater.io", "custom_domain": true },

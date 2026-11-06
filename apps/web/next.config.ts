@@ -36,6 +36,24 @@ const config: NextConfig = {
   images: { unoptimized: true },
   // Capability definitions are TypeScript source shared with the gateway.
   transpilePackages: ["@runlater/contracts"],
+  // The old domain and www go to the one canonical site. Path and query carry over, and browsers
+  // keep the fragment, which is where a /pay link holds its data.
+  async redirects() {
+    return [
+      {
+        source: "/:path*",
+        has: [{ type: "host", value: "(www\\.)?runlater\\.io" }],
+        destination: "https://agentlater.io/:path*",
+        permanent: true,
+      },
+      {
+        source: "/:path*",
+        has: [{ type: "host", value: "www\\.agentlater\\.io" }],
+        destination: "https://agentlater.io/:path*",
+        permanent: true,
+      },
+    ];
+  },
   async headers() {
     // Later entries override earlier ones for the same header.
     return [

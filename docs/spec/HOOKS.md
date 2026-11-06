@@ -1,4 +1,4 @@
-# RunLater — Inbound hooks
+# AgentLater — Inbound hooks
 
 Status: **implemented** · Owner: Patrick Thach · Last updated: 2026-11-04 · The rules are in [PRODUCT.md](PRODUCT.md#inbound-hooks), which wins where this differs (the list of headers never kept grew while building); this note is the why. Builds on the [inbox](INBOX.md), wake and secrets.
 
@@ -11,18 +11,18 @@ Status: **implemented** · Owner: Patrick Thach · Last updated: 2026-11-04 · T
 Agents wait on the outside world in two ways:
 
 - **Polling:** check a status URL until it says done. `watch_http` covers this, and `on_match` now acts on the result.
-- **Being pushed to:** GitHub, Stripe, CI providers, Linear and most SaaS tools send a webhook when something happens. RunLater has nothing for this.
+- **Being pushed to:** GitHub, Stripe, CI providers, Linear and most SaaS tools send a webhook when something happens. AgentLater has nothing for this.
 
 A webhook needs a public HTTPS URL that stays up, and most agents (Claude Code, Desktop, Cursor, anything behind the hosted `/mcp`) don't have one. So today they poll things that would happily push, or they don't find out at all. Polling costs one delivery attempt per check. It is slow to notice, and some events have no status URL to poll: "a PR review was requested", "a payment was disputed".
 
 The inbox and wake already carry results across the session boundary. Inbound hooks let outside events cross it the same way:
 
 ```
-Agent    ──create_hook { name: "gh-ci", verify: { scheme: "github", secret: "…" } }──▶ RunLater
-RunLater ──{ url: "https://hooks.runlater.io/h/prj_…/hk_…" } (shown once)──▶ Agent
+Agent    ──create_hook { name: "gh-ci", verify: { scheme: "github", secret: "…" } }──▶ AgentLater
+AgentLater ──{ url: "https://hooks.agentlater.io/h/prj_…/hk_…" } (shown once)──▶ Agent
 Agent    registers the URL as a GitHub webhook … session ends …
-GitHub   ──POST workflow_run (X-Hub-Signature-256)──▶ hooks.runlater.io
-RunLater checks the signature, writes hook.received to the inbox, answers 202, and wakes the agent if a wake is set
+GitHub   ──POST workflow_run (X-Hub-Signature-256)──▶ hooks.agentlater.io
+AgentLater checks the signature, writes hook.received to the inbox, answers 202, and wakes the agent if a wake is set
 Session 2 ──read_inbox──▶ [{ event: "hook.received", hook: "gh-ci", verified: true, request: {…} }]
 ```
 
@@ -42,9 +42,9 @@ Session 2 ──read_inbox──▶ [{ event: "hook.received", hook: "gh-ci", ve
 
 ### The URL
 
-`https://hooks.runlater.io/h/{project_id}/{token}`
+`https://hooks.agentlater.io/h/{project_id}/{token}`
 
-- **The token** is `hk_` followed by 32 random bytes, hex-encoded. RunLater stores only its SHA-256, so even a copy of the database can't recreate the URL. (The URL does appear in the gateway's request logs, Workers Logs, which only operators can read and which expire.) Lookup is by hash, so there is no timing-sensitive string comparison.
+- **The token** is `hk_` followed by 32 random bytes, hex-encoded. AgentLater stores only its SHA-256, so even a copy of the database can't recreate the URL. (The URL does appear in the gateway's request logs, Workers Logs, which only operators can read and which expire.) Lookup is by hash, so there is no timing-sensitive string comparison.
 - **The project id** is in the path so the gateway can route to the right ledger without a global index. It isn't a secret: it already appears in every signed delivery.
 - **A separate host** (`hooks.`), served by the gateway Worker on its own route. Agent traffic and the open internet stay on different names, so each can be rate-limited, logged and, if need be, shut off on its own.
 
@@ -65,7 +65,7 @@ Session 2 ──read_inbox──▶ [{ event: "hook.received", hook: "gh-ci", ve
 
 ### What a delivery becomes
 
-The ledger writes one inbox event, in one transaction, before RunLater answers the sender:
+The ledger writes one inbox event, in one transaction, before AgentLater answers the sender:
 
 ```json
 {
@@ -104,7 +104,7 @@ The ledger writes one inbox event, in one transaction, before RunLater answers t
 | `413` | Body over 256 KiB. |
 | `429` | Rate limited, with `Retry-After`. |
 
-The response body is always empty JSON (`{}`), and RunLater never sends back anything the sender wrote.
+The response body is always empty JSON (`{}`), and AgentLater never sends back anything the sender wrote.
 
 ### Limits and cost
 
@@ -116,7 +116,7 @@ The response body is always empty JSON (`{}`), and RunLater never sends back any
 
 ### Routing and trust
 
-- **The public path:** `hooks.runlater.io` → gateway → API, over the existing service binding.
+- **The public path:** `hooks.agentlater.io` → gateway → API, over the existing service binding.
   - The gateway doesn't check Agent Auth on this route. It reads at most 256 KiB, then calls the API's new internal route `POST /v1/hooks/_receive` with the project id, the token, the method, the headers and the raw body.
   - It signs that call with a short-lived project assertion carrying the internal scope `hooks.receive`. No agent can ever be granted that scope.
 - **The ledger:** hashes the token, finds the hook, checks the signature (after opening the sealed secret, as the consumer does for secrets), applies the rate limits and dedupe, writes the event and answers. All of this happens in the project's Durable Object, so there is one transaction and no shared state.
@@ -132,7 +132,7 @@ The response body is always empty JSON (`{}`), and RunLater never sends back any
 | Unverified hooks? | Allowed, with events marked `verified: false` | Many senders don't sign (forms, simple SaaS, home-grown scripts). Refusing them pushes agents back to polling. |
 | Cost | No attempts | An event is an inbox write, like an inbox callback. Abuse is bounded by rate limits and caps, not by charging. |
 | Dedupe | By the sender's delivery id, for 24 hours | Senders retry on timeouts. Without a delivery id there is nothing safe to key on. |
-| Synchronous challenges (Slack `url_verification`, Meta `hub.challenge`) | Not in v1 | They need RunLater to echo sender input back. That is small, but each scheme needs its own handling. |
+| Synchronous challenges (Slack `url_verification`, Meta `hub.challenge`) | Not in v1 | They need AgentLater to echo sender input back. That is small, but each scheme needs its own handling. |
 | Filtering (e.g. only `workflow_run`) | Left out at first; `keep_headers` kept the event type visible. **Since built:** [HOOK_FILTERS.md](HOOK_FILTERS.md), which also added `update_hook` | The sender's event picker turned out too coarse: it can't say "only failures". |
 | Scopes | `schedule` to create, `cancel` to delete, `read` to list | The same as crons and wake. Hook events land in the inbox, which `read` already covers. |
 
@@ -145,7 +145,7 @@ The response body is always empty JSON (`{}`), and RunLater never sends back any
 
 ## Settled
 
-1. **Its own host.** `hooks.runlater.io` (`hooks-staging.runlater.io`), a second custom domain on the gateway Worker, which serves only `/h/…` there.
+1. **Its own host.** `hooks.agentlater.io` (`hooks-staging.agentlater.io`), a second custom domain on the gateway Worker, which serves only `/h/…` there.
 2. **1,000 events a day** per project, raised to 10,000 once a pack is bought: a trial shouldn't cap a paying user, and the cap is per UTC day, so it resets predictably.
 3. **The URL is shown once.** Only the token's hash is stored.
 

@@ -1,10 +1,10 @@
-# RunLater — Design
+# AgentLater — Design
 
 Status: **current**, with [known gaps](#known-gaps) · Owner: Patrick Thach · Last updated: 2026-11-04 · What it does: [PRODUCT.md](PRODUCT.md) · How it's built: [ARCHITECTURE.md](ARCHITECTURE.md)
 
 ## In one line
 
-**Most of RunLater's interface is read by a model, so tool descriptions and error messages are design work, as much as the website is.**
+**Most of AgentLater's interface is read by a model, so tool descriptions and error messages are design work, as much as the website is.**
 
 ## Two kinds of user
 
@@ -25,7 +25,7 @@ Source: [`packages/contracts/src/capabilities.ts`](../../packages/contracts/src/
 
 | Principle | In practice |
 | --- | --- |
-| **Assume the session ends.** | The inbox cursor lives on RunLater's side, because an agent can't keep one. Every result can wait for a later session. |
+| **Assume the session ends.** | The inbox cursor lives on AgentLater's side, because an agent can't keep one. Every result can wait for a later session. |
 | **Context is the scarce resource.** | `read_inbox` returns 10 events by default and 50 at most. `list_tasks` leaves out response bodies. Hook events keep 16 KiB of a 256 KiB request. |
 | **Say what it costs before it's spent.** | Tool descriptions state what each poll, wake and callback costs, and the plugin skill gives the arithmetic: a watch every 5 minutes for 6 hours is 73 attempts. Admission answers `402` up front rather than failing hours later. |
 | **Repeating a call should be safe.** | `create_project` returns the same project. `idempotency_key` returns the same task. Crons and secrets replace by name. Delivery to the agent is at-least-once, like delivery to a destination. Two exceptions: `schedule_http` without an `idempotency_key` schedules again, and `create_hook` on an existing name deliberately issues a new URL, because that's how a leaked one is rotated. |
@@ -82,12 +82,12 @@ The consent page belongs to the gateway Worker and has a strict CSP (`default-sr
 
 ### Voice
 
-Plain, specific and a little dry. RunLater is trusted with things that happen while nobody is watching, so it doesn't oversell.
+Plain, specific and a little dry. AgentLater is trusted with things that happen while nobody is watching, so it doesn't oversell.
 
 | Do | Don't |
 | --- | --- |
 | Say the number: "50,000 for $5", "100 delivery attempts over 7 days" | "Generous free tier", "affordable" |
-| Say the limit of a promise: "A 2xx response means the destination accepted the request; RunLater says so, and nothing more." | "Guaranteed delivery", "reliable" with nothing behind it |
+| Say the limit of a promise: "A 2xx response means the destination accepted the request; AgentLater says so, and nothing more." | "Guaranteed delivery", "reliable" with nothing behind it |
 | Short verbs in titles: "Do it later", "Get woken up" | "Leverage", "seamless", "supercharge", "platform" |
 | Address the person about *your agent*; describe what the agent does | Blur the two, or call the agent a user in the same sentence as its person |
 | Say what's absent: "no dashboard, no sign-up and no API key to paste" | Imply an account exists |

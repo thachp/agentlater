@@ -1,4 +1,4 @@
-//! `set_wake`: the request RunLater sends to start the agent when its inbox has something new.
+//! `set_wake`: the request AgentLater sends to start the agent when its inbox has something new.
 //!
 //! A wake is a signed `POST` like any delivery. It carries only how many events are unread;
 //! the agent reads them through the authenticated inbox. Wakes are debounced, so a burst of
@@ -73,7 +73,7 @@ impl WakeRequest {
         if !(MIN_WAKE_DEBOUNCE_MS..=MAX_WAKE_DEBOUNCE_MS).contains(&debounce_ms) {
             return Err(WakeRequestError::DebounceRange);
         }
-        // The body is RunLater's own; headers and the URL follow schedule_http's rules.
+        // The body is AgentLater's own; headers and the URL follow schedule_http's rules.
         let request = ScheduleRequest {
             url: self.url,
             method: Method::Post,

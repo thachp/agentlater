@@ -38,7 +38,7 @@ async function linkMac(env: BillingEnv, payload: string): Promise<string> {
   return b64url(new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload))));
 }
 
-/** `<project id>.<expiry ms>.<mac>`: a link only RunLater can mint, for one project. */
+/** `<project id>.<expiry ms>.<mac>`: a link only AgentLater can mint, for one project. */
 export async function mppLink(env: BillingEnv & { PUBLIC_URL: string }, projectId: string, nowMs = Date.now()) {
   const payload = `${projectId}.${nowMs + LINK_TTL_MS}`;
   return { url: `${env.PUBLIC_URL}/billing/mpp/${payload}.${await linkMac(env, payload)}`, expires_ms: nowMs + LINK_TTL_MS };
@@ -67,7 +67,7 @@ function receiptReference(response: Response): string {
 let cache: { key: string; mppx: Promise<ReturnType<typeof build>> } | undefined;
 function build(env: BillingEnv, challengeKey: string) {
   return Mppx.create({
-    realm: "runlater.io",
+    realm: "agentlater.io",
     secretKey: challengeKey,
     methods: [
       charge({
@@ -111,7 +111,7 @@ export async function handleMpp(
   const attempts = ATTEMPT_PACK.attempts;
   const result = await (await mppx(env)).charge({
     amount: (ATTEMPT_PACK.priceCents / 100).toFixed(2),
-    description: `RunLater: ${attempts.toLocaleString("en-US")} delivery attempts for ${projectId}`,
+    description: `AgentLater: ${attempts.toLocaleString("en-US")} delivery attempts for ${projectId}`,
     // Pinned on the credential, so one paid for this project's challenge works only here.
     scope: projectId,
     metadata: { [MPP_PROJECT_KEY]: projectId, [MPP_ATTEMPTS_KEY]: String(attempts) },

@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: RunLater internal API
+  title: AgentLater internal API
   version: 0.2.0
   description: >
     Contract between apps/gateway (TypeScript) and apps/api (Rust). Not public: the API

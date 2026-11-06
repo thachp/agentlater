@@ -1,7 +1,7 @@
 use std::fmt;
 
-/// Headers the platform or RunLater controls. A caller setting these could smuggle
-/// requests, spoof provenance, or forge a RunLater signature.
+/// Headers the platform or AgentLater controls. A caller setting these could smuggle
+/// requests, spoof provenance, or forge a AgentLater signature.
 const RESERVED: &[&str] = &[
     "connection",
     "content-length",

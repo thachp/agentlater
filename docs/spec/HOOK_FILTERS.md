@@ -1,4 +1,4 @@
-# RunLater — Hook filters
+# AgentLater — Hook filters
 
 Status: **implemented** · Owner: Patrick Thach · Last updated: 2026-11-03 · The rules are in [PRODUCT.md](PRODUCT.md#inbound-hooks); this note is the why. Builds on [inbound hooks](HOOKS.md).
 

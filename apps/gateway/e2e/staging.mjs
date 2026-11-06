@@ -2,7 +2,7 @@
 // Runs the agent journey against a deployed environment. deploy-env.yml runs it after the
 // staging deploy (a failure stops production); monitor.yml runs it daily against production.
 //
-//   GATEWAY_URL=https://gateway-staging.runlater.io \
+//   GATEWAY_URL=https://gateway-staging.agentlater.io \
 //   RECEIVER_URL=https://runlater-receiver-staging.<account>.workers.dev \
 //   RECEIVER_TOKEN=... node apps/gateway/e2e/staging.mjs
 
