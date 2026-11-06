@@ -494,6 +494,15 @@ mod tests {
     use runlater_core::limits::{CAPTURE_RETENTION_MS, TRIAL_DURATION_MS};
     use runlater_core::{HookRequest, WakeRequest};
 
+    #[test]
+    fn token_hash_is_plain_sha256() {
+        // Stored hashes are looked up by this, so it can never change.
+        assert_eq!(
+            token_hash("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
     const T0: i64 = 1_767_225_600_000;
     const P: &str = "proj_1";
     const TOKEN: &str = "hk_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";

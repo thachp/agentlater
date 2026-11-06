@@ -3298,6 +3298,11 @@ mod tests {
     use crate::db::sqlite::Memory;
     use runlater_core::limits::LEASE_MS;
 
+    #[test]
+    fn derived_ids_are_the_start_of_a_sha256() {
+        assert_eq!(derived_id("abc"), "task_ba7816bf8f01cfea4141");
+    }
+
     const T0: i64 = 1_767_225_600_000;
     const P: &str = "proj_1";
 

@@ -34,7 +34,7 @@ impl SealingKey {
         Hkdf::<Sha256>::new(Some(SALT), &self.0)
             .expand(project_id.as_bytes(), &mut key)
             .expect("32 bytes is a valid HKDF-SHA256 output length");
-        Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key))
+        Aes256Gcm::new(&Key::<Aes256Gcm>::from(key))
     }
 
     /// `nonce` must be fresh random bytes for every call.
@@ -48,7 +48,7 @@ impl SealingKey {
         let sealed = self
             .project(project_id)
             .encrypt(
-                Nonce::from_slice(&nonce),
+                &Nonce::from(nonce),
                 Payload {
                     msg: value.as_bytes(),
                     aad: name.as_bytes(),
@@ -67,10 +67,11 @@ impl SealingKey {
             return None;
         }
         let (nonce, ciphertext) = raw.split_at(NONCE_BYTES);
+        let nonce = Nonce::try_from(nonce).ok()?;
         let plain = self
             .project(project_id)
             .decrypt(
-                Nonce::from_slice(nonce),
+                &nonce,
                 Payload {
                     msg: ciphertext,
                     aad: name.as_bytes(),
@@ -108,6 +109,24 @@ mod tests {
         assert_eq!(key.open("prj_a", "GH", &tampered), None);
         assert_eq!(key.open("prj_a", "GH", "v1:"), None);
         assert_eq!(key.open("prj_a", "GH", "garbage"), None);
+    }
+
+    /// Secrets already in the ledger must still open after any crypto upgrade. Sealed by the
+    /// code as it first shipped, and opened separately with Node's crypto to confirm the format.
+    #[test]
+    fn opens_a_value_sealed_by_the_released_format() {
+        const SEALED: &str = "v1:AQIDBAUGBwgJCgsMdZDKCgeVMo35Ijj3xxEI/F9rHzcusZa9J0LJ09IBuqT4";
+        const PROJECT: &str = "prj_0123456789abcdef01234567";
+        let key = SealingKey::parse(KEY).unwrap();
+        assert_eq!(
+            key.open(PROJECT, "GITHUB_TOKEN", SEALED).as_deref(),
+            Some("ghp_example-value")
+        );
+        let nonce = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        assert_eq!(
+            key.seal(PROJECT, "GITHUB_TOKEN", "ghp_example-value", nonce),
+            SEALED
+        );
     }
 
     #[test]

@@ -12,7 +12,7 @@ use crate::limits::{
 use crate::watch::Until;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sha2::Sha256;
@@ -786,6 +786,15 @@ mod tests {
         let r = request(json!({ "name": "h", "verify": { "scheme": "github", "secret": SECRET } }));
         assert!(!format!("{r:?}").contains(SECRET));
         assert!(!format!("{:?}", r.validate().unwrap()).contains(SECRET));
+    }
+
+    #[test]
+    fn matches_a_fixed_hmac_vector() {
+        // Same as Node: createHmac("sha256", secret).update(body).digest("hex")
+        assert_eq!(
+            sign("hook-secret-0123456789", &[br#"{"ok":true}"#]),
+            "2c3ffff5c757b038ae1facbd577bfdf43474acc7559feefbc6f53a0d4a0c336d"
+        );
     }
 
     #[test]
