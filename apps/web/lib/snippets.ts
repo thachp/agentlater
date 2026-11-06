@@ -101,7 +101,7 @@ const run = (capability, args = {}) =>
   client.executeCapability({ agentId, capability, arguments: args });
 await run("create_project");`;
 
-export const agentPrompt = `Use RunLater to watch https://deploy.example.com/deployments/123
+export const agentPrompt = `Use AgentLater to watch https://deploy.example.com/deployments/123
 every 5 minutes. When status is SUCCEEDED, start the smoke tests at
 https://ci.example.com/smoke and put the result in the inbox.
 Next session, read the inbox first.`;
@@ -127,7 +127,7 @@ export const hookCall = `create_hook({
     in: ["failure"]
   }]
 })
-// → { url: "https://hooks.runlater.io/h/prj_…/hk_…" }`;
+// → { url: "https://hooks.agentlater.io/h/prj_…/hk_…" }`;
 
 export const inboxCall = `// next session
 get_project()  // → { inbox_unread: 2, … }
@@ -155,7 +155,7 @@ export const taskResult = `{
 export const deliveryHeaders = `POST /hooks/reminder HTTP/1.1
 Host: example.com
 Content-Type: application/json
-User-Agent: RunLater/1 (+https://runlater.io)
+User-Agent: AgentLater/1 (+https://agentlater.io)
 RunLater-Task-Id: task_3bc148a4ebabd050a7bf
 RunLater-Attempt: 1
 RunLater-Timestamp: 1767312000
@@ -167,7 +167,7 @@ export const verifyNode = `import { createHmac, timingSafeEqual } from "node:cry
 
 // headers: lowercase names. rawBody: the body exactly as received (string or Buffer).
 // Returns false for anything malformed; never throws on request input.
-export function verifyRunLater(headers, rawBody, secret, toleranceSecs = 300) {
+export function verifyAgentLater(headers, rawBody, secret, toleranceSecs = 300) {
   const taskId = headers["runlater-task-id"];
   const attempt = headers["runlater-attempt"];
   const timestamp = headers["runlater-timestamp"];

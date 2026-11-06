@@ -194,7 +194,7 @@ function provider(env: Env): OAuthProvider<Env> {
       // The grant is the connection's only identity; keep it while the client keeps using it.
       refreshTokenTTL: 30 * DAY_SECS,
       refreshTokenIdleTTL: 30 * DAY_SECS,
-      resourceMetadata: { resource: `${env.PUBLIC_URL}/mcp`, resource_name: "RunLater" },
+      resourceMetadata: { resource: `${env.PUBLIC_URL}/mcp`, resource_name: "AgentLater" },
     });
     providers.set(env.PUBLIC_URL, p);
   }

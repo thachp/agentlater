@@ -1,8 +1,8 @@
 // Selling attempt packs. get_payment_link returns up to two ways to pay for the caller's project:
-// - payment_url: a person pays on runlater.io/pay, Stripe's Embedded Checkout (Stripe.js) for one
+// - payment_url: a person pays on agentlater.io/pay, Stripe's Embedded Checkout (Stripe.js) for one
 //   Checkout Session; Stripe then calls /billing/webhook, which adds the pack.
 // - mpp_url: an agent with a payment credential pays itself over MPP (mpp.ts).
-// Card details never reach RunLater. With no Stripe keys configured, billing is off.
+// Card details never reach AgentLater. With no Stripe keys configured, billing is off.
 
 import { ATTEMPT_PACK } from "@runlater/contracts/billing";
 import { ApiClient, ApiError } from "./api";
@@ -12,7 +12,7 @@ import { findProject } from "./projects";
 
 export interface BillingEnv {
   STRIPE_SECRET_KEY?: string;
-  /** Public; handed to runlater.io/pay inside the link. */
+  /** Public; handed to agentlater.io/pay inside the link. */
   STRIPE_PUBLISHABLE_KEY?: string;
   STRIPE_WEBHOOK_SECRET?: string;
   /** The Stripe profile (`profile_…`) MPP charges are made for; unset turns MPP off. */
@@ -23,7 +23,7 @@ export interface BillingEnv {
 
 const STRIPE_API = "https://api.stripe.com";
 const STRIPE_VERSION = "2026-10-28.endive";
-const PAY_URL = "https://runlater.io/pay";
+const PAY_URL = "https://agentlater.io/pay";
 /** Stripe's default: a signed event older than this is a replay. */
 const TOLERANCE_SECS = 300;
 /** Checkout Session events are a few KiB. */
@@ -69,7 +69,7 @@ async function checkoutLink(env: BillingEnv, owner: string, projectId: string) {
     "line_items[0][quantity]": "1",
     "line_items[0][price_data][currency]": ATTEMPT_PACK.currency,
     "line_items[0][price_data][unit_amount]": String(ATTEMPT_PACK.priceCents),
-    "line_items[0][price_data][product_data][name]": `RunLater: ${attempts} delivery attempts`,
+    "line_items[0][price_data][product_data][name]": `AgentLater: ${attempts} delivery attempts`,
     "line_items[0][price_data][product_data][description]": `Added to project ${projectId}; valid for 12 months.`,
     "metadata[owner]": owner,
     "metadata[project_id]": projectId,
@@ -170,7 +170,7 @@ export async function handleStripeWebhook(
     if (!projectId) return Response.json({ received: true });
     const attempts = Number(object.metadata?.[MPP_ATTEMPTS_KEY]);
     if (!PROJECT_ID.test(projectId) || !Number.isInteger(attempts) || attempts < 1) {
-      console.error(`stripe: payment intent ${object.id} has malformed RunLater metadata`);
+      console.error(`stripe: payment intent ${object.id} has malformed AgentLater metadata`);
       return Response.json({ received: true, ignored: "malformed_metadata" });
     }
     return credit(env, key, projectId, object.id, attempts);

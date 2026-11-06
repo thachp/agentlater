@@ -1,10 +1,10 @@
-# RunLater — Product Spec (v1)
+# AgentLater — Product Spec (v1)
 
-Status: **v1, live** at `gateway.runlater.io` · Owner: Patrick Thach · Last updated: 2026-11-04 · How it's built: [ARCHITECTURE.md](ARCHITECTURE.md) · How it should feel: [DESIGN.md](DESIGN.md)
+Status: **v1, live** at `gateway.agentlater.io` · Owner: Patrick Thach · Last updated: 2026-11-04 · How it's built: [ARCHITECTURE.md](ARCHITECTURE.md) · How it should feel: [DESIGN.md](DESIGN.md)
 
 ## One line
 
-**RunLater lets an AI agent say "make this HTTP request later" — and then check whether it happened.**
+**AgentLater lets an AI agent say "make this HTTP request later" — and then check whether it happened.**
 
 Publicly: *your agent's session ends; the work doesn't.* The request is the unit, and everything else (crons, watches, hooks, the inbox, wake) exists so that waiting, and finding out, can outlast a session.
 
@@ -34,12 +34,12 @@ There is no human sign-up, password, or dashboard in v1. The agent *is* the cust
 
 | Channel | What it is | Source |
 | --- | --- | --- |
-| Hosted MCP | `https://gateway.runlater.io/mcp`, added as a custom connector or remote server in Claude, ChatGPT, Grok, Codex, Cursor and others | `apps/gateway/src/mcp.ts` |
+| Hosted MCP | `https://gateway.agentlater.io/mcp`, added as a custom connector or remote server in Claude, ChatGPT, Grok, Codex, Cursor and others | `apps/gateway/src/mcp.ts` |
 | Claude Code plugin | The MCP server plus a `runlater` skill that says when to use it, including the start-of-session inbox check | `plugins/runlater`, `.claude-plugin/marketplace.json` |
 | MCP Registry | `io.github.thachp/runlater`, pointing at the hosted server | `server.json` |
 | Agent Auth | Discovery at `/.well-known/agent-configuration`, then the SDK or the local bridge | `apps/gateway/src/auth.ts` |
-| Machine-readable pages | `/llms.txt` says what RunLater is and how to connect; `/openapi.json` advertises the paid MPP endpoint | `apps/gateway/src/discovery.ts` |
-| Site | Landing page and docs at `runlater.io` | `apps/web` |
+| Machine-readable pages | `/llms.txt` says what AgentLater is and how to connect; `/openapi.json` advertises the paid MPP endpoint | `apps/gateway/src/discovery.ts` |
+| Site | Landing page and docs at `agentlater.io` | `apps/web` |
 
 ## Core jobs (v1)
 
@@ -67,16 +67,16 @@ That's the whole product for v1.
 ## How it works (user's view)
 
 ```
-Agent ──connect──▶ RunLater            hosted MCP: a person clicks Connect once
+Agent ──connect──▶ AgentLater            hosted MCP: a person clicks Connect once
                                        Agent Auth: discover, register, get keys
-Agent ──create_project──▶ RunLater     gets a free trial (finite budget, 7 days)
-Agent ──schedule_http──▶ RunLater      { url, method, headers, body, delay, callback_url: "inbox" }
+Agent ──create_project──▶ AgentLater     gets a free trial (finite budget, 7 days)
+Agent ──schedule_http──▶ AgentLater      { url, method, headers, body, delay, callback_url: "inbox" }
                                        ← task_id, status: scheduled
           … time passes …
-RunLater ──signed HTTPS request──▶ destination   (retries on failure)
-RunLater ──task.finished──▶ inbox
-Next session ──get_project──▶ RunLater ← inbox_unread: 1
-Next session ──read_inbox──▶ RunLater  ← the report (or get_task: status, attempts)
+AgentLater ──signed HTTPS request──▶ destination   (retries on failure)
+AgentLater ──task.finished──▶ inbox
+Next session ──get_project──▶ AgentLater ← inbox_unread: 1
+Next session ──read_inbox──▶ AgentLater  ← the report (or get_task: status, attempts)
 ```
 
 ## Concepts
@@ -92,8 +92,8 @@ Next session ──read_inbox──▶ RunLater  ← the report (or get_task: st
 | **Lane** | A name that makes tasks run one at a time. |
 | **Cron** | A request on a UTC schedule; each run is a task. |
 | **Watch** | A task whose attempts are polls, ending when `until` matches. `on_match` is the one request it may send then. |
-| **Inbox** | One log of events per project, with a cursor RunLater keeps. |
-| **Wake** | One URL per project that RunLater calls to start the agent when the inbox has something. |
+| **Inbox** | One log of events per project, with a cursor AgentLater keeps. |
+| **Wake** | One URL per project that AgentLater calls to start the agent when the inbox has something. |
 | **Secret** | A credential stored once, sent only to its allowed hosts, referred to as `{{secret:NAME}}`. |
 | **Hook** | A public URL that turns requests from outside into inbox events. |
 
@@ -115,13 +115,13 @@ scheduled ──(due time reached)──▶ delivering ──2xx──▶ succee
 
 Each one is an Agent Auth capability. MCP clients reach them two ways:
 
-- **Hosted MCP server** at `https://gateway.runlater.io/mcp` (Streamable HTTP). Each capability is a tool. Clients sign in with standard MCP OAuth: on first connect a RunLater consent page opens, the person clicks **Connect**, and there is no account. Each approved connection is its own owner with its own project and trial, separate from any Agent Auth identity; the OAuth grant is its only key (refresh tokens last 30 days from last use).
-- **Agent Auth MCP bridge**, which runs locally and exposes generic tools (`connect_agent`, `list_capabilities`, `execute_capability`); the agent picks a RunLater capability by name inside `execute_capability`:
+- **Hosted MCP server** at `https://gateway.agentlater.io/mcp` (Streamable HTTP). Each capability is a tool. Clients sign in with standard MCP OAuth: on first connect a AgentLater consent page opens, the person clicks **Connect**, and there is no account. Each approved connection is its own owner with its own project and trial, separate from any Agent Auth identity; the OAuth grant is its only key (refresh tokens last 30 days from last use).
+- **Agent Auth MCP bridge**, which runs locally and exposes generic tools (`connect_agent`, `list_capabilities`, `execute_capability`); the agent picks a AgentLater capability by name inside `execute_capability`:
 
 ```json
 { "mcpServers": { "runlater": {
   "command": "npx",
-  "args": ["@auth/agent-cli@0.5.1", "mcp", "--url", "https://gateway.runlater.io"],
+  "args": ["@auth/agent-cli@0.5.1", "mcp", "--url", "https://gateway.agentlater.io"],
   "env": { "AGENT_AUTH_ENCRYPTION_KEY": "<32 random bytes, hex>" }
 } } }
 ```
@@ -171,14 +171,14 @@ services, not a public product in v1.
 - **Idempotency:** an optional `idempotency_key` makes `schedule_http` and `queue_http` safe to repeat. The same key with the same request returns the original task; with a different request it is a conflict.
 - **Queues:** `queue_http`'s `queue` and `schedule_http`'s `lane` are the same thing; a task shows it as `lane`, and `schedule_http` without a time still sends now. Tasks given the same one (1–64 of `A-Z a-z 0-9 _ - . :`) run one at a time. A task that has started (delivering, or waiting to retry) holds its lane until it succeeds, fails or is canceled; then the waiting task with the earliest due time (ties: earliest scheduled) goes next. A failed or canceled task does not block the lane. A redriven task rejoins it with a due time of now. Order is by due time, not by when tasks were scheduled: schedule A with `delay: "1h"` and then B for now in the same lane, and B runs first. Lanes order delivery attempts, not what the destination does with them; at-least-once still applies. Callbacks are not in any lane.
 - **Delay:** `delay` is a relative alternative to `run_at_ms`: a whole number followed by `s`, `m`, `h` or `d` (`"90s"`, `"24h"`, `"7d"`), at most 7 days. Giving both is an error.
-- **Callbacks:** with `callback_url`, every time the task finishes (succeeded, failed or canceled) RunLater queues a *callback task*: a signed `POST` of `{"event": "task.finished", "task": {…}}` (the task as `get_task` returns it) to that URL. It follows the same destination rules, retries and signing, and is visible with `get_task` (`callback_task_id` on the task, `callback_for` on the callback). Each callback try costs one delivery attempt, so scheduling a task with a callback reserves two attempts and two task slots. Callbacks do not themselves call back. A callback always gets at least one try, even after the trial's attempts run out or it expires (but no retries then, and `max_attempts` shows 1); so `attempts_used` can go over the budget by one attempt per such callback. The report includes the task's full `url`, query string included, so don't put secrets there if the callback goes to another party. Callback tasks appear in `list_tasks` like any other.
+- **Callbacks:** with `callback_url`, every time the task finishes (succeeded, failed or canceled) AgentLater queues a *callback task*: a signed `POST` of `{"event": "task.finished", "task": {…}}` (the task as `get_task` returns it) to that URL. It follows the same destination rules, retries and signing, and is visible with `get_task` (`callback_task_id` on the task, `callback_for` on the callback). Each callback try costs one delivery attempt, so scheduling a task with a callback reserves two attempts and two task slots. Callbacks do not themselves call back. A callback always gets at least one try, even after the trial's attempts run out or it expires (but no retries then, and `max_attempts` shows 1); so `attempts_used` can go over the budget by one attempt per such callback. The report includes the task's full `url`, query string included, so don't put secrets there if the callback goes to another party. Callback tasks appear in `list_tasks` like any other.
 
 ## Inbox and captured responses
 
 Callbacks need a public HTTPS URL, and most agents (everything on the hosted `/mcp`) have none. The inbox is where results wait for the agent's next session instead. Why and what was decided: [INBOX.md](INBOX.md).
 
 - **Sending to it.** `callback_url: "inbox"` on `schedule_http` or `watch_http`, `alert_url: "inbox"` on `create_cron`: exactly that string; anything else is a URL under the destination rules. The payload is what the callback or alert would have POSTed (`task.finished` with the task, `cron.failing` / `cron.recovered`), written as an event in the same ledger transaction as the finish. It is not a task: no delivery attempt, no task slot, no retries, and it is written even past the budget or the trial. A task shows its latest event as `inbox_seq`; every finish adds one, so a redriven task reports again.
-- **Reading it.** One inbox per project, an append-only log numbered by `seq` (1, 2, … never reused), with one cursor, `acked_seq`, kept by RunLater because the agent can't keep it across sessions. `read_inbox` returns events after `after` (default `acked_seq`), oldest first, as `{seq, at_ms, event, …}`; `limit` is 1–50, default 10, since every event lands in the agent's context. Reading does not move the cursor: `ack_inbox(up_to)` does, or `read_inbox(ack: true)` up to the last event returned (with `ack`, an `after` past the cursor is refused, since it would ack the events skipped over). So delivery to the agent is at-least-once, like delivery to a destination; events carry the task id to dedupe on.
+- **Reading it.** One inbox per project, an append-only log numbered by `seq` (1, 2, … never reused), with one cursor, `acked_seq`, kept by AgentLater because the agent can't keep it across sessions. `read_inbox` returns events after `after` (default `acked_seq`), oldest first, as `{seq, at_ms, event, …}`; `limit` is 1–50, default 10, since every event lands in the agent's context. Reading does not move the cursor: `ack_inbox(up_to)` does, or `read_inbox(ack: true)` up to the last event returned (with `ack`, an `after` past the cursor is refused, since it would ack the events skipped over). So delivery to the agent is at-least-once, like delivery to a destination; events carry the task id to dedupe on.
 - **The cursor only moves forward.** An `up_to` at or below `acked_seq` changes nothing; one above the newest event is `400 ack_beyond_inbox` (it would ack events the agent hasn't read). Two sessions at once may both see an event; neither can move the other back.
 - **Retention.** Unread events are kept 30 days, acked ones 7 days after they arrive (replayable with `after`). At 10,000 events a new one removes the oldest acked event, or, if none is acked, the oldest unread one. `dropped` counts unread events removed by age or by the cap since the cursor last moved; the reply that moves it still shows the count.
 - **Capture.** `capture: true` on `schedule_http` keeps the response of the latest attempt that got one, success or failure, as the task's `response`: `attempt`, `status`, the `content-type`, `location`, `etag` and `retry-after` headers, the first 16 KiB of the body as UTF-8 (invalid bytes replaced), `body_bytes` from `Content-Length` (null for an encoded body), and `truncated`. Any HTTP answer replaces the earlier capture; a timeout or network error leaves it in place; a redrive keeps it until a new attempt replaces it. It shows in `get_task` and in the callback or inbox report; `list_tasks` leaves out the body. It costs nothing extra. It is deleted 7 days after the task finishes, and an inbox event's copy loses its body at the same time (its status and headers stay). A failed URL callback keeps its payload, never returned by the API, for redrive until it is purged. Reading the body never changes an attempt's outcome: if the body is slow or broken, the status and headers are recorded with `body: null` and `truncated: true`.
@@ -189,7 +189,7 @@ Callbacks need a public HTTPS URL, and most agents (everything on the hosted `/m
 
 The inbox holds results until a session reads them; a wake starts that session. `set_wake` stores one URL per project, something that starts an agent run (a routine or workflow trigger, a chat webhook, the agent's own server), with headers such as its `Authorization`.
 
-- **When.** After an inbox event from a task or a cron alert, if the wake is active and none is already waiting or in flight, RunLater queues one for now, or for `debounce` (1m–24h, default 15m) after the last wake actually sent, if that was more recent. So a burst of results starts the agent once, and re-setting the wake never pushes a pending one later. A wake that comes due with nothing unread is canceled without an attempt and does not count as sent. A delivered wake covers every event up to when it was sent; events after that get the next wake, even if the setting was replaced meanwhile. A failed wake told the agent nothing, so anything still unread gets another.
+- **When.** After an inbox event from a task or a cron alert, if the wake is active and none is already waiting or in flight, AgentLater queues one for now, or for `debounce` (1m–24h, default 15m) after the last wake actually sent, if that was more recent. So a burst of results starts the agent once, and re-setting the wake never pushes a pending one later. A wake that comes due with nothing unread is canceled without an attempt and does not count as sent. A delivered wake covers every event up to when it was sent; events after that get the next wake, even if the setting was replaced meanwhile. A failed wake told the agent nothing, so anything still unread gets another.
 - **What.** A signed `POST` of `{"event": "inbox.unread", "project_id", "unread"}`, the count when it is sent, and nothing else: results and captured responses stay behind the authenticated inbox. It is a task with `wake_call: true`, retried like any delivery and costing one attempt per try. It is not admitted, so it never spends attempts promised to waiting tasks: it goes only while an attempt is spare. With nothing else waiting it gets one try even past the budget or the trial; with work waiting and no spare attempt it is canceled (`budget_reserved`), which is not a wake failure. It can exceed the task cap by one at a time. A wake cannot be redriven (`409 wake_not_redrivable`), and its header values are wiped once it ends.
 - **Turning off.** A wake that fails (all its attempts) counts; a delivered one resets the count. After 3 in a row the wake turns itself off (`state: disabled`, `disabled_reason: wake_failing`) and adds a `wake.disabled` event to the inbox, which does not itself wake. `set_wake` again replaces the URL, headers and debounce, turns it back on, cancels a wake not yet sent, and queues one if anything is unread. `delete_wake` removes it (404 `wake_not_set` if there is none); a wake already being sent finishes.
 - `get_project` shows `wake`: URL, header names (never values), debounce, state, failures in a row, and the last wake's time and task id.
@@ -210,15 +210,15 @@ Agents handle untrusted text (pages, documents, captured responses, hook request
 
 A hook lets an agent with no server receive webhooks: GitHub, Stripe, a CI system, anything that POSTs when something happens. Why and what was decided: [HOOKS.md](HOOKS.md).
 
-- **Creating.** `create_hook(name, verify?, keep_headers?, accept?)` returns `url`, `https://hooks.runlater.io/h/{project_id}/hk_<64 hex>`, **this once**: the ledger stores only the token's SHA-256. Creating again with the same name gives a new URL; the old one answers 404 at once, and the counts start again. `name` follows the cron name rules. At most 20 per project (`429 hook_limit`); not after the trial ends (`403 trial_expired`).
+- **Creating.** `create_hook(name, verify?, keep_headers?, accept?)` returns `url`, `https://hooks.agentlater.io/h/{project_id}/hk_<64 hex>`, **this once**: the ledger stores only the token's SHA-256. Creating again with the same name gives a new URL; the old one answers 404 at once, and the counts start again. `name` follows the cron name rules. At most 20 per project (`429 hook_limit`); not after the trial ends (`403 trial_expired`).
 - **Verifying.** `verify: { scheme, secret }`: `github` (`X-Hub-Signature-256: sha256=<hex>` of the body), `stripe` (`Stripe-Signature: t=…,v1=…` over `"{t}.{body}"`; any `v1` may match; `t` within 5 minutes, else `401 signature_stale`), or `hmac_sha256` with `header` (required) and optional `prefix`, hex or base64. `secret` is 16–1024 printable ASCII bytes, sealed like a project secret (under `hook:{name}`, so it can't be opened as one) and never shown. It is not taken from `set_secret`: those values may only be *sent* to their hosts. A bad, missing or stale signature is `401` and writes nothing to the inbox (it counts in the hook's `refused`). Without `verify`, any POST to the URL is accepted and its event says `verified: false`.
 - **What an event keeps.** `hook.received` with `hook`, `verified`, `delivery_id`, and `request`: `method`, `headers`, the first 16 KiB of the body as text, `body_bytes` and `truncated`. Headers kept: `content-type`, `user-agent`, the scheme's event headers (`x-github-event`, `x-github-delivery`, `x-github-hook-id`), and up to 10 `keep_headers`. Never `authorization`, `cookie`, `proxy-authorization`, `set-cookie`, `x-api-key`, `x-auth-token`, `x-access-token`, `x-gitlab-token` or the signature; asking to keep them is a `400`. Bodies are kept as text: bytes that aren't UTF-8 become U+FFFD. The body is deleted from the event 7 days after it arrives, like a captured response. Hook events wake the agent like any inbox event.
 - **Filtering.** `accept` (on `create_hook` or `update_hook`) is 1–5 rules; a request is kept if any matches. A rule has `headers` (1–5 names, case-insensitive, each with 1–20 exact values of up to 256 bytes, without surrounding spaces) and/or `path` + `in` (as a watch's `until`, against the whole body read as JSON); every part given must hold, and an empty rule is a `400`. Headers are checked first and the body is parsed at most once. A request that matches none is answered `202` like a kept one, so the sender doesn't retry, but writes nothing, wakes nothing, and uses neither a daily cap nor the hook's rate limit (so noise can't crowd out a match); it counts in `filtered`. The filter runs after the signature check (a forged request is still `401`) and after the rate-limit check (a flood over it is refused before any matching), and before delivery-id dedupe, so a filtered request records no id. Filters cut noise; on an unverified hook they are no protection (anyone with the URL can send what matches, and once a cap is reached the different answers reveal the filter). Design: [HOOK_FILTERS.md](HOOK_FILTERS.md).
 - **Changing a hook.** `update_hook(name, verify?, accept?, keep_headers?)` keeps the URL, the counts and the delivery ids seen. Fields left out stay; `accept: null` keeps everything again, `verify: null` stops checking signatures, `keep_headers: null` is the same as `[]`; a new `verify` replaces the secret. `keep_headers` is checked against whichever `verify` then applies.
 - **Retries.** A verified sender's delivery id (`X-GitHub-Delivery`; a Stripe event's `id`) seen on the same hook in the last 24 hours gets `200` and is not written again. Unsigned requests have no trusted id, so a retry is a second event.
-- **Answers.** `202` written, `200` retry, `401` signature, `404` unknown hook or project, `405` anything but POST (GET and HEAD included, so a URL can't be probed), `410` the project's trial has ended, `413` over 256 KiB, `429` rate limited (`Retry-After`), `503` RunLater can't check signatures right now. The body is always `{}`: nothing the sender wrote goes back.
+- **Answers.** `202` written, `200` retry, `401` signature, `404` unknown hook or project, `405` anything but POST (GET and HEAD included, so a URL can't be probed), `410` the project's trial has ended, `413` over 256 KiB, `429` rate limited (`Retry-After`), `503` AgentLater can't check signatures right now. The body is always `{}`: nothing the sender wrote goes back.
 - **Limits and cost.** No delivery attempts: receiving is an inbox write. Per hook, 60 requests a minute in bursts of 20; per project, 1,000 events per UTC day, 10,000 once a pack is bought; per hook without `verify`, 100 a day, so one leaked URL can't use up the project's day (`429 daily_limit`, `Retry-After` until midnight UTC). A full inbox drops its oldest hook event first and never an unread task report for one: with nothing else to drop, the request is `429 inbox_full`. In front, the gateway limits each client IP to 120 and each project to 600 requests a minute. `list_hooks` counts what each hook `received` and `refused`, by reason. GitHub's delivery id isn't signed and its scheme has no timestamp, so a captured request can be replayed; treat events as untrusted.
-- **Where it runs.** `hooks.runlater.io` (`hooks-staging.runlater.io` on staging) is served by the gateway and serves nothing else. The gateway answers 404 for a project it doesn't know (so a made-up id never creates a ledger), reads at most 256 KiB, and hands the request to the project's ledger with a `hooks.receive` assertion, a scope no agent is granted.
+- **Where it runs.** `hooks.agentlater.io` (`hooks-staging.agentlater.io` on staging) is served by the gateway and serves nothing else. The gateway answers 404 for a project it doesn't know (so a made-up id never creates a ledger), reads at most 256 KiB, and hands the request to the project's ledger with a `hooks.receive` assertion, a scope no agent is granted.
 
 ## Crons
 
@@ -234,7 +234,7 @@ A cron runs the same HTTP request on a schedule: five fields (`minute hour day-o
 
 ## Watches
 
-A watch hands off waiting on someone else's long-running job: RunLater polls a status URL until the job is done, then reports back.
+A watch hands off waiting on someone else's long-running job: AgentLater polls a status URL until the job is done, then reports back.
 
 - **A watch is a task.** Its attempts are polls (`GET` by default), signed like any delivery. The first poll is immediate; after one that is not done, the next runs `every` later (5m–24h). `get_task` shows progress under `watch`, `cancel_task` stops it, and `callback_url` gets the final state, as with any task.
 - **Done means `until` matches.** `path` + `in`: a 2xx response whose JSON body has one of the listed values (strings, numbers, booleans, null) at that JSON Pointer, e.g. `{"path": "/status", "in": ["succeeded", "failed"]}`. `status`: the response status is one of the listed codes, e.g. `{"status": [404]}` to wait until something is gone. Given both, both must hold. Only the first 64 KiB of a response is read. Numbers compare by value (`3` matches `3.0`). No expressions or regexes.
@@ -261,7 +261,7 @@ A watch hands off waiting on someone else's long-running job: RunLater polls a s
 }
 ```
 
-- **What it is.** One request, given when the watch is created: `schedule_http`'s `url`, `method` (POST by default), `headers`, `body`, `max_attempts`, `callback_url` and `capture`. No delay, lane or idempotency key (it goes as soon as the watch matches), and it cannot be a watch, so one watch sets off at most one request and nothing chains. RunLater never makes up a request at match time.
+- **What it is.** One request, given when the watch is created: `schedule_http`'s `url`, `method` (POST by default), `headers`, `body`, `max_attempts`, `callback_url` and `capture`. No delay, lane or idempotency key (it goes as soon as the watch matches), and it cannot be a watch, so one watch sets off at most one request and nothing chains. AgentLater never makes up a request at match time.
 - **Checked up front.** It is validated with the watch (`400`, field `on_match`, message naming the inner field). A secret it refers to must exist and allow the action's own host; allowing the watched host is not enough.
 - **When it is sent.** Only on `matched`. A timeout, `poll_failing`, `poll_rejected`, `budget_exhausted` or a cancel sends nothing. A cancel asked for while the matching poll was out still records the match, but sends nothing (`watch.action_skipped: "canceled"`).
 - **Once.** The action is queued in the same ledger transaction that records the match, under an id derived from the watch's. Only the poll holding the watch's lease can finish it, so a late or duplicate poll result changes nothing, and queueing the same action twice is a no-op. After that it is an ordinary task: signed, retried, delivered **at least once**, so the receiver should dedupe on `RunLater-Task-Id`.
@@ -271,16 +271,16 @@ A watch hands off waiting on someone else's long-running job: RunLater polls a s
 
 ## Buying attempts
 
-An agent cannot pay, so a person pays for it. Stripe takes the payment; RunLater never sees card details.
+An agent cannot pay, so a person pays for it. Stripe takes the payment; AgentLater never sees card details.
 
 1. The agent calls `get_payment_link` and passes the `payment_url` to its person. When attempts run out or expire, the `budget_exhausted` / `trial_expired` error says so.
-2. The person opens `runlater.io/pay#…` and pays with Stripe's Embedded Checkout (Stripe.js). The link opens one Stripe Checkout Session and works for 24 hours. The publishable key and the session's client secret travel in the URL fragment, so they never reach a server or a `Referer`.
+2. The person opens `agentlater.io/pay#…` and pays with Stripe's Embedded Checkout (Stripe.js). The link opens one Stripe Checkout Session and works for 24 hours. The publishable key and the session's client secret travel in the URL fragment, so they never reach a server or a `Referer`.
 3. Stripe calls the gateway's webhook. The pack is added to the project the link was made for, once per Checkout Session however often Stripe retries.
 
 **Or the agent pays itself, over MPP** ([Machine Payments Protocol](https://mpp.dev)), if it holds a payment credential (for example a Shared Payment Token from Stripe's `link-cli`):
 
 1. `get_payment_link` also returns `mpp_url`, signed for this project and valid 7 days.
-2. `POST mpp_url` answers `402` with a Stripe charge challenge for one pack. The agent retries with its credential; RunLater charges it through a Stripe PaymentIntent and adds the pack before answering `200` with a `Payment-Receipt`.
+2. `POST mpp_url` answers `402` with a Stripe charge challenge for one pack. The agent retries with its credential; AgentLater charges it through a Stripe PaymentIntent and adds the pack before answering `200` with a `Payment-Receipt`.
 3. If adding fails after the charge, the answer is `202` and Stripe's `payment_intent.succeeded` webhook adds the pack instead. A credential works once; each PaymentIntent is applied once.
 - MPP takes cards only for now (Shared Payment Tokens); stablecoins (Tempo) could follow.
 
@@ -321,8 +321,8 @@ An agent cannot pay, so a person pays for it. Stripe takes the payment; RunLater
 | API keys, invitations, receiver pairing | Replaced by Agent Auth and hosted MCP's one-click OAuth. |
 | Workflows, fan-out, ordering across lanes | Different product. Lanes give one-at-a-time order within a lane only. `on_match` is one request and doesn't chain. |
 | Hooks that send requests | Anyone with a hook's URL could spend the project's attempts. It needs `verify` to be required and its own spec. |
-| Synchronous hook challenges (Slack `url_verification`, Meta `hub.challenge`) | They need RunLater to echo sender input, per scheme. |
-| Notes an agent writes to its own future inbox | RunLater as timed memory is a product decision of its own. |
+| Synchronous hook challenges (Slack `url_verification`, Meta `hub.challenge`) | They need AgentLater to echo sender input, per scheme. |
+| Notes an agent writes to its own future inbox | AgentLater as timed memory is a product decision of its own. |
 
 ## Success criteria for v1 launch
 

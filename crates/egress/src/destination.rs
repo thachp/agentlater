@@ -20,7 +20,7 @@ const NON_PUBLIC_SUFFIXES: &[&str] = &[
     "example",
 ];
 
-/// A URL RunLater is willing to deliver to: `https://` on port 443 to a public DNS name.
+/// A URL AgentLater is willing to deliver to: `https://` on port 443 to a public DNS name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Destination(Url);
 

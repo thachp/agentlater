@@ -1,4 +1,4 @@
-//! Outbound safety: which destinations RunLater may call, which headers a caller may set,
+//! Outbound safety: which destinations AgentLater may call, which headers a caller may set,
 //! and how each delivery is signed.
 //!
 //! This crate checks URL *syntax* only. Workers cannot resolve DNS before `fetch`, so the

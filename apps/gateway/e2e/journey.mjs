@@ -24,7 +24,7 @@ const check = (ok, message) => {
 
 /**
  * @param {object} c
- * @param {string} c.gatewayUrl   where agents connect, e.g. https://gateway-staging.runlater.io
+ * @param {string} c.gatewayUrl   where agents connect, e.g. https://gateway-staging.agentlater.io
  * @param {string} c.receiverUrl  public https base the API delivers to
  * @param {string} [c.receiverReadUrl] base for reading recorded deliveries (defaults to receiverUrl)
  * @param {string} c.receiverToken bearer token for reading recorded deliveries
@@ -59,7 +59,7 @@ export async function runJourney(c) {
     storage: new MemoryStorage(),
     directoryUrl: null,
     allowDirectDiscovery: true,
-    hostName: `RunLater journey ${run}`,
+    hostName: `AgentLater journey ${run}`,
   });
   const { agentId } = await client.connectAgent({
     provider: c.gatewayUrl,

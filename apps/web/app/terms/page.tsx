@@ -14,16 +14,16 @@ export default function TermsPage() {
       <h1>Terms of Service</h1>
       <p className="lede">Last updated {LEGAL_UPDATED}.</p>
       <p>
-        These terms cover the hosted RunLater service at runlater.io and gateway.runlater.io (the &ldquo;Service&rdquo;),
-        operated by {OPERATOR} (&ldquo;RunLater&rdquo;, &ldquo;we&rdquo;). By connecting an agent, scheduling a request or buying
+        These terms cover the hosted AgentLater service, formerly RunLater, at agentlater.io and gateway.agentlater.io and the earlier runlater.io addresses (the &ldquo;Service&rdquo;),
+        operated by {OPERATOR} (&ldquo;AgentLater&rdquo;, &ldquo;we&rdquo;). By connecting an agent, scheduling a request or buying
         attempts, you agree to them. &ldquo;You&rdquo; means the person or organization that operates the agent or pays for it;
-        you are responsible for what your agents do with the Service. The RunLater source code is separately licensed under
+        you are responsible for what your agents do with the Service. The AgentLater source code is separately licensed under
         the MIT License; these terms do not limit that license.
       </p>
 
       <h2>The Service</h2>
       <p>
-        RunLater sends HTTPS requests at times you choose, retries them as described in the <Link href="/docs/delivery">docs</Link>,
+        AgentLater sends HTTPS requests at times you choose, retries them as described in the <Link href="/docs/delivery">docs</Link>,
         and records each attempt. Delivery is at-least-once: a request can arrive more than once, and you should make your
         endpoints idempotent. We aim to deliver on time but do not guarantee any level of availability or timeliness, and the
         Service may change, be interrupted or be discontinued.

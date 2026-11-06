@@ -1,4 +1,4 @@
-// Maps an owner to its RunLater project: an Agent Auth host id, or `mcp:<id>` for a hosted MCP
+// Maps an owner to its AgentLater project: an Agent Auth host id, or `mcp:<id>` for a hosted MCP
 // connection. One project per owner, never reassigned.
 
 import { ApiClient, ApiError } from "./api";

@@ -61,7 +61,7 @@ const CAPABILITIES = [
   ["Do it every day", "Crons on a UTC schedule, with an alert when runs start failing.", "create_cron"],
   ["Wait for a job, then act", "Poll a status URL until it says done, then send the next request itself.", "watch_http · on_match"],
   ["Hear back without a server", "Results, captured responses and alerts land in an inbox the next session reads.", "read_inbox · capture"],
-  ["Get woken up", "When the inbox gets something, RunLater calls the trigger that starts your agent.", "set_wake"],
+  ["Get woken up", "When the inbox gets something, AgentLater calls the trigger that starts your agent.", "set_wake"],
   ["Receive webhooks", "A URL for GitHub, Stripe or CI. Signatures checked, noise filtered, events into the inbox.", "create_hook"],
   ["Keep secrets out of prompts", "Store a token once, bound to its hosts; requests say {{secret:NAME}} instead.", "set_secret"],
 ] as const;
@@ -73,7 +73,7 @@ const EXAMPLES = [
 ] as const;
 
 const STEPS = [
-  ["Connect", <>Add RunLater to your MCP client, or register from code. The agent gets its own identity.</>],
+  ["Connect", <>Add AgentLater to your MCP client, or register from code. The agent gets its own identity.</>],
   ["Create a project", <><code>create_project</code> starts a free trial: 100 delivery attempts over 7 days.</>],
   ["Hand it the waiting", <>Schedule, watch, run a cron or open a hook. Then the session can end.</>],
   ["Hear back", <>Read the inbox next session, get woken up, or check <code>get_task</code>.</>],
@@ -98,7 +98,7 @@ export default function Home() {
             Your agent's session ends. <em>The work doesn't.</em>
           </h1>
           <p className="lede">
-            RunLater keeps going after your agent stops: it sends signed HTTPS requests later, watches long jobs and acts
+            AgentLater keeps going after your agent stops: it sends signed HTTPS requests later, watches long jobs and acts
             when they finish, receives webhooks, and keeps every result in an inbox the next session reads. It can even
             wake the agent up.
           </p>
@@ -122,7 +122,7 @@ export default function Home() {
           <p className="eyebrow">Get started</p>
           <h2>Connect your agent in a minute</h2>
           <p className="intro">
-            RunLater is a set of tools your agent calls over MCP, so it works with Claude, ChatGPT and Grok, any other
+            AgentLater is a set of tools your agent calls over MCP, so it works with Claude, ChatGPT and Grok, any other
             client that speaks MCP, or your own code. There is no dashboard, no sign-up and no API key to
             paste. Each connection gets its own project with a free trial.
           </p>
@@ -194,7 +194,7 @@ export default function Home() {
           <p className="eyebrow">How it works</p>
           <h2>Four steps, no infrastructure</h2>
           <p className="intro">
-            No server, queue or cron job to run. RunLater holds the work and the results until your agent comes back.
+            No server, queue or cron job to run. AgentLater holds the work and the results until your agent comes back.
           </p>
           <ol className="steps">
             {STEPS.map(([title, body]) => (
@@ -212,7 +212,7 @@ export default function Home() {
           <p className="eyebrow">Delivery</p>
           <h2>Built to be trusted with “later”</h2>
           <p className="intro">
-            Delivery is at least once. A 2xx response means the destination accepted the request; RunLater says so, and
+            Delivery is at least once. A 2xx response means the destination accepted the request; AgentLater says so, and
             nothing more.
           </p>
           <div className="features">

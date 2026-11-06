@@ -344,7 +344,7 @@ pub struct ProjectView {
     /// Inbox events not yet acked; `read_inbox` returns them.
     #[serde(default)]
     pub inbox_unread: i64,
-    /// Where RunLater sends a wake when the inbox gets something; see `set_wake`.
+    /// Where AgentLater sends a wake when the inbox gets something; see `set_wake`.
     #[serde(default)]
     pub wake: Option<WakeView>,
 }
@@ -570,7 +570,7 @@ pub struct Delivery {
     #[serde(default)]
     pub secrets: Vec<SealedSecret>,
     /// How long after its scheduled time this attempt started, when that says something about
-    /// RunLater: only a first attempt at the task's original time. A task waiting its turn in a
+    /// AgentLater: only a first attempt at the task's original time. A task waiting its turn in a
     /// lane, a wake held back on purpose, a retry and a redrive are late by design.
     #[serde(default)]
     pub late_ms: Option<i64>,
@@ -1154,7 +1154,7 @@ impl<'a, D: Db> Ledger<'a, D> {
             0
         };
         // Credit before recording the payment: if recording fails, Stripe's retry credits again,
-        // which costs RunLater a little; the other order could leave a paid pack never credited.
+        // which costs AgentLater a little; the other order could leave a paid pack never credited.
         self.db.exec(
             "UPDATE project SET attempt_budget = ?, expires_ms = ?",
             vec![

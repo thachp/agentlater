@@ -1,4 +1,4 @@
-# RunLater
+# AgentLater
 
 Let an AI agent make an HTTP request later, and check whether it happened.
 
@@ -12,7 +12,7 @@ cutover; it is in git history before this change.
 | --- | --- | --- |
 | `apps/api` | Private task API: ledger, scheduling, delivery | Rust · workers-rs |
 | `apps/gateway` | Public entry for agents: Agent Auth, capabilities, MCP | TypeScript Worker |
-| `apps/web` | runlater.io landing, docs and payment page | Next.js · OpenNext |
+| `apps/web` | agentlater.io landing, docs and payment page | Next.js · OpenNext |
 | `apps/receiver` | Staging-only fixture the journey delivers to | TypeScript Worker |
 | `crates/core` | Task domain, no Cloudflare deps | Rust |
 | `crates/egress` | Destination policy and request signing | Rust |
@@ -44,4 +44,4 @@ npm run dev -w @runlater/web
 
 ## License
 
-The code is [MIT](LICENSE). Using the hosted service at runlater.io is covered by its [Terms of Service](https://runlater.io/terms) and [Privacy Policy](https://runlater.io/privacy).
+The code is [MIT](LICENSE). Using the hosted service at agentlater.io is covered by its [Terms of Service](https://agentlater.io/terms) and [Privacy Policy](https://agentlater.io/privacy).

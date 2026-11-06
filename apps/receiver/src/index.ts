@@ -1,5 +1,5 @@
 // Staging test fixture. Records every request sent to /hook/<run>/<name> so the staging
-// journey can check what RunLater delivered, and scripts a few replies to exercise retries:
+// journey can check what AgentLater delivered, and scripts a few replies to exercise retries:
 //   .../ok     200
 //   .../flaky  503 the first time, then 200
 //   .../gone   404

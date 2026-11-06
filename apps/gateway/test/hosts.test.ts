@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { envForHost, isHooksOnlyHost } from "../src/hosts";
+import { envForHost, isHooksOnlyHost, providerNameFor } from "../src/hosts";
 import worker, { type Env } from "../src/index";
 
 const hosts = {
@@ -43,6 +43,15 @@ describe("isHooksOnlyHost", () => {
   it("is false when hooks share the gateway's host", () => {
     const shared = { PUBLIC_URL: "https://gateway.old.test", HOOKS_URL: "https://gateway.old.test" };
     expect(isHooksOnlyHost(shared, "gateway.old.test")).toBe(false);
+  });
+});
+
+describe("providerNameFor", () => {
+  it("keeps the old Agent Auth name on the old domain only", () => {
+    expect(providerNameFor("https://gateway.runlater.io")).toBe("runlater");
+    expect(providerNameFor("https://gateway-staging.runlater.io")).toBe("runlater");
+    expect(providerNameFor("https://gateway.agentlater.io")).toBe("agentlater");
+    expect(providerNameFor("http://localhost:8787")).toBe("agentlater");
   });
 });
 

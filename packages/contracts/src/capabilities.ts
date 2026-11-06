@@ -1,4 +1,4 @@
-// The agent-facing contract: RunLater's Agent Auth capabilities. The gateway serves these
+// The agent-facing contract: AgentLater's Agent Auth capabilities. The gateway serves these
 // (apps/gateway) and the docs render them (apps/web), so both read this one definition.
 // Through the Agent Auth MCP bridge the description and input schema are what an agent reads.
 
@@ -16,7 +16,7 @@ export const LANE_PATTERN = "^[A-Za-z0-9_.:-]{1,64}$";
 export const CRON_NAME_PATTERN = "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$";
 export const SECRET_NAME_PATTERN = "^[A-Z][A-Z0-9_]{0,63}$";
 const SECRET_NAME = { type: "string", pattern: SECRET_NAME_PATTERN, description: "The secret's name, e.g. \"GITHUB_TOKEN\"." };
-const SECRET_HEADERS_NOTE = " A header value may use {{secret:NAME}} (see set_secret); RunLater fills it in only when sending, to hosts the secret allows.";
+const SECRET_HEADERS_NOTE = " A header value may use {{secret:NAME}} (see set_secret); AgentLater fills it in only when sending, to hosts the secret allows.";
 export const STATUSES = ["scheduled", "delivering", "retrying", "succeeded", "failed", "canceled"];
 
 const noArgs = { type: "object", additionalProperties: false, properties: {} };
@@ -117,7 +117,7 @@ export const capabilities: CapabilityDefinition[] = [
   {
     name: "create_project",
     description:
-      "Create this agent's RunLater project with a free trial (100 delivery attempts, 7 days). " +
+      "Create this agent's AgentLater project with a free trial (100 delivery attempts, 7 days). " +
       "Call once before scheduling; calling again returns the same project and never resets the trial. " +
       "The returned signing_secret lets the destination verify RunLater-Signature on each delivery.",
     input: noArgs,
@@ -145,7 +145,7 @@ export const capabilities: CapabilityDefinition[] = [
     description:
       "Send an HTTP request to a public https:// URL at a time: after a delay (\"90s\", \"15m\", \"24h\", \"7d\"), " +
       "or at run_at_ms (unix milliseconds), at most 7 days ahead. To send as soon as possible, use queue_http. " +
-      "RunLater signs the request, retries timeouts, 408, 425, 429 and 5xx with backoff (up to max_attempts), " +
+      "AgentLater signs the request, retries timeouts, 408, 425, 429 and 5xx with backoff (up to max_attempts), " +
       "and records every attempt. Returns the task; check it later with get_task, or pass callback_url to have " +
       "the final result POSTed to you. No public URL of your own? Pass callback_url: \"inbox\" and read the result in a later " +
       "session with read_inbox. Pass capture: true to keep what the destination answered. Pass idempotency_key to make retries of this call safe.",
@@ -177,7 +177,7 @@ export const capabilities: CapabilityDefinition[] = [
     description:
       "Send an HTTP request to a public https:// URL in the background, as soon as possible. Pass queue to run related requests " +
       "one at a time, in order; each then waits its turn behind the ones ahead of it. To send at a later time, use schedule_http. " +
-      "RunLater signs the request, retries timeouts, 408, 425, 429 and 5xx with backoff (up to max_attempts), " +
+      "AgentLater signs the request, retries timeouts, 408, 425, 429 and 5xx with backoff (up to max_attempts), " +
       "and records every attempt. Returns the task, which shows its queue as lane; check it later with get_task, or pass " +
       "callback_url to have the final result POSTed to you. No public URL of your own? Pass callback_url: \"inbox\" and read the " +
       "result in a later session with read_inbox. Pass capture: true to keep what the destination answered. " +
@@ -234,7 +234,7 @@ export const capabilities: CapabilityDefinition[] = [
       "Run an HTTP request on a recurring schedule: a 5-field cron expression in UTC with a single minute value (at most once an hour) " +
       "(e.g. \"0 6 * * *\" is daily at 06:00 UTC). Each run is an ordinary task (see get_task) and costs delivery attempts. " +
       "Dead man's switch: if a run fails, or cannot start because the trial's attempts ran out or it ended, " +
-      "RunLater POSTs a signed alert to alert_url, and again when a run next succeeds. " +
+      "AgentLater POSTs a signed alert to alert_url, and again when a run next succeeds. " +
       "To hear how runs went, pass callback_url (a URL, or \"inbox\" for read_inbox) and capture: true to keep each run's response; " +
       "report: \"failures\" sends only failed runs, so a healthy cron stays quiet (and doesn't wake you via set_wake). " +
       "A run that cannot start at all (attempts ran out, the trial ended) never reports; it turns the cron failing, which goes to " +
@@ -304,13 +304,13 @@ export const capabilities: CapabilityDefinition[] = [
   {
     name: "watch_http",
     description:
-      "Hand off waiting on a long-running job: RunLater polls a public https:// URL (now, then every 5m to 24h) until the " +
+      "Hand off waiting on a long-running job: AgentLater polls a public https:// URL (now, then every 5m to 24h) until the " +
       "response matches `until`, the deadline passes (at most 7d), or 3 polls in a row fail (408, 425, 429, 5xx, timeout, " +
       "network). Any other 4xx, or a redirect, ends it at once. Each poll costs one delivery attempt, taken as it runs, " +
       "not reserved up front: a long watch can use up attempts other tasks are waiting for. The watch is a task: get_task shows its " +
       "progress under `watch`, cancel_task stops it, and callback_url receives a signed POST with the result, including " +
       "the matched value and up to 16 KiB of the last response body. Headers (e.g. an API token) are deleted when it ends. " +
-      "Pass on_match to act without waiting for your next turn: when (and only when) `until` matches, RunLater sends that one " +
+      "Pass on_match to act without waiting for your next turn: when (and only when) `until` matches, AgentLater sends that one " +
       "request as an ordinary task, linked by watch.action_task_id and triggered_by. Its attempt (and its callback's) is reserved " +
       "when the watch is created; a timeout, failure or cancel sends nothing.",
     input: {
@@ -451,9 +451,9 @@ export const capabilities: CapabilityDefinition[] = [
   {
     name: "set_wake",
     description:
-      "Have RunLater start you when your inbox gets something, instead of waiting for someone to open a session. Give the " +
+      "Have AgentLater start you when your inbox gets something, instead of waiting for someone to open a session. Give the " +
       "https:// URL that starts an agent run (a routine or workflow trigger, a chat webhook, your own server) and any headers it " +
-      "needs, such as Authorization. RunLater POSTs {\"event\": \"inbox.unread\", \"project_id\", \"unread\"}, signed like any " +
+      "needs, such as Authorization. AgentLater POSTs {\"event\": \"inbox.unread\", \"project_id\", \"unread\"}, signed like any " +
       "delivery, and nothing else: read the events with read_inbox. At most one wake per debounce (default 15m), so a burst of " +
       "results starts you once; a wake that would find nothing unread is dropped. Each wake costs one delivery attempt. After 3 " +
       "wakes in a row fail it turns itself off (wake.state: disabled) and adds a wake.disabled event to the inbox; call set_wake " +
@@ -483,14 +483,14 @@ export const capabilities: CapabilityDefinition[] = [
   },
   {
     name: "delete_wake",
-    description: "Stop waking: RunLater no longer calls the wake URL. A wake already being sent finishes; one not yet sent is canceled.",
+    description: "Stop waking: AgentLater no longer calls the wake URL. A wake already being sent finishes; one not yet sent is canceled.",
     input: noArgs,
   },
   {
     name: "set_secret",
     description:
       "Store a credential once and refer to it instead of pasting it into requests: put {{secret:NAME}} in a header value of " +
-      "schedule_http, create_cron, watch_http or set_wake, e.g. \"Authorization\": \"Bearer {{secret:GITHUB_TOKEN}}\". RunLater " +
+      "schedule_http, create_cron, watch_http or set_wake, e.g. \"Authorization\": \"Bearer {{secret:GITHUB_TOKEN}}\". AgentLater " +
       "encrypts the value, fills it in only at the moment it sends, and only to allowed_hosts: a request to any other host is " +
       "refused, so a tricked or mistaken call cannot leak it. The value is never returned by any call, and if a destination echoes " +
       "it back as sent, JSON-escaped or URL-encoded, a captured response shows [secret:NAME] instead (best effort: other " +
@@ -536,9 +536,9 @@ export const capabilities: CapabilityDefinition[] = [
     description:
       "Get a URL that receives webhooks for you: GitHub, Stripe, a CI system or any service that POSTs when something happens, " +
       "so you hear about it without polling or running a server. Each POST becomes a hook.received event in your inbox (read_inbox), " +
-      "and wakes you if set_wake is on. The returned url is shown only this once and RunLater can't show it again: register it with the " +
+      "and wakes you if set_wake is on. The returned url is shown only this once and AgentLater can't show it again: register it with the " +
       "sender right away. Calling again with the same name gives a new URL and retires the old one. Pass verify so only the real sender " +
-      "gets in: RunLater checks its signature and refuses anything else (401); without it anyone who learns the URL can write to your " +
+      "gets in: AgentLater checks its signature and refuses anything else (401); without it anyone who learns the URL can write to your " +
       "inbox, and events say verified: false. Retries the sender marks with a delivery id (GitHub, Stripe) are written once. Receiving " +
       "costs no delivery attempts; each hook takes 60 requests a minute and a project 1,000 hook events a day (10,000 once it has bought " +
       "attempts); a hook without verify, 100 a day. Pass accept to keep only the requests you care about (filtered ones cost " +
