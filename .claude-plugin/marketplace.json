@@ -11,7 +11,7 @@
       "name": "agentlater",
       "source": "./plugins/agentlater",
       "description": "Let Claude make HTTP requests later, then pick up results, webhooks and wake-ups in a later session.",
-      "version": "1.2.1",
+      "version": "1.2.2",
       "category": "productivity",
       "homepage": "https://agentlater.io",
       "license": "MIT"

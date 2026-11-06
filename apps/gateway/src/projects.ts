@@ -16,12 +16,33 @@ export async function findProject(db: D1Database, owner: string): Promise<string
   return row?.project_id ?? null;
 }
 
-/** Returns the owner's project id, allocating one on first call. Safe to repeat. */
-export async function ensureProject(db: D1Database, owner: string): Promise<string> {
+const DAY_MS = 24 * 3600 * 1000;
+
+/** Refuses a new trial once `limit` have started in the last 24 hours. Bounds what free identities can cost. */
+async function checkTrialCapacity(db: D1Database, limit: number, now: number): Promise<void> {
+  const row = await db
+    .prepare("SELECT COUNT(*) AS started FROM runlater_project WHERE created_at > ?")
+    .bind(now - DAY_MS)
+    .first<{ started: number }>();
+  if ((row?.started ?? 0) >= limit) {
+    throw new ApiError(429, {
+      error: { code: "trials_paused", message: "new free trials are full for today; try create_project again later" },
+    });
+  }
+}
+
+/**
+ * Returns the owner's project id, allocating one on first call. Safe to repeat, and an owner with
+ * a project is never refused. Concurrent calls can pass `trialsPerDay` by a few; it is a budget, not a contract.
+ */
+export async function ensureProject(db: D1Database, owner: string, trialsPerDay?: number, now = Date.now()): Promise<string> {
+  const found = await findProject(db, owner);
+  if (found) return found;
+  if (trialsPerDay !== undefined) await checkTrialCapacity(db, trialsPerDay, now);
   const id = `prj_${[...crypto.getRandomValues(new Uint8Array(12))].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
   await db
     .prepare("INSERT OR IGNORE INTO runlater_project (host_id, project_id, created_at) VALUES (?, ?, ?)")
-    .bind(owner, id, Date.now())
+    .bind(owner, id, now)
     .run();
   const existing = await findProject(db, owner);
   if (!existing) throw new Error("project mapping missing after insert");
@@ -30,13 +51,14 @@ export async function ensureProject(db: D1Database, owner: string): Promise<stri
 
 /** Runs a capability for an owner: create_project allocates its project, anything else needs one. */
 export async function runCapability(
-  env: BillingEnv & { DB: D1Database; API: Fetcher; PUBLIC_URL: string; HOOKS_URL?: string },
+  env: BillingEnv & { DB: D1Database; API: Fetcher; PUBLIC_URL: string; HOOKS_URL?: string; NEW_TRIALS_PER_DAY?: string },
   key: CryptoKey,
   owner: string,
   capability: string,
   args: Record<string, unknown>,
 ): Promise<unknown> {
-  const projectId = capability === "create_project" ? await ensureProject(env.DB, owner) : await findProject(env.DB, owner);
+  const trialsPerDay = env.NEW_TRIALS_PER_DAY ? Number(env.NEW_TRIALS_PER_DAY) : undefined;
+  const projectId = capability === "create_project" ? await ensureProject(env.DB, owner, trialsPerDay) : await findProject(env.DB, owner);
   if (!projectId) {
     throw new ApiError(404, {
       error: { code: "project_not_found", message: "call create_project before using other capabilities" },

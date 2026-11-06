@@ -23,7 +23,7 @@ scheduled ──(run_at reached)──▶ delivering ──2xx──▶ succeede
 | Request body | 64 KB |
 | Headers | 32 headers, 8 KB total |
 | Furthest `run_at_ms` / `delay` | 7 days, and before the trial ends |
-| Trial | 100 delivery attempts, 7 days |
+| Trial | 1,000 delivery attempts, 7 days |
 | Attempt pack | 50,000 attempts for $5, balance valid 12 months |
 | Tasks held | 1,000 (20,000 once a pack is bought) |
 | Crons | 10 per project, at most one run an hour each |
@@ -38,6 +38,7 @@ scheduled ──(run_at reached)──▶ delivering ──2xx──▶ succeede
 | Code | What to do |
 | --- | --- |
 | `budget_exhausted`, `trial_expired` | `get_payment_link`, give the user `payment_url` |
+| `trials_paused` | New trials are full for today; call `create_project` again later |
 | `secret_not_found`, `secret_host_not_allowed` | `set_secret` with the destination's exact host in `allowed_hosts` |
 | `watch_not_redrivable`, `wake_not_redrivable` | start a new watch / `set_wake` again |
 | `ack_beyond_inbox` | ack only up to the last `seq` you read |

@@ -3458,7 +3458,7 @@ mod tests {
         assert!(p.paid);
         assert_eq!(
             p.attempts_remaining,
-            70 + 50_000,
+            i64::from(TRIAL_ATTEMPTS) - 30 + 50_000,
             "unused trial attempts carry over"
         );
         assert_eq!(p.expires_ms, T0 + 10 + CREDIT_VALIDITY_MS);
@@ -3468,7 +3468,10 @@ mod tests {
         assert_eq!(again, p, "a repeated payment must not add twice");
 
         let (two, _) = l.add_credit("cs_test_2", 50_000, T0 + 30).unwrap();
-        assert_eq!(two.attempts_remaining, 70 + 100_000);
+        assert_eq!(
+            two.attempts_remaining,
+            i64::from(TRIAL_ATTEMPTS) - 30 + 100_000
+        );
         assert_eq!(two.expires_ms, T0 + 30 + CREDIT_VALIDITY_MS);
     }
 

@@ -10,7 +10,7 @@ export const CONTACT_EMAIL = "support@agentlater.io";
 export const LEGAL_UPDATED = "November 6, 2026";
 
 export const LIMITS: [string, string][] = [
-  ["Free trial", "100 delivery attempts over 7 days, per project"],
+  ["Free trial", "1,000 delivery attempts over 7 days, per project"],
   ["More attempts", "50,000 for $5, valid 12 months; leftovers carry over"],
   ["Projects", "One per agent host"],
   ["Schedule ahead", "Up to 7 days, and before the project's attempts expire"],

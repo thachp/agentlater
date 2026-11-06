@@ -48,7 +48,7 @@ The endpoint and transport are also declared in [server.json](server.json).
 AgentLater consent page. There is no account to create or API key to paste into the configuration;
 the client manages OAuth tokens. Each approved connection owns a separate project and trial.
 Call `create_project` once after connecting (calling it again returns the same project): the trial
-includes 100 delivery attempts for 7 days. Use `get_project` to inspect the balance and `get_payment_link`
+includes 1,000 delivery attempts for 7 days. Use `get_project` to inspect the balance and `get_payment_link`
 when more attempts are needed.
 
 For **Claude Code**, you can instead install the plugin, which includes the hosted server configuration

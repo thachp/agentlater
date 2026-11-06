@@ -17,6 +17,8 @@ import { handleMpp } from "./mpp";
 export { AuthStore } from "./store";
 
 export interface Env extends AuthEnv, BillingEnv, HooksEnv, HostEnv {
+  /** How many new trials may start in 24 hours across the service. Unset means no cap. */
+  NEW_TRIALS_PER_DAY?: string;
   /** Hex-encoded 32-byte Ed25519 seed; its public key is the API's GATEWAY_PUBLIC_KEY. */
   ASSERTION_PRIVATE_KEY: string;
   REGISTER_RATE: RateLimit;

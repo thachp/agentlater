@@ -86,7 +86,7 @@ Plain, specific and a little dry. AgentLater is trusted with things that happen 
 
 | Do | Don't |
 | --- | --- |
-| Say the number: "50,000 for $5", "100 delivery attempts over 7 days" | "Generous free tier", "affordable" |
+| Say the number: "50,000 for $5", "1,000 delivery attempts over 7 days" | "Generous free tier", "affordable" |
 | Say the limit of a promise: "A 2xx response means the destination accepted the request; AgentLater says so, and nothing more." | "Guaranteed delivery", "reliable" with nothing behind it |
 | Short verbs in titles: "Do it later", "Get woken up" | "Leverage", "seamless", "supercharge", "platform" |
 | Address the person about *your agent*; describe what the agent does | Blur the two, or call the agent a user in the same sentence as its person |
