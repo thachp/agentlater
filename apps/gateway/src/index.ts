@@ -10,14 +10,13 @@ import { llmsTxt, openApi } from "./discovery";
 import { readLimited } from "./body";
 import { handleAuthorize } from "./consent";
 import { handleHook, isHookPath, type HooksEnv } from "./hooks";
+import { envForHost, isHooksOnlyHost, type HostEnv } from "./hosts";
 import { handleMcp, type McpProps } from "./mcp";
 import { handleMpp } from "./mpp";
 
 export { AuthStore } from "./store";
 
-export interface Env extends AuthEnv, BillingEnv, HooksEnv {
-  /** Where hook URLs point: a host of their own. Defaults to PUBLIC_URL. */
-  HOOKS_URL?: string;
+export interface Env extends AuthEnv, BillingEnv, HooksEnv, HostEnv {
   /** Hex-encoded 32-byte Ed25519 seed; its public key is the API's GATEWAY_PUBLIC_KEY. */
   ASSERTION_PRIVATE_KEY: string;
   REGISTER_RATE: RateLimit;
@@ -206,13 +205,13 @@ function provider(env: Env): OAuthProvider<Env> {
 const OAUTH_LIMITED = new Set(["/oauth/register", "/authorize"]);
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, baseEnv: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
-    // Hooks are for the open internet, so they bypass OAuth and Agent Auth, and the hooks host
-    // serves nothing else.
-    const hooksHost = env.HOOKS_URL ? new URL(env.HOOKS_URL).host : null;
-    if (isHookPath(path) || (hooksHost && hooksHost !== new URL(env.PUBLIC_URL).host && url.host === hooksHost)) {
+    const env = envForHost(baseEnv, url.host);
+    // Hooks are for the open internet, so they bypass OAuth and Agent Auth, and the hooks hosts
+    // serve nothing else.
+    if (isHookPath(path) || isHooksOnlyHost(env, url.host)) {
       if (!isHookPath(path)) return error(404, "not_found", "no such route");
       let key: CryptoKey;
       try {

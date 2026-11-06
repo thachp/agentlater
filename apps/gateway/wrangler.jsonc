@@ -32,12 +32,19 @@
   "env": {
     "staging": {
       "name": "runlater-gateway-staging",
-      "vars": { "PUBLIC_URL": "https://gateway-staging.runlater.io", "HOOKS_URL": "https://hooks-staging.runlater.io" },
-      // Must match PUBLIC_URL: Agent Auth checks token audiences against it. The hooks host
-      // serves inbound hooks only.
+      "vars": {
+        "PUBLIC_URL": "https://gateway-staging.runlater.io",
+        "HOOKS_URL": "https://hooks-staging.runlater.io",
+        "ALT_PUBLIC_URL": "https://gateway-staging.agentlater.io",
+        "ALT_HOOKS_URL": "https://hooks-staging.agentlater.io"
+      },
+      // Must match PUBLIC_URL or ALT_PUBLIC_URL: Agent Auth checks token audiences against the one
+      // for the request's host (src/hosts.ts). The hooks hosts serve inbound hooks only.
       "routes": [
         { "pattern": "gateway-staging.runlater.io", "custom_domain": true },
-        { "pattern": "hooks-staging.runlater.io", "custom_domain": true }
+        { "pattern": "hooks-staging.runlater.io", "custom_domain": true },
+        { "pattern": "gateway-staging.agentlater.io", "custom_domain": true },
+        { "pattern": "hooks-staging.agentlater.io", "custom_domain": true }
       ],
       "services": [{ "binding": "API", "service": "runlater-api-staging" }],
       "d1_databases": [
@@ -55,10 +62,17 @@
     },
     "production": {
       "name": "runlater-gateway-production",
-      "vars": { "PUBLIC_URL": "https://gateway.runlater.io", "HOOKS_URL": "https://hooks.runlater.io" },
+      "vars": {
+        "PUBLIC_URL": "https://gateway.runlater.io",
+        "HOOKS_URL": "https://hooks.runlater.io",
+        "ALT_PUBLIC_URL": "https://gateway.agentlater.io",
+        "ALT_HOOKS_URL": "https://hooks.agentlater.io"
+      },
       "routes": [
         { "pattern": "gateway.runlater.io", "custom_domain": true },
-        { "pattern": "hooks.runlater.io", "custom_domain": true }
+        { "pattern": "hooks.runlater.io", "custom_domain": true },
+        { "pattern": "gateway.agentlater.io", "custom_domain": true },
+        { "pattern": "hooks.agentlater.io", "custom_domain": true }
       ],
       "services": [{ "binding": "API", "service": "runlater-api-production" }],
       "d1_databases": [
