@@ -15,7 +15,7 @@
     "check": "npm run check --workspaces --if-present"
   },
   "devDependencies": {
-    "typescript": "5.9.3",
-    "wrangler": "4.154.0"
+    "typescript": "7.0.2",
+    "wrangler": "4.156.2"
   }
 }
