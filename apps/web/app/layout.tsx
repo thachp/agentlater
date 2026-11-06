@@ -1,8 +1,13 @@
 import type { Metadata } from "next";
+import { Fraunces, Inter } from "next/font/google";
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { GATEWAY_URL, REPO_URL } from "../lib/site";
 import "./globals.css";
+
+// Downloaded at build time and served from this site, so no reader's browser calls Google.
+const display = Fraunces({ subsets: ["latin"], style: ["normal", "italic"], axes: ["opsz"], variable: "--font-display" });
+const sans = Inter({ subsets: ["latin"], variable: "--font-sans" });
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://agentlater.io"),
@@ -13,7 +18,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" className={`${display.variable} ${sans.variable}`}>
       <body>
         <a className="skip" href="#main">
           Skip to content
@@ -30,6 +35,9 @@ export default function RootLayout({ children }: { children: ReactNode }) {
                 Capabilities
               </Link>
               <a href={REPO_URL}>GitHub</a>
+              <Link href="/#connect" className="button primary small">
+                Connect
+              </Link>
             </nav>
           </div>
         </header>
