@@ -114,7 +114,7 @@ pub(crate) mod sqlite {
         ) -> Result<Vec<T>, DbError> {
             let err = |e: rusqlite::Error| DbError(e.to_string());
             let mut stmt = self.0.prepare(sql).map_err(err)?;
-            let names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+            let names: Vec<String> = stmt.column_names().map(str::to_string).collect();
             let mut rows = stmt
                 .query(rusqlite::params_from_iter(bind(params)))
                 .map_err(err)?;
