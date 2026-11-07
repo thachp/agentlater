@@ -524,7 +524,7 @@ describe("MCP bridge (@auth/agent-cli mcp)", () => {
       new StdioClientTransport({
         command: process.execPath,
         args: [
-          fileURLToPath(import.meta.resolve("@auth/agent-cli")).replace(/index\.js$/, "index.js"),
+          fileURLToPath(import.meta.resolve("@auth/agent-cli")),
           "mcp",
           "--url",
           origin,
