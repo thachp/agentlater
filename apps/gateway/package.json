@@ -13,18 +13,18 @@
     "@types/node": "26.6.6",
     "@auth/agent": "0.6.2",
     "@auth/agent-cli": "0.5.1",
-    "@cloudflare/workers-types": "5.20261103.1",
+    "@cloudflare/workers-types": "5.20261104.1",
     "@runlater/tsconfig": "*",
     "vitest": "5.1.0"
   },
   "dependencies": {
     "@better-auth/agent-auth": "0.6.2",
-    "@cfworker/json-schema": "4.1.4",
+    "@cfworker/json-schema": "4.1.6",
     "@cloudflare/workers-oauth-provider": "1.2.4",
     "@modelcontextprotocol/sdk": "1.32.2",
     "@runlater/contracts": "*",
-    "better-auth": "1.7.15",
-    "mppx": "0.17.0",
+    "better-auth": "1.7.16",
+    "mppx": "0.17.1",
     "zod": "4.6.7"
   }
 }
