@@ -17,5 +17,8 @@
   "devDependencies": {
     "typescript": "7.0.2",
     "wrangler": "4.157.0"
+  },
+  "overrides": {
+    "glob": "14.0.4"
   }
 }
