@@ -371,7 +371,7 @@ mod tests {
             secret(&["a.example.com"]),
             secret(&["a.example.com"]).validate().unwrap()
         );
-        assert!(!shown.contains("ghp_abc123"), "{shown}");
+        assert!(!shown.contains("ghp_abc123"));
     }
 
     #[test]

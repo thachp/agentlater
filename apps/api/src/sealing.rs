@@ -30,11 +30,11 @@ impl SealingKey {
     }
 
     fn project(&self, project_id: &str) -> Aes256Gcm {
-        let mut key = [0u8; 32];
+        let mut key = Key::<Aes256Gcm>::default();
         Hkdf::<Sha256>::new(Some(SALT), &self.0)
             .expand(project_id.as_bytes(), &mut key)
             .expect("32 bytes is a valid HKDF-SHA256 output length");
-        Aes256Gcm::new(&Key::<Aes256Gcm>::from(key))
+        Aes256Gcm::new(&key)
     }
 
     /// `nonce` must be fresh random bytes for every call.
