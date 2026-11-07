@@ -26,4 +26,4 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 worker.workspace = true
 
 [dev-dependencies]
-rusqlite = { version = "0.37", features = ["bundled", "limits"] }
+rusqlite = { version = "0.41", features = ["bundled", "limits"] }
