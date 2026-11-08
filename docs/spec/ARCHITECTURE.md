@@ -107,7 +107,7 @@ Schema changes:
 
 ## How work moves
 
-**Admission.** Before accepting work, the ledger refuses it if the project has expired (`403 trial_expired`), if the task cap would be exceeded (`429 task_limit`), or if waiting tasks plus the new one would need more attempts than are left (`402 budget_exhausted`). A waiting task reserves one attempt, plus one for a callback to a URL and any for its `on_match` action. This keeps storage bounded by what the project has paid for or been given.
+**Admission.** Before accepting work, the ledger refuses it if the project has expired (`403 trial_expired`), if the task cap would be exceeded (`429 task_limit`), or if waiting tasks plus the new one would need more attempts than are left (`402 budget_exhausted`). A waiting task reserves one attempt, plus one for a callback to a URL and any for its `on_match` action. A task already being delivered reserves only those follow-ups, since its attempt was charged when it started, and a pending wake reserves none. The rules live in `ledger/budget.rs`. This keeps storage bounded by what the project has paid for or been given.
 
 **Delivery.** The task rows are the outbox; there is no separate table.
 
@@ -171,7 +171,7 @@ GET    /health
 runlater/
 ├── apps/
 │   ├── api/                 Rust Worker
-│   │   ├── src/             worker_entry, ledger (+ ledger/hooks), assertion, sealing, db, http
+│   │   ├── src/             worker_entry, ledger (+ ledger/hooks, tasks, budget), assertion, sealing, db, http
 │   │   └── test/            workerd e2e
 │   ├── gateway/             TS Worker
 │   │   ├── src/             index, mcp, consent, auth, store, projects, capabilities,
@@ -239,7 +239,7 @@ One `wrangler.jsonc` per app with `env.staging` and `env.production` (the receiv
 | `AuthStore` is a single Durable Object | Every Agent Auth call goes through it for replay checks, so it is a throughput ceiling and a shared point of failure for that path. Hosted MCP doesn't use it. Fine at today's traffic; untested at scale. |
 | `SECRETS_KEY` is never rotated | One per environment. Losing it loses every sealed secret and hook verify secret; leaking it exposes them if the ledgers leak too. |
 | Contract drift | `openapi.yaml` isn't checked against the routes, so it can go stale without a test failing. |
-| Concentration in `ledger.rs` | About 6,500 lines including tests, and every feature passes through it. Hooks have already moved to their own module; the others may follow. |
+| Concentration in `ledger.rs` | About 6,500 lines including tests, and every feature passes through it. Hooks, task kinds and the attempt budget have their own modules; the rest may follow. |
 
 ## History
 

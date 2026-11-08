@@ -16,9 +16,9 @@ use super::*;
 pub(super) enum Kind<'s> {
     /// An agent's schedule_http or queue_http. A lane makes it wait its turn.
     Request { lane: Option<&'s str> },
-    /// An agent's watch_http: every attempt is a poll. `watch` and `on_match` are stored JSON.
+    /// An agent's watch_http: every attempt is a poll. `settings` and `on_match` are stored JSON.
     Watch {
-        watch: &'s str,
+        settings: &'s str,
         on_match: Option<&'s str>,
     },
     /// One run of the named cron.
@@ -28,7 +28,7 @@ pub(super) enum Kind<'s> {
     /// The POST to the project's wake URL.
     Wake,
     /// What the watch with this id sent when it matched.
-    Action { watch: &'s str },
+    Action { watch_id: &'s str },
     /// The report of the task with this id finishing, posted to its callback URL.
     Callback { task: &'s str },
 }
@@ -175,8 +175,8 @@ impl<'s> From<Kind<'s>> for KindColumns<'s> {
         let none = KindColumns::default();
         match kind {
             Kind::Request { lane } => KindColumns { lane, ..none },
-            Kind::Watch { watch, on_match } => KindColumns {
-                watch: Some(watch),
+            Kind::Watch { settings, on_match } => KindColumns {
+                watch: Some(settings),
                 on_match,
                 ..none
             },
@@ -192,8 +192,8 @@ impl<'s> From<Kind<'s>> for KindColumns<'s> {
                 wake_call: true,
                 ..none
             },
-            Kind::Action { watch } => KindColumns {
-                triggered_by: Some(watch),
+            Kind::Action { watch_id } => KindColumns {
+                triggered_by: Some(watch_id),
                 ..none
             },
             Kind::Callback { task } => KindColumns {
@@ -219,14 +219,14 @@ impl TaskRow {
             (None, None, None, false, None, None) => Kind::Request {
                 lane: self.lane.as_deref(),
             },
-            (Some(watch), None, None, false, None, None) => Kind::Watch {
-                watch,
+            (Some(settings), None, None, false, None, None) => Kind::Watch {
+                settings,
                 on_match: self.on_match.as_deref(),
             },
             (None, Some(cron), None, false, None, None) => Kind::CronRun { cron },
             (None, None, Some(cron), false, None, None) => Kind::Alert { cron },
             (None, None, None, true, None, None) => Kind::Wake,
-            (None, None, None, false, Some(watch), None) => Kind::Action { watch },
+            (None, None, None, false, Some(watch_id), None) => Kind::Action { watch_id },
             (None, None, None, false, None, Some(task)) => Kind::Callback { task },
             _ => return Err(self.inconsistent()),
         };
@@ -240,7 +240,7 @@ impl TaskRow {
 
     fn inconsistent(&self) -> DbError {
         DbError(format!(
-            "task {} has columns of more than one kind",
+            "task {} has task-kind columns that do not fit together",
             self.id
         ))
     }
@@ -390,17 +390,17 @@ mod tests {
             Kind::Request { lane: None },
             Kind::Request { lane: Some("a") },
             Kind::Watch {
-                watch: "{}",
+                settings: "{}",
                 on_match: None,
             },
             Kind::Watch {
-                watch: "{}",
+                settings: "{}",
                 on_match: Some("{}"),
             },
             Kind::CronRun { cron: "backup" },
             Kind::Alert { cron: "backup" },
             Kind::Wake,
-            Kind::Action { watch: "t_w" },
+            Kind::Action { watch_id: "t_w" },
             Kind::Callback { task: "t_1" },
         ];
         for (n, kind) in kinds.into_iter().enumerate() {
