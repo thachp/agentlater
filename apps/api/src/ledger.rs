@@ -352,6 +352,14 @@ pub struct ProjectView {
     pub wake: Option<WakeView>,
 }
 
+/// What `recover` did: how many expired leases it settled, and the rows it could not read
+/// (failed where they stood).
+#[derive(Debug, Default)]
+pub struct Recovery {
+    pub recovered: usize,
+    pub unreadable: Vec<DbError>,
+}
+
 /// Header values are never echoed back, as for tasks.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WakeView {
@@ -1700,8 +1708,9 @@ impl<'a, D: Db> Ledger<'a, D> {
         )
     }
 
-    /// Settles attempts whose consumer vanished. Returns how many were recovered.
-    pub fn recover(&self, now: i64, mut jitter: impl FnMut() -> f64) -> Result<usize, DbError> {
+    /// Settles attempts whose consumer vanished. A row that can't be read is failed on its
+    /// own, so it can't hold up the others (or wake the ledger again every time).
+    pub fn recover(&self, now: i64, mut jitter: impl FnMut() -> f64) -> Result<Recovery, DbError> {
         let rows: Vec<TaskRow> = self.db.query(
             &format!(
                 "SELECT {TASK_COLUMNS} FROM tasks \
@@ -1709,10 +1718,28 @@ impl<'a, D: Db> Ledger<'a, D> {
             ),
             vec![now.into()],
         )?;
+        let mut recovery = Recovery::default();
         for row in &rows {
-            let mut task = row.task()?;
+            let (mut task, kind) = match row.task().and_then(|t| Ok((t, row.kind()?))) {
+                Ok(read) => read,
+                Err(e) => {
+                    self.db.exec(
+                        "UPDATE tasks SET status = ?, lease_until_ms = NULL, terminal_ms = ?, \
+                         updated_ms = ? WHERE id = ?",
+                        vec![
+                            text(&Status::Failed).into(),
+                            now.into(),
+                            now.into(),
+                            row.id.as_str().into(),
+                        ],
+                    )?;
+                    recovery.unreadable.push(e);
+                    continue;
+                }
+            };
+            recovery.recovered += 1;
             let fence = task.fence;
-            if row.kind()?.is_watch() {
+            if kind.is_watch() {
                 self.finish_poll(row, fence, Outcome::LeaseExpired, None, now)?;
                 continue;
             }
@@ -1721,7 +1748,7 @@ impl<'a, D: Db> Ledger<'a, D> {
                 self.save_row(row, &task, now)?;
             }
         }
-        Ok(rows.len())
+        Ok(recovery)
     }
 
     /// Deletes tasks whose retention period has passed, captured responses a week after
@@ -3544,8 +3571,8 @@ mod tests {
         deliver(&l, &due[0], T0);
         assert_eq!(l.next_wake().unwrap(), Some(T0 + LEASE_MS));
 
-        assert_eq!(l.recover(T0 + LEASE_MS - 1, || 0.0).unwrap(), 0);
-        assert_eq!(l.recover(T0 + LEASE_MS, || 0.0).unwrap(), 1);
+        assert_eq!(l.recover(T0 + LEASE_MS - 1, || 0.0).unwrap().recovered, 0);
+        assert_eq!(l.recover(T0 + LEASE_MS, || 0.0).unwrap().recovered, 1);
         let t = l.task("t1").unwrap();
         assert_eq!(t.status, Status::Retrying);
         assert_eq!(
@@ -3557,6 +3584,38 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn an_unreadable_row_does_not_hold_up_recovery() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.schedule(req("https://a.example.com/"), "t1", T0).unwrap();
+        l.schedule(req("https://a.example.com/"), "t2", T0).unwrap();
+        for d in l.publish_due(P, T0).unwrap() {
+            deliver(&l, &d, T0);
+        }
+        // A row that names both a cron alert and a wake: two kinds at once.
+        db.exec(
+            "UPDATE tasks SET alert_for = 'c', wake_call = 1 WHERE id = 't1'",
+            vec![],
+        )
+        .unwrap();
+
+        let recovery = l.recover(T0 + LEASE_MS, || 0.0).unwrap();
+        assert_eq!(recovery.recovered, 1);
+        assert_eq!(recovery.unreadable.len(), 1);
+        assert_eq!(l.task("t2").unwrap().status, Status::Retrying);
+        let rows: Vec<IdRow> = db
+            .query(
+                "SELECT id FROM tasks WHERE status = 'failed' AND lease_until_ms IS NULL",
+                vec![],
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "t1");
+        // Failed, it no longer wakes the ledger at its old lease time.
+        assert_ne!(l.next_wake().unwrap(), Some(T0 + LEASE_MS));
     }
 
     #[test]

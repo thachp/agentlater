@@ -160,6 +160,14 @@ pub struct HookReply {
 }
 
 impl HookReply {
+    fn ok(status: u16) -> Self {
+        HookReply {
+            status,
+            reason: None,
+            retry_after_ms: None,
+        }
+    }
+
     fn refused(status: u16, reason: &'static str) -> Self {
         HookReply {
             status,
@@ -427,16 +435,8 @@ impl<D: Db> Ledger<'_, D> {
             truncated: body.len() < text.len(),
         };
         Ok(match self.receive_hook(&hook, received, matches, now)? {
-            HookOutcome::Accepted(_) | HookOutcome::Filtered => HookReply {
-                status: 202,
-                reason: None,
-                retry_after_ms: None,
-            },
-            HookOutcome::Duplicate => HookReply {
-                status: 200,
-                reason: None,
-                retry_after_ms: None,
-            },
+            HookOutcome::Accepted(_) | HookOutcome::Filtered => HookReply::ok(202),
+            HookOutcome::Duplicate => HookReply::ok(200),
             HookOutcome::Refused {
                 status,
                 reason,
