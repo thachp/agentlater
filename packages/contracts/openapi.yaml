@@ -726,7 +726,7 @@ components:
         inbox_seq: { type: [integer, "null"], description: 'With callback_url "inbox": the event for the most recent time it finished.' }
         capture: { type: boolean }
         wake_call: { type: boolean, description: Set on wakes. }
-        failure: { type: [string, "null"], description: "Why it failed without an attempt: secret_missing, secret_host_not_allowed, secret_too_large or secret_unavailable." }
+        failure: { type: [string, "null"], description: "Why it failed without an attempt: secret_missing, secret_host_not_allowed, secret_too_large or secret_unavailable; or unreadable, when its stored record was damaged and its lost attempt could not be retried." }
         report_failures_only: { type: boolean, description: "Set on runs of a cron with report: failures; a run that did not fail has no report, by design." }
         response:
           oneOf: [{ $ref: "#/components/schemas/CapturedResponse" }, { type: "null" }]

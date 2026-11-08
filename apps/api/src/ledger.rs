@@ -1723,17 +1723,10 @@ impl<'a, D: Db> Ledger<'a, D> {
             let (mut task, kind) = match row.task().and_then(|t| Ok((t, row.kind()?))) {
                 Ok(read) => read,
                 Err(e) => {
-                    self.db.exec(
-                        "UPDATE tasks SET status = ?, lease_until_ms = NULL, terminal_ms = ?, \
-                         updated_ms = ? WHERE id = ?",
-                        vec![
-                            text(&Status::Failed).into(),
-                            now.into(),
-                            now.into(),
-                            row.id.as_str().into(),
-                        ],
-                    )?;
                     recovery.unreadable.push(e);
+                    if let Err(e) = self.fail_unreadable(row, now) {
+                        recovery.unreadable.push(e);
+                    }
                     continue;
                 }
             };
@@ -1749,6 +1742,29 @@ impl<'a, D: Db> Ledger<'a, D> {
             }
         }
         Ok(recovery)
+    }
+
+    /// Fails a delivering row whose columns don't make a task (`failure: unreadable`). Its
+    /// attempt is closed and its report sent, as for any failure; what its kind would set off
+    /// (a cron's health, a wake's count, a watch's action) can't run without the kind.
+    /// The row leaves `delivering` first, so a later step failing can't keep it there.
+    fn fail_unreadable(&self, row: &TaskRow, now: i64) -> Result<(), DbError> {
+        self.db.exec(
+            "UPDATE tasks SET status = ?, lease_until_ms = NULL, terminal_ms = ?, \
+             failure = 'unreadable', updated_ms = ? WHERE id = ?",
+            vec![
+                text(&Status::Failed).into(),
+                now.into(),
+                now.into(),
+                row.id.as_str().into(),
+            ],
+        )?;
+        self.record_outcome(&row.id, row.fence, &Outcome::LeaseExpired, now)?;
+        match row.reporting().to {
+            Some(INBOX) => self.report_to_inbox(&row.id, now),
+            Some(url) => self.queue_callback(&row.id, url, row.generation, now),
+            None => Ok(()),
+        }
     }
 
     /// Deletes tasks whose retention period has passed, captured responses a week after
@@ -3590,7 +3606,11 @@ mod tests {
     fn an_unreadable_row_does_not_hold_up_recovery() {
         let db = Memory::new();
         let l = setup(&db);
-        l.schedule(req("https://a.example.com/"), "t1", T0).unwrap();
+        let reported = ScheduleRequest {
+            callback_url: Some(INBOX.into()),
+            ..req("https://a.example.com/")
+        };
+        l.schedule(reported, "t1", T0).unwrap();
         l.schedule(req("https://a.example.com/"), "t2", T0).unwrap();
         for d in l.publish_due(P, T0).unwrap() {
             deliver(&l, &d, T0);
@@ -3616,6 +3636,25 @@ mod tests {
         assert_eq!(rows[0].id, "t1");
         // Failed, it no longer wakes the ledger at its old lease time.
         assert_ne!(l.next_wake().unwrap(), Some(T0 + LEASE_MS));
+        // Its attempt is closed, it says why, and its report reaches the inbox.
+        let closed: Vec<IdRow> = db
+            .query(
+                "SELECT task_id AS id FROM attempts WHERE outcome = 'lease_expired' \
+                 AND finished_ms IS NOT NULL ORDER BY task_id",
+                vec![],
+            )
+            .unwrap();
+        assert_eq!(
+            closed.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["t1", "t2"]
+        );
+        let failed: Vec<IdRow> = db
+            .query(
+                "SELECT id FROM tasks WHERE failure = 'unreadable' AND inbox_seq IS NOT NULL",
+                vec![],
+            )
+            .unwrap();
+        assert_eq!(failed.len(), 1);
     }
 
     #[test]
