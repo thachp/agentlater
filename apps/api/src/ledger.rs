@@ -16,17 +16,19 @@ use runlater_core::limits::{
     TRIAL_DURATION_MS, WATCH_EXCERPT_BYTES,
 };
 use runlater_core::{
-    fill, header_references, host_allowed, judge, next_poll, valid_lane, Attempt, Callback,
-    CancelError, ClaimError, CronRequest, CronRequestError, Method, Outcome, Poll, PollBody,
-    RedriveError, Report, Schedule, ScheduleRequest, Status, Task, Until, ValidationError,
-    WakeRequest, WakeRequestError, Watch, WatchRequest, WatchRequestError, INBOX,
+    fill, header_references, host_allowed, judge, next_poll, valid_lane, Attempt, CancelError,
+    ClaimError, CronRequest, CronRequestError, Method, Outcome, Poll, PollBody, RedriveError,
+    Report, Schedule, ScheduleRequest, Status, Task, Until, ValidationError, WakeRequest,
+    WakeRequestError, Watch, WatchRequest, WatchRequestError, INBOX,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+mod budget;
 mod hooks;
 mod tasks;
+use budget::{verdict, Cost, Standing, Verdict};
 pub use hooks::{token_hash, CreatedHook, HookList, HookOutcome, HookRow, HookView, Received};
 use tasks::{Kind, NewTask, Reporting};
 
@@ -240,10 +242,6 @@ const MIGRATIONS: &[&[&str]] = &[
         "ALTER TABLE hooks ADD COLUMN filtered INTEGER NOT NULL DEFAULT 0",
     ],
 ];
-
-/// SQL condition, over `tasks`: the task will queue a callback task when it finishes.
-/// Inbox reports are not tasks, so they need no attempt or row of their own.
-const OWES_CALLBACK: &str = "(callback_url IS NOT NULL AND callback_url != 'inbox')";
 
 /// SQL condition, over `tasks t`: the task may run now as far as its lane is concerned.
 /// A lane runs one task at a time. A task that has started (delivering, or retrying after a
@@ -1161,56 +1159,6 @@ impl<'a, D: Db> Ledger<'a, D> {
         Ok((self.project()?, true))
     }
 
-    /// Admission for new work: the trial must be live, every waiting task (and the callback
-    /// it will send) must still be able to get at least one attempt, and new rows must fit
-    /// under the retained-task cap. `rows` and `attempts` are what the new work needs.
-    fn admit(
-        &self,
-        project: &ProjectRow,
-        rows: i64,
-        attempts: i64,
-        now: i64,
-    ) -> Result<(), ApiError> {
-        if now >= project.expires_ms {
-            return Err(ApiError::new(
-                403,
-                "trial_expired",
-                "this project's attempts have expired",
-            ));
-        }
-        let counts: Vec<Counts> = self.db.query(
-            &format!(
-                "SELECT COUNT(*) + COALESCE(SUM(CASE WHEN status IN \
-                 ('scheduled', 'retrying', 'delivering') THEN {OWES_CALLBACK} + action_reserve \
-                 ELSE 0 END), 0) AS total, \
-                 COALESCE(SUM(CASE WHEN status IN ('scheduled', 'retrying', 'delivering') \
-                 THEN 1 + {OWES_CALLBACK} + action_reserve ELSE 0 END), 0) AS waiting \
-                 FROM tasks"
-            ),
-            vec![],
-        )?;
-        let (total, waiting) = counts.first().map_or((0, 0), |c| (c.total, c.waiting));
-        let cap = project.max_retained_tasks();
-        if rows > 0 && total + rows > cap {
-            return Err(ApiError::new(
-                429,
-                "task_limit",
-                format!(
-                    "this project already holds {cap} tasks; \
-                     finished tasks are removed 30 days after they finish"
-                ),
-            ));
-        }
-        if waiting + attempts > project.attempt_budget - project.attempts_used {
-            return Err(ApiError::new(
-                402,
-                "budget_exhausted",
-                "not enough delivery attempts left in this project",
-            ));
-        }
-        Ok(())
-    }
-
     // -- tasks: commands ------------------------------------------------------------------
 
     /// Returns the task and whether it was created (false for an idempotent replay).
@@ -1232,8 +1180,8 @@ impl<'a, D: Db> Ledger<'a, D> {
             return Ok((existing, false));
         }
 
-        let needs = 1 + i64::from(matches!(spec.callback, Some(Callback::Url(_))));
-        self.admit(&project, needs, needs, now)?;
+        let reports_to = spec.callback.as_ref().map(|c| c.as_str());
+        self.admit(&project, Cost::task(reports_to), now)?;
         if spec.run_at_ms >= project.expires_ms {
             return Err(ApiError {
                 field: Some(when_field),
@@ -1299,10 +1247,14 @@ impl<'a, D: Db> Ledger<'a, D> {
         }
         // The action, and its callback, are reserved now: a watch that matches always gets to
         // send it, and one that can't afford it is refused here rather than hours later.
-        let owes = |c: &Option<Callback>| i64::from(matches!(c, Some(Callback::Url(_))));
-        let action_reserve = spec.on_match.as_ref().map_or(0, |a| 1 + owes(&a.callback));
-        let needs = 1 + owes(&request.callback) + action_reserve;
-        self.admit(&project, needs, needs, now)?;
+        let action = spec
+            .on_match
+            .as_ref()
+            .map(|a| Cost::task(a.callback.as_ref().map(|c| c.as_str())))
+            .unwrap_or_default();
+        let cost = Cost::task(request.callback.as_ref().map(|c| c.as_str())) + action;
+        self.admit(&project, cost, now)?;
+        let action_reserve = action.reserve();
         let watch = serde_json::to_string(&spec.watch).map_err(|e| DbError(e.to_string()))?;
         let on_match = spec
             .on_match
@@ -1403,8 +1355,7 @@ impl<'a, D: Db> Ledger<'a, D> {
                 ),
             ));
         }
-        let callbacks = i64::from(row.callback_url.as_deref().is_some_and(|u| u != INBOX));
-        self.admit(&project, callbacks, 1 + callbacks, now)?;
+        self.admit(&project, Cost::redrive(row.reporting().to), now)?;
         self.save_row(&row, &task, now)?;
         self.db.exec(
             "UPDATE tasks SET failure = NULL WHERE id = ?",
@@ -1542,58 +1493,39 @@ impl<'a, D: Db> Ledger<'a, D> {
         let kind = row.kind()?;
         let reporting = row.reporting();
 
-        // A callback reports on work already done, so it gets one try even when the trial
-        // has run out, but no retries.
-        // So does a watch's action, once: admission reserved its first attempt, and a redrive
-        // of it is admitted like any task's.
-        let mut last_try = match kind {
-            Kind::Callback { .. } | Kind::Alert { .. } => task.run_attempts == 0,
-            Kind::Action { .. } => task.total_attempts == 0,
-            _ => false,
-        };
-        // A wake was never admitted, so it may only spend attempts no waiting task was promised.
-        // With nothing else waiting it gets one more try even past the budget; otherwise it
-        // stands down (canceled, not failed: the wake itself is fine). And a wake due after the
-        // agent read everything has nothing to say.
-        if kind.is_wake() && task.generation == generation && task.is_due(now) {
-            let left = if now < project.expires_ms {
+        let current = task.generation == generation && task.is_due(now);
+        let standing = Standing {
+            can_attempt: project.can_attempt(now),
+            left: if now < project.expires_ms {
                 project.attempt_budget - project.attempts_used
             } else {
                 0
-            };
-            let reserved = self.reserved_attempts()?;
-            let skip = if project.inbox_unread == 0 {
-                Some("inbox_read")
-            } else if left - reserved >= 1 {
-                None
-            } else if reserved == 0 {
-                last_try = true;
-                None
-            } else {
-                Some("budget_reserved")
-            };
-            if let Some(why) = skip {
+            },
+            inbox_unread: project.inbox_unread,
+        };
+        match verdict(kind, &task, current, standing, || self.reserved_attempts())? {
+            Verdict::Spend => {}
+            Verdict::LastTry => task.max_attempts = task.run_attempts + 1,
+            Verdict::StandDown(why) => {
                 if task.cancel(now).is_ok() {
                     self.save_row(&row, &task, now)?;
                 }
                 return Ok(Claimed::Skip(why));
             }
-        }
-        if !project.can_attempt(now) && last_try {
-            task.max_attempts = task.run_attempts + 1;
-        } else if !project.can_attempt(now) {
-            if task.generation == generation && task.is_due(now) && task.abandon(now) {
-                if kind.is_watch() {
-                    let state = WatchState {
-                        reason: Some("budget_exhausted".into()),
-                        ..row.watch_state()?
-                    };
-                    self.store_watch(task_id, row.watch_errors, &state)?;
+            Verdict::Exhausted => {
+                if current && task.abandon(now) {
+                    if kind.is_watch() {
+                        let state = WatchState {
+                            reason: Some("budget_exhausted".into()),
+                            ..row.watch_state()?
+                        };
+                        self.store_watch(task_id, row.watch_errors, &state)?;
+                    }
+                    self.save_row(&row, &task, now)?;
+                    return Ok(Claimed::Skip("budget_exhausted"));
                 }
-                self.save_row(&row, &task, now)?;
-                return Ok(Claimed::Skip("budget_exhausted"));
+                return Ok(Claimed::Skip("stale"));
             }
-            return Ok(Claimed::Skip("stale"));
         }
 
         if kind.lane().is_some()
@@ -1640,10 +1572,7 @@ impl<'a, D: Db> Ledger<'a, D> {
             Err(ClaimError::Stale) => return Ok(Claimed::Skip("stale")),
             Err(ClaimError::NotDue { .. }) => return Ok(Claimed::Skip("not_due")),
         };
-        self.db.exec(
-            "UPDATE project SET attempts_used = attempts_used + 1",
-            vec![],
-        )?;
+        self.charge()?;
         self.db.exec(
             "INSERT INTO attempts (task_id, number, started_ms) VALUES (?, ?, ?)",
             vec![task_id.into(), attempt.number.into(), now.into()],
@@ -1985,9 +1914,7 @@ impl<'a, D: Db> Ledger<'a, D> {
                     cron.name.as_str().into(),
                 ],
             )?;
-            // A run reporting to a URL needs a second attempt and row for its callback task.
-            let needs = 1 + i64::from(cron.callback_url.as_deref().is_some_and(|u| u != INBOX));
-            if let Err(e) = self.admit(&project, needs, needs, now) {
+            if let Err(e) = self.admit(&project, Cost::task(cron.callback_url.as_deref()), now) {
                 if e.status >= 500 {
                     return Err(DbError(e.message));
                 }
@@ -2456,22 +2383,6 @@ impl<'a, D: Db> Ledger<'a, D> {
             }
         }
         Ok(())
-    }
-
-    /// Attempts admission promised to work that is waiting: one per task not yet attempted
-    /// (scheduled or retrying), one per callback still owed, and a watch's action (and its
-    /// callback) until the watch ends. Wakes are not counted.
-    fn reserved_attempts(&self) -> Result<i64, DbError> {
-        let rows: Vec<Counts> = self.db.query(
-            &format!(
-                "SELECT COALESCE(SUM(status IN ('scheduled', 'retrying')), 0) \
-                 + COALESCE(SUM(CASE WHEN status IN ('scheduled', 'retrying', 'delivering') \
-                 THEN {OWES_CALLBACK} + action_reserve ELSE 0 END), 0) AS total, \
-                 0 AS waiting FROM tasks WHERE wake_call = 0"
-            ),
-            vec![],
-        )?;
-        Ok(rows.first().map_or(0, |c| c.total))
     }
 
     /// The inbox has unread events: queue a wake, unless one is already on its way. It goes
