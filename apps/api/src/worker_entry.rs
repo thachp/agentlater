@@ -3,6 +3,7 @@
 
 use crate::assertion::{self, Scope};
 use crate::db::{Db, DbError, Param};
+use crate::delivery::{attempt, Outgoing, ReadPlan, ResponseBody, Transport};
 use crate::ledger::{
     ApiError, Claimed, Delivery, Dispatch, HookOutcome, Ledger, Received, ResponseRead,
     SealedSecret,
@@ -12,15 +13,13 @@ use base64::Engine;
 use futures_util::future::{join_all, select, Either};
 use futures_util::StreamExt;
 use runlater_core::limits::{
-    ATTEMPT_TIMEOUT_MS, CAPTURED_HEADERS, CAPTURE_BODY_BYTES, HOOK_BODY_KEPT_BYTES,
-    MAX_HOOK_REQUEST_BYTES, MAX_WATCH_RESPONSE_BYTES,
+    ATTEMPT_TIMEOUT_MS, CAPTURED_HEADERS, HOOK_BODY_KEPT_BYTES, MAX_HOOK_REQUEST_BYTES,
 };
 use runlater_core::{
-    accepts, cut, delivery_id, fill, kept_headers as hook_headers, redact, verify, CronRequest,
-    HookRequest, HookUpdate, Outcome, PollBody, ScheduleRequest, SecretRequest, Status,
-    WakeRequest, WatchRequest,
+    accepts, cut, delivery_id, kept_headers as hook_headers, verify, CronRequest, HookRequest,
+    HookUpdate, Outcome, PollBody, ScheduleRequest, SecretRequest, Status, WakeRequest,
+    WatchRequest,
 };
-use runlater_egress::{sign, Destination};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -30,7 +29,6 @@ use worker::*;
 
 /// Set by the entry Worker on requests it forwards to a ledger; never taken from callers.
 const PROJECT_HEADER: &str = "RunLater-Project";
-const USER_AGENT: &str = "AgentLater/1 (+https://agentlater.io)";
 
 fn now() -> i64 {
     Date::now().as_millis() as i64
@@ -807,42 +805,11 @@ async fn process(env: &Env, d: &Dispatch) -> Result<()> {
         delivery.late_ms.map_or(NOT_MEASURED, |ms| ms as f64),
     );
     // Secrets are opened only here, and only for as long as this attempt takes.
-    let values = match open_secrets(env, &d.project_id, &delivery.secrets) {
-        Some(values) => values,
-        None => {
-            console_error!("could not open the secrets for {}", delivery.task_id);
-            vec![]
-        }
-    };
-    let (outcome, read) = if values.len() < delivery.secrets.len() {
-        (Outcome::Rejected, None)
-    } else {
-        match filled(&delivery, &values) {
-            Some(ready) => deliver(&ready).await,
-            None => (Outcome::Rejected, None),
-        }
-    };
-    // A response that echoes a credential back must not carry it into the ledger. The body was
-    // read past its cap, so a value straddling the cap is redacted whole before the cut.
-    let cap = if delivery.capture {
-        CAPTURE_BODY_BYTES
-    } else {
-        MAX_WATCH_RESPONSE_BYTES
-    };
-    let (body, truncated, headers) = read.map_or((None, false, vec![]), |r| {
-        let (body, cut) = match r.body.map(|b| redact(&b, &values)) {
-            Some(b) if b.len() > cap => (Some(cut_at(&b, cap)), true),
-            other => (other, false),
-        };
-        (
-            body,
-            r.truncated || cut,
-            r.headers
-                .into_iter()
-                .map(|(k, v)| (k, redact(&v, &values)))
-                .collect(),
-        )
-    });
+    let opened = open_secrets(env, &d.project_id, &delivery.secrets);
+    if opened.is_none() {
+        console_error!("could not open the secrets for {}", delivery.task_id);
+    }
+    let settled = attempt(&delivery, opened, now() / 1000, &WorkersFetch).await;
     let _: serde_json::Value = call(
         &stub,
         &d.project_id,
@@ -850,23 +817,14 @@ async fn process(env: &Env, d: &Dispatch) -> Result<()> {
         &FinishBody {
             task_id: delivery.task_id,
             fence: delivery.fence,
-            outcome,
-            body,
-            truncated,
-            headers,
+            outcome: settled.outcome,
+            body: settled.body,
+            truncated: settled.truncated,
+            headers: settled.headers,
         },
     )
     .await?;
     Ok(())
-}
-
-/// The first `max` bytes of `s`, cut at a character boundary.
-fn cut_at(s: &str, max: usize) -> String {
-    let mut end = max.min(s.len());
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    s[..end].to_string()
 }
 
 /// The plaintext of each sealed secret, or None if any cannot be opened.
@@ -885,26 +843,6 @@ fn open_secrets(
         .collect()
 }
 
-/// The delivery with its header references filled in.
-fn filled(d: &Delivery, values: &[(String, String)]) -> Option<Delivery> {
-    let lookup = |name: &str| {
-        values
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, v)| v.as_str())
-    };
-    let headers = d
-        .headers
-        .iter()
-        .map(|(k, v)| Some((k.clone(), fill(v, lookup)?)))
-        .collect::<Option<Vec<_>>>()?;
-    // The sealed secrets stay on it: send() reads a little further when there are some.
-    Some(Delivery {
-        headers,
-        ..d.clone()
-    })
-}
-
 #[event(queue)]
 async fn queue(batch: MessageBatch<Dispatch>, env: Env, _ctx: Context) -> Result<()> {
     let messages = batch.messages()?;
@@ -919,40 +857,6 @@ async fn queue(batch: MessageBatch<Dispatch>, env: Env, _ctx: Context) -> Result
         }
     }
     Ok(())
-}
-
-/// A response as read for a watch's poll or a task's capture.
-struct ResponseBody {
-    /// None when a captured body could not be read in time.
-    body: Option<String>,
-    /// Whether the body was cut short.
-    truncated: bool,
-    /// [`CAPTURED_HEADERS`], `content-length` and `content-encoding`, for capture.
-    headers: Vec<(String, String)>,
-}
-
-type Read = Option<ResponseBody>;
-
-/// Makes one attempt. For a watch's poll, also returns up to 64 KiB of the response body;
-/// for a task with `capture`, up to 16 KiB and a few headers.
-async fn deliver(d: &Delivery) -> (Outcome, Read) {
-    // Re-check policy on every attempt; the provider flag `global_fetch_strictly_public`
-    // separately refuses private addresses after DNS resolution.
-    let Ok(destination) = Destination::parse(&d.url) else {
-        return (Outcome::Rejected, None);
-    };
-    let body = d.body.clone().unwrap_or_default();
-    let signature = sign(
-        &[d.signing_secret.as_bytes()],
-        &d.task_id,
-        d.attempt,
-        now() / 1000,
-        body.as_bytes(),
-    );
-    match send(&destination, d, body, signature.headers()).await {
-        Ok(result) => result,
-        Err(_) => (Outcome::Network, None),
-    }
 }
 
 /// Reads at most `max` bytes of a response, and whether there was more.
@@ -988,31 +892,21 @@ fn kept_headers(response: &Response) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Extra bytes to read past a cap when the request carried secrets, so an echoed value that
-/// straddles the cap is still whole when it is redacted.
-fn secret_margin(d: &Delivery) -> usize {
-    if d.secrets.is_empty() {
-        0
-    } else {
-        runlater_core::limits::MAX_SECRET_BYTES
+/// Sends for real, with the Workers `fetch`.
+struct WorkersFetch;
+
+impl Transport for WorkersFetch {
+    async fn send(&self, request: &Outgoing) -> (Outcome, Option<ResponseBody>) {
+        fetch(request).await.unwrap_or((Outcome::Network, None))
     }
 }
 
-async fn send(
-    destination: &Destination,
-    d: &Delivery,
-    body: String,
-    signed: [(&'static str, String); 4],
-) -> Result<(Outcome, Read)> {
+async fn fetch(r: &Outgoing) -> Result<(Outcome, Option<ResponseBody>)> {
     let headers = Headers::new();
-    headers.set("User-Agent", USER_AGENT)?;
-    for (k, v) in &d.headers {
+    for (k, v) in &r.headers {
         headers.set(k, v)?;
     }
-    for (k, v) in &signed {
-        headers.set(k, v)?;
-    }
-    let method = match d.method {
+    let method = match r.method {
         runlater_core::Method::Get => Method::Get,
         runlater_core::Method::Post => Method::Post,
         runlater_core::Method::Put => Method::Put,
@@ -1023,10 +917,10 @@ async fn send(
     init.with_method(method)
         .with_redirect(RequestRedirect::Manual)
         .with_headers(headers);
-    if d.body.is_some() {
-        init.with_body(Some(body.into()));
+    if let Some(body) = &r.body {
+        init.with_body(Some(body.as_str().into()));
     }
-    let request = Request::new_with_init(destination.as_str(), &init)?;
+    let request = Request::new_with_init(&r.url, &init)?;
 
     let controller = AbortController::default();
     let signal = controller.signal();
@@ -1044,10 +938,11 @@ async fn send(
                 .flatten()
                 .and_then(|v| crate::http::parse_retry_after(&v)),
         };
-        if !d.read_body {
-            return Ok::<_, Error>((outcome, None));
-        }
-        if d.capture {
+        let max = match r.read {
+            ReadPlan::Status => return Ok::<_, Error>((outcome, None)),
+            ReadPlan::Capture { max_bytes } | ReadPlan::Poll { max_bytes } => max_bytes,
+        };
+        if let ReadPlan::Capture { .. } = r.read {
             // The destination has answered, so a slow or broken body must not turn that answer
             // into a failure (and a retry). Read only while the attempt has time left.
             let headers = kept_headers(&response);
@@ -1060,7 +955,7 @@ async fn send(
             if left <= 0 {
                 return Ok((outcome, Some(unread(headers))));
             }
-            let read = read_capped(&mut response, CAPTURE_BODY_BYTES + secret_margin(d));
+            let read = read_capped(&mut response, max);
             let limit = Delay::from(Duration::from_millis(left as u64));
             futures_util::pin_mut!(read, limit);
             let body = match select(read, limit).await {
@@ -1074,19 +969,17 @@ async fn send(
             return Ok((outcome, Some(body)));
         }
         // A body cut off mid-read is a failed poll, not an empty answer.
-        Ok(
-            match read_capped(&mut response, MAX_WATCH_RESPONSE_BYTES + secret_margin(d)).await {
-                Ok((body, truncated)) => (
-                    outcome,
-                    Some(ResponseBody {
-                        body: Some(body),
-                        truncated,
-                        headers: vec![],
-                    }),
-                ),
-                Err(_) => (Outcome::Network, None),
-            },
-        )
+        Ok(match read_capped(&mut response, max).await {
+            Ok((body, truncated)) => (
+                outcome,
+                Some(ResponseBody {
+                    body: Some(body),
+                    truncated,
+                    headers: vec![],
+                }),
+            ),
+            Err(_) => (Outcome::Network, None),
+        })
     };
     let deadline = Delay::from(Duration::from_millis(ATTEMPT_TIMEOUT_MS as u64));
     futures_util::pin_mut!(attempt, deadline);

@@ -5,6 +5,7 @@
 
 pub mod assertion;
 pub mod db;
+pub mod delivery;
 pub mod http;
 pub mod ledger;
 pub mod sealing;
