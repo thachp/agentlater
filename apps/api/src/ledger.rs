@@ -26,10 +26,12 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 mod hooks;
+mod tasks;
 pub use hooks::{
     hook_secret_name, token_hash, CreatedHook, HookDelivery, HookList, HookOutcome, HookReply,
     HookRow, HookView, Received,
 };
+use tasks::{Kind, NewTask, Reporting};
 
 /// A published task that has not been claimed after this long is published again.
 pub const REPUBLISH_MS: i64 = 60_000;
@@ -868,35 +870,6 @@ const TASK_COLUMNS: &str = "seq, id, status, due_ms, max_attempts, run_attempts,
     inbox_seq, wake_call, report_failures_only, failure, on_match, triggered_by, created_ms, \
     updated_ms";
 
-/// A row to insert into `tasks`.
-struct NewTask<'s> {
-    id: &'s str,
-    task: Task,
-    method: Method,
-    url: &'s str,
-    headers: &'s [(String, String)],
-    body: Option<String>,
-    run_at_ms: i64,
-    idempotency_key: Option<String>,
-    fingerprint: &'s str,
-    callback_url: Option<&'s str>,
-    callback_for: Option<&'s str>,
-    capture: bool,
-    lane: Option<&'s str>,
-    cron: Option<&'s str>,
-    alert_for: Option<&'s str>,
-    wake_call: bool,
-    /// Report to `callback_url` only if the task fails (a cron run with `report: failures`).
-    report_failures_only: bool,
-    /// A watch's settings, as JSON.
-    watch: Option<String>,
-    /// A watch's `on_match`, as JSON, and what admission reserved for it.
-    on_match: Option<String>,
-    action_reserve: i64,
-    /// Set on the task a watch's `on_match` queued.
-    triggered_by: Option<&'s str>,
-}
-
 /// Callback task ids are derived, so queueing the same callback twice is harmless. A task's
 /// generation differs every time it finishes (only a redrive can follow a finish, and it
 /// moves the generation on), so each finish gets its own callback.
@@ -1274,6 +1247,9 @@ impl<'a, D: Db> Ledger<'a, D> {
         self.insert(
             NewTask {
                 id: task_id,
+                kind: Kind::Request {
+                    lane: spec.lane.as_deref(),
+                },
                 task: Task::new(spec.run_at_ms, spec.max_attempts),
                 method: spec.method,
                 url: spec.destination.as_str(),
@@ -1282,18 +1258,12 @@ impl<'a, D: Db> Ledger<'a, D> {
                 run_at_ms: spec.run_at_ms,
                 idempotency_key: spec.idempotency_key,
                 fingerprint: &spec.fingerprint,
-                callback_url: spec.callback.as_ref().map(|c| c.as_str()),
-                callback_for: None,
-                capture: spec.capture,
-                lane: spec.lane.as_deref(),
-                cron: None,
-                alert_for: None,
-                wake_call: false,
-                report_failures_only: false,
-                watch: None,
-                on_match: None,
+                reporting: Reporting {
+                    to: spec.callback.as_ref().map(|c| c.as_str()),
+                    failures_only: false,
+                    capture: spec.capture,
+                },
                 action_reserve: 0,
-                triggered_by: None,
             },
             now,
         )?;
@@ -1355,6 +1325,10 @@ impl<'a, D: Db> Ledger<'a, D> {
         self.insert(
             NewTask {
                 id: task_id,
+                kind: Kind::Watch {
+                    watch: &watch,
+                    on_match: on_match.as_deref(),
+                },
                 task: Task::new(request.run_at_ms, request.max_attempts),
                 method: request.method,
                 url: request.destination.as_str(),
@@ -1363,18 +1337,11 @@ impl<'a, D: Db> Ledger<'a, D> {
                 run_at_ms: request.run_at_ms,
                 idempotency_key: request.idempotency_key,
                 fingerprint: &request.fingerprint,
-                callback_url: request.callback.as_ref().map(|c| c.as_str()),
-                callback_for: None,
-                capture: false,
-                lane: None,
-                cron: None,
-                alert_for: None,
-                wake_call: false,
-                report_failures_only: false,
-                watch: Some(watch),
-                on_match,
+                reporting: Reporting {
+                    to: request.callback.as_ref().map(|c| c.as_str()),
+                    ..Reporting::default()
+                },
                 action_reserve,
-                triggered_by: None,
             },
             now,
         )?;
@@ -1425,19 +1392,8 @@ impl<'a, D: Db> Ledger<'a, D> {
     pub fn redrive(&self, task_id: &str, now: i64) -> Result<TaskView, ApiError> {
         let project = self.project_row()?.ok_or_else(no_project)?;
         let row = self.task_row(task_id)?.ok_or_else(no_task)?;
-        if row.watch.is_some() {
-            return Err(ApiError::new(
-                409,
-                "watch_not_redrivable",
-                "a watch cannot be redriven; start a new one",
-            ));
-        }
-        if row.wake_call != 0 {
-            return Err(ApiError::new(
-                409,
-                "wake_not_redrivable",
-                "a wake cannot be redriven; the next inbox event sends a new one",
-            ));
+        if let Some(refusal) = row.kind()?.redrive_refusal() {
+            return Err(refusal);
         }
         let mut task = row.task()?;
         if let Err(RedriveError::NotFailed(s)) = task.redrive(now) {
@@ -1586,19 +1542,23 @@ impl<'a, D: Db> Ledger<'a, D> {
             return Ok(Claimed::Skip("task_missing"));
         };
         let mut task = row.task()?;
+        let kind = row.kind()?;
+        let reporting = row.reporting();
 
         // A callback reports on work already done, so it gets one try even when the trial
         // has run out, but no retries.
         // So does a watch's action, once: admission reserved its first attempt, and a redrive
         // of it is admitted like any task's.
-        let mut last_try = ((row.callback_for.is_some() || row.alert_for.is_some())
-            && task.run_attempts == 0)
-            || (row.triggered_by.is_some() && task.total_attempts == 0);
+        let mut last_try = match kind {
+            Kind::Callback { .. } | Kind::Alert { .. } => task.run_attempts == 0,
+            Kind::Action { .. } => task.total_attempts == 0,
+            _ => false,
+        };
         // A wake was never admitted, so it may only spend attempts no waiting task was promised.
         // With nothing else waiting it gets one more try even past the budget; otherwise it
         // stands down (canceled, not failed: the wake itself is fine). And a wake due after the
         // agent read everything has nothing to say.
-        if row.wake_call != 0 && task.generation == generation && task.is_due(now) {
+        if kind.is_wake() && task.generation == generation && task.is_due(now) {
             let left = if now < project.expires_ms {
                 project.attempt_budget - project.attempts_used
             } else {
@@ -1626,7 +1586,7 @@ impl<'a, D: Db> Ledger<'a, D> {
             task.max_attempts = task.run_attempts + 1;
         } else if !project.can_attempt(now) {
             if task.generation == generation && task.is_due(now) && task.abandon(now) {
-                if row.watch.is_some() {
+                if kind.is_watch() {
                     let state = WatchState {
                         reason: Some("budget_exhausted".into()),
                         ..row.watch_state()?
@@ -1639,7 +1599,7 @@ impl<'a, D: Db> Ledger<'a, D> {
             return Ok(Claimed::Skip("stale"));
         }
 
-        if row.lane.is_some()
+        if kind.lane().is_some()
             && task.generation == generation
             && task.is_due(now)
             && !self.lane_clear(task_id)?
@@ -1663,7 +1623,7 @@ impl<'a, D: Db> Ledger<'a, D> {
                         "UPDATE tasks SET failure = ? WHERE id = ?",
                         vec![why.into(), task_id.into()],
                     )?;
-                    if row.watch.is_some() {
+                    if kind.is_watch() {
                         let state = WatchState {
                             reason: Some(why.into()),
                             ..row.watch_state()?
@@ -1677,7 +1637,7 @@ impl<'a, D: Db> Ledger<'a, D> {
             }
         };
         // Every retry, repoll, abandon and redrive moves the generation on.
-        let on_schedule = task.generation == 1 && row.lane.is_none() && row.wake_call == 0;
+        let on_schedule = task.generation == 1 && kind.measures_lateness();
         let attempt: Attempt = match task.claim(generation, now) {
             Ok(a) => a,
             Err(ClaimError::Stale) => return Ok(Claimed::Skip("stale")),
@@ -1693,7 +1653,7 @@ impl<'a, D: Db> Ledger<'a, D> {
         )?;
         self.save_row(&row, &task, now)?;
         // A wake says how things stand when it is sent, and covers every event so far.
-        let body = if row.wake_call != 0 {
+        let body = if kind.is_wake() {
             self.db.exec(
                 "UPDATE wake SET covered_seq = ?, last_wake_ms = ?",
                 vec![project.inbox_last_seq.into(), now.into()],
@@ -1711,8 +1671,8 @@ impl<'a, D: Db> Ledger<'a, D> {
             headers: row.headers()?,
             body,
             signing_secret: project.signing_secret,
-            read_body: row.watch.is_some() || row.capture != 0,
-            capture: row.capture != 0,
+            read_body: kind.is_watch() || reporting.capture,
+            capture: reporting.capture,
             secrets,
             late_ms: (on_schedule && attempt.number == 1).then(|| (now - row.run_at_ms).max(0)),
         })))
@@ -1744,7 +1704,7 @@ impl<'a, D: Db> Ledger<'a, D> {
         let Some(row) = self.task_row(task_id)? else {
             return Ok(None);
         };
-        if row.watch.is_some() {
+        if row.kind()?.is_watch() {
             return self.finish_poll(&row, fence, outcome, read.and_then(|r| r.body), now);
         }
         let mut task = row.task()?;
@@ -1755,7 +1715,7 @@ impl<'a, D: Db> Ledger<'a, D> {
         // Before save_row, so a callback or inbox event for this finish carries the response.
         // Any HTTP answer replaces the last capture, even one whose body could not be read:
         // an older response must never stand in for a newer one.
-        if let (true, Outcome::Http { status, .. }) = (row.capture != 0, &outcome) {
+        if let (true, Outcome::Http { status, .. }) = (row.reporting().capture, &outcome) {
             self.store_response(task_id, fence, *status, read)?;
         }
         self.save_row(&row, &task, now)?;
@@ -1823,7 +1783,7 @@ impl<'a, D: Db> Ledger<'a, D> {
         for row in &rows {
             let mut task = row.task()?;
             let fence = task.fence;
-            if row.watch.is_some() {
+            if row.kind()?.is_watch() {
                 self.finish_poll(row, fence, Outcome::LeaseExpired, None, now)?;
                 continue;
             }
@@ -2038,29 +1998,26 @@ impl<'a, D: Db> Ledger<'a, D> {
                 continue;
             }
             let id = derived_id(&format!("cron/{}/{slot}", cron.name));
+            let headers = cron.headers()?;
             self.insert(
                 NewTask {
-                    id: &id,
-                    task: Task::new(now, cron.max_attempts),
-                    method: parse(&cron.method)?,
-                    url: &cron.url,
-                    headers: &cron.headers()?,
-                    body: cron.body.clone(),
+                    // The slot it fills, not when the alarm got to it: that difference is
+                    // lateness.
                     run_at_ms: slot,
-                    idempotency_key: None,
-                    fingerprint: "cron",
-                    callback_url: cron.callback_url.as_deref(),
-                    callback_for: None,
-                    capture: cron.capture != 0,
-                    lane: None,
-                    cron: Some(&cron.name),
-                    alert_for: None,
-                    wake_call: false,
-                    report_failures_only: cron.report == Report::Failures.as_str(),
-                    watch: None,
-                    on_match: None,
-                    action_reserve: 0,
-                    triggered_by: None,
+                    reporting: Reporting {
+                        to: cron.callback_url.as_deref(),
+                        failures_only: cron.report == Report::Failures.as_str(),
+                        capture: cron.capture != 0,
+                    },
+                    ..NewTask::internal(
+                        &id,
+                        Kind::CronRun { cron: &cron.name },
+                        Task::new(now, cron.max_attempts),
+                        parse(&cron.method)?,
+                        &cron.url,
+                        &headers,
+                        cron.body.clone(),
+                    )
                 },
                 now,
             )?;
@@ -2176,33 +2133,20 @@ impl<'a, D: Db> Ledger<'a, D> {
             self.add_to_inbox(seq, &report, now)?;
             return self.wake_soon(now);
         }
+        let id = derived_id(&format!(
+            "alert/{name}/{event}/{now}/{}",
+            task_id.unwrap_or("-")
+        ));
         self.insert(
-            NewTask {
-                id: &derived_id(&format!(
-                    "alert/{name}/{event}/{now}/{}",
-                    task_id.unwrap_or("-")
-                )),
-                task: Task::new(now, DEFAULT_MAX_ATTEMPTS),
-                method: Method::Post,
+            NewTask::internal(
+                &id,
+                Kind::Alert { cron: name },
+                Task::new(now, DEFAULT_MAX_ATTEMPTS),
+                Method::Post,
                 url,
-                headers: &[("Content-Type".into(), "application/json".into())],
-                body: Some(report.to_string()),
-                run_at_ms: now,
-                idempotency_key: None,
-                fingerprint: "alert",
-                callback_url: None,
-                callback_for: None,
-                capture: false,
-                lane: None,
-                cron: None,
-                alert_for: Some(name),
-                wake_call: false,
-                report_failures_only: false,
-                watch: None,
-                on_match: None,
-                action_reserve: 0,
-                triggered_by: None,
-            },
+                &[("Content-Type".into(), "application/json".into())],
+                Some(report.to_string()),
+            ),
             now,
         )
     }
@@ -2568,31 +2512,18 @@ impl<'a, D: Db> Ledger<'a, D> {
             .query("SELECT wakes_queued AS seq FROM project", vec![])?;
         let n = queued.first().map_or(0, |r| r.seq);
         let id = derived_id(&format!("wake/{n}"));
+        let headers = wake.headers()?;
         self.insert(
-            NewTask {
-                id: &id,
-                task: Task::new(due, DEFAULT_MAX_ATTEMPTS),
-                method: Method::Post,
-                url: &wake.url,
-                headers: &wake.headers()?,
+            NewTask::internal(
+                &id,
+                Kind::Wake,
+                Task::new(due, DEFAULT_MAX_ATTEMPTS),
+                Method::Post,
+                &wake.url,
+                &headers,
                 // Rewritten when it is sent, with the count at that moment.
-                body: Some(wake_payload(&project.id, project.inbox_unread)),
-                run_at_ms: due,
-                idempotency_key: None,
-                fingerprint: "wake",
-                callback_url: None,
-                callback_for: None,
-                capture: false,
-                lane: None,
-                cron: None,
-                alert_for: None,
-                wake_call: true,
-                report_failures_only: false,
-                watch: None,
-                on_match: None,
-                action_reserve: 0,
-                triggered_by: None,
-            },
+                Some(wake_payload(&project.id, project.inbox_unread)),
+            ),
             now,
         )?;
         self.db.exec(
@@ -2881,107 +2812,6 @@ impl<'a, D: Db> Ledger<'a, D> {
         Ok(!rows.is_empty())
     }
 
-    fn insert(&self, new: NewTask<'_>, now: i64) -> Result<(), DbError> {
-        let NewTask { id, task, .. } = &new;
-        let headers = serde_json::to_string(new.headers).map_err(|e| DbError(e.to_string()))?;
-        // Callback, run and alert ids are derived, so queueing the same one again is a no-op.
-        let derived = new.callback_for.is_some()
-            || new.cron.is_some()
-            || new.alert_for.is_some()
-            || new.triggered_by.is_some();
-        let verb = if derived {
-            "INSERT OR IGNORE"
-        } else {
-            "INSERT"
-        };
-        self.db.exec(
-            &format!(
-                "{verb} INTO tasks (id, status, due_ms, max_attempts, run_attempts, \
-             total_attempts, generation, fence, lease_until_ms, cancel_requested, terminal_ms, \
-             published_ms, method, url, headers, body, run_at_ms, idempotency_key, fingerprint, \
-             callback_url, callback_for, capture, lane, cron, alert_for, wake_call, \
-             report_failures_only, watch, on_match, action_reserve, triggered_by, created_ms, \
-             updated_ms) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
-             ?, ?, ?, ?, ?, ?, ?)"
-            ),
-            vec![
-                (*id).into(),
-                text(&task.status).into(),
-                task.due_ms.into(),
-                task.max_attempts.into(),
-                task.run_attempts.into(),
-                task.total_attempts.into(),
-                task.generation.into(),
-                task.fence.into(),
-                task.lease_until_ms.into(),
-                task.cancel_requested.into(),
-                task.terminal_ms.into(),
-                new.method.as_str().into(),
-                new.url.into(),
-                headers.into(),
-                new.body.into(),
-                new.run_at_ms.into(),
-                new.idempotency_key.into(),
-                new.fingerprint.into(),
-                new.callback_url.into(),
-                new.callback_for.into(),
-                new.capture.into(),
-                new.lane.into(),
-                new.cron.into(),
-                new.alert_for.into(),
-                new.wake_call.into(),
-                new.report_failures_only.into(),
-                new.watch.into(),
-                new.on_match.into(),
-                new.action_reserve.into(),
-                new.triggered_by.into(),
-                now.into(),
-                now.into(),
-            ],
-        )
-    }
-
-    /// Saves a change to a task loaded as `row`; if the change finished the task, queues
-    /// its callback in the same transaction.
-    fn save_row(&self, row: &TaskRow, task: &Task, now: i64) -> Result<(), DbError> {
-        self.save(&row.id, task, now)?;
-        let was_finished = parse::<Status>(&row.status)?.is_terminal();
-        if !task.status.is_terminal() || was_finished {
-            return Ok(());
-        }
-        if let Some(name) = &row.cron {
-            self.run_finished(name, row, task.status, now)?;
-        }
-        if row.wake_call != 0 {
-            self.wake_finished(&row.id, task.status, now)?;
-        }
-        if row.on_match.is_some() {
-            self.watch_ended(row, task, now)?;
-        }
-        if row.watch.is_some() || row.wake_call != 0 {
-            // Watches and wakes are never sent again, and their headers often carry a token.
-            let names: Vec<(String, String)> = row
-                .headers()?
-                .into_iter()
-                .map(|(name, _)| (name, String::new()))
-                .collect();
-            let names = serde_json::to_string(&names).map_err(|e| DbError(e.to_string()))?;
-            self.db.exec(
-                "UPDATE tasks SET headers = ?, body = NULL WHERE id = ?",
-                vec![names.into(), row.id.as_str().into()],
-            )?;
-        }
-        if row.report_failures_only != 0 && task.status != Status::Failed {
-            return Ok(());
-        }
-        match row.callback_url.as_deref() {
-            Some(INBOX) => self.report_to_inbox(&row.id, now),
-            Some(url) => self.queue_callback(&row.id, url, task.generation, now),
-            None => Ok(()),
-        }
-    }
-
     /// A watch with `on_match` ended. If it matched, its action is queued, in the same
     /// transaction, under an id derived from the watch's (a watch matches once, so queueing
     /// it again is a no-op). Either way the action's header values and body are cleared.
@@ -3003,27 +2833,20 @@ impl<'a, D: Db> Ledger<'a, D> {
                 let id = derived_id(&format!("action/{}", row.id));
                 self.insert(
                     NewTask {
-                        id: &id,
-                        task: Task::new(now, action.max_attempts),
-                        method: action.method,
-                        url: &action.url,
-                        headers: &action.headers,
-                        body: action.body.clone(),
-                        run_at_ms: now,
-                        idempotency_key: None,
-                        fingerprint: "on_match",
-                        callback_url: action.callback_url.as_deref(),
-                        callback_for: None,
-                        capture: action.capture,
-                        lane: None,
-                        cron: None,
-                        alert_for: None,
-                        wake_call: false,
-                        report_failures_only: false,
-                        watch: None,
-                        on_match: None,
-                        action_reserve: 0,
-                        triggered_by: Some(&row.id),
+                        reporting: Reporting {
+                            to: action.callback_url.as_deref(),
+                            failures_only: false,
+                            capture: action.capture,
+                        },
+                        ..NewTask::internal(
+                            &id,
+                            Kind::Action { watch: &row.id },
+                            Task::new(now, action.max_attempts),
+                            action.method,
+                            &action.url,
+                            &action.headers,
+                            action.body.clone(),
+                        )
                     },
                     now,
                 )?;
@@ -3081,29 +2904,15 @@ impl<'a, D: Db> Ledger<'a, D> {
             .ok_or_else(|| DbError(format!("task {task_id} vanished")))?;
         let report = serde_json::json!({ "event": "task.finished", "task": self.full_view(&row)? });
         self.insert(
-            NewTask {
-                id: &id,
-                task: Task::new(now, DEFAULT_MAX_ATTEMPTS),
-                method: Method::Post,
+            NewTask::internal(
+                &id,
+                Kind::Callback { task: task_id },
+                Task::new(now, DEFAULT_MAX_ATTEMPTS),
+                Method::Post,
                 url,
-                headers: &[("Content-Type".into(), "application/json".into())],
-                body: Some(report.to_string()),
-                run_at_ms: now,
-                idempotency_key: None,
-                fingerprint: "callback",
-                callback_url: None,
-                callback_for: Some(task_id),
-                capture: false,
-                lane: None,
-                cron: None,
-                alert_for: None,
-                wake_call: false,
-                report_failures_only: false,
-                watch: None,
-                on_match: None,
-                action_reserve: 0,
-                triggered_by: None,
-            },
+                &[("Content-Type".into(), "application/json".into())],
+                Some(report.to_string()),
+            ),
             now,
         )
     }
