@@ -69,9 +69,10 @@ pub struct Settled {
 }
 
 impl Settled {
-    fn rejected() -> Self {
+    /// An outcome with nothing read back.
+    fn bare(outcome: Outcome) -> Self {
         Settled {
-            outcome: Outcome::Rejected,
+            outcome,
             body: None,
             truncated: false,
             headers: vec![],
@@ -89,10 +90,10 @@ pub async fn attempt(
 ) -> Settled {
     let values = opened.unwrap_or_default();
     if values.len() < d.secrets.len() {
-        return Settled::rejected();
+        return Settled::bare(Outcome::Rejected);
     }
     let Some(request) = prepare(d, &values, now_s) else {
-        return Settled::rejected();
+        return Settled::bare(Outcome::Rejected);
     };
     let (outcome, read) = transport.send(&request).await;
     settle(d, &values, outcome, read)
@@ -168,12 +169,7 @@ fn settle(
         MAX_WATCH_RESPONSE_BYTES
     };
     let Some(read) = read else {
-        return Settled {
-            outcome,
-            body: None,
-            truncated: false,
-            headers: vec![],
-        };
+        return Settled::bare(outcome);
     };
     // Redact before cutting: the body was read past its cap for exactly this.
     let (body, cut) = match read.body.map(|b| redact(&b, values)) {
@@ -311,10 +307,13 @@ mod tests {
     fn rejects_without_sending_when_secrets_cannot_be_used() {
         let script = Script::answering(OK, None);
         let d = with_secret(delivery());
-        assert_eq!(run(attempt(&d, None, 0, &script)), Settled::rejected());
+        assert_eq!(
+            run(attempt(&d, None, 0, &script)),
+            Settled::bare(Outcome::Rejected)
+        );
         assert_eq!(
             run(attempt(&d, Some(vec![]), 0, &script)),
-            Settled::rejected()
+            Settled::bare(Outcome::Rejected)
         );
         assert_eq!(
             run(attempt(
@@ -323,14 +322,14 @@ mod tests {
                 0,
                 &script
             )),
-            Settled::rejected(),
+            Settled::bare(Outcome::Rejected),
             "a reference to a secret that wasn't opened"
         );
         let mut private = delivery();
         private.url = "http://127.0.0.1/".into();
         assert_eq!(
             run(attempt(&private, None, 0, &script)),
-            Settled::rejected()
+            Settled::bare(Outcome::Rejected)
         );
         assert!(script.sent.borrow().is_empty());
     }
@@ -402,15 +401,7 @@ mod tests {
 
         let script = Script::answering(Outcome::Timeout, None);
         let settled = run(attempt(&d, None, 0, &script));
-        assert_eq!(
-            settled,
-            Settled {
-                outcome: Outcome::Timeout,
-                body: None,
-                truncated: false,
-                headers: vec![]
-            }
-        );
+        assert_eq!(settled, Settled::bare(Outcome::Timeout));
     }
 
     #[test]

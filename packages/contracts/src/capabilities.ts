@@ -28,7 +28,8 @@ export interface ApiBinding {
   /**
    * What is sent: every argument, for the API to validate ("args"); the arguments not in the path
    * ("rest"); `{}` ("empty"); or no body (omitted). Without "args" or "rest" only path arguments
-   * are accepted.
+   * are accepted. A capability with a `prepare` entry in the gateway (queue_http, list_tasks)
+   * shapes its own call from this binding.
    */
   body?: "args" | "rest" | "empty";
 }

@@ -79,9 +79,11 @@ const prepare: Record<string, (api: ApiBinding, args: Args) => Call> = {
     }
     if ("lane" in request) throw new ArgumentError("queue_http takes queue, not lane", "lane");
     only(request, ["url", "method", "headers", "body", "callback_url", "capture", "idempotency_key", "max_attempts"]);
-    if (queue == null) return { method: api.method, path: api.path, scope: api.scope, body: request };
+    const call: Call = { method: api.method, path: api.path, scope: api.scope, body: request };
+    if (queue == null) return call;
     if (typeof queue !== "string" || !new RegExp(LANE_PATTERN).test(queue)) throw new ArgumentError(`invalid queue: ${LANE_RULE}`, "queue");
-    return { method: api.method, path: api.path, scope: api.scope, body: { ...request, lane: queue } };
+    call.body = { ...request, lane: queue };
+    return call;
   },
   list_tasks(api, args) {
     return { method: api.method, path: `${api.path}${listQuery(args)}`, scope: api.scope };

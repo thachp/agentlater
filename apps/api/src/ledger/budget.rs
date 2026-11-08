@@ -206,6 +206,11 @@ impl<D: Db> Ledger<'_, D> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_owed_sql_knows_the_inbox() {
+        assert!(OWES.contains(&format!("'{INBOX}'")));
+    }
+
     fn standing(can_attempt: bool, left: i64, inbox_unread: i64) -> Standing {
         Standing {
             can_attempt,

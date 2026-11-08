@@ -580,7 +580,9 @@ impl DurableObject for TaskLedger {
         let ledger = Ledger::open(&sql).map_err(|e| Error::RustError(e.to_string()))?;
         let t = now();
         let failed = |e: DbError| Error::RustError(e.to_string());
-        ledger.recover(t, jitter).map_err(failed)?;
+        for e in ledger.recover(t, jitter).map_err(failed)?.unreadable {
+            console_error!("failed an unreadable task row: {e}");
+        }
         ledger.purge(t).map_err(failed)?;
         ledger.fire_crons(t).map_err(failed)?;
         if let Ok(project) = ledger.project() {
@@ -821,47 +823,46 @@ async fn send_with_fetch(r: &Outgoing) -> Result<(Outcome, Option<ResponseBody>)
                 .flatten()
                 .and_then(|v| crate::http::parse_retry_after(&v)),
         };
-        let max = match r.read {
-            ReadPlan::Status => return Ok::<_, Error>((outcome, None)),
-            ReadPlan::Capture { max_bytes } | ReadPlan::Poll { max_bytes } => max_bytes,
-        };
-        if let ReadPlan::Capture { .. } = r.read {
-            // The destination has answered, so a slow or broken body must not turn that answer
-            // into a failure (and a retry). Read only while the attempt has time left.
-            let headers = kept_headers(&response);
-            let unread = |headers| ResponseBody {
-                body: None,
-                truncated: true,
-                headers,
-            };
-            let left = started + ATTEMPT_TIMEOUT_MS - CAPTURE_READ_MARGIN_MS - now();
-            if left <= 0 {
-                return Ok((outcome, Some(unread(headers))));
-            }
-            let read = read_capped(&mut response, max);
-            let limit = Delay::from(Duration::from_millis(left as u64));
-            futures_util::pin_mut!(read, limit);
-            let body = match select(read, limit).await {
-                Either::Left((Ok((body, truncated)), _)) => ResponseBody {
-                    body: Some(body),
-                    truncated,
+        Ok::<_, Error>(match r.read {
+            ReadPlan::Status => (outcome, None),
+            ReadPlan::Capture { max_bytes } => {
+                // The destination has answered, so a slow or broken body must not turn that
+                // answer into a failure (and a retry). Read only while the attempt has time left.
+                let headers = kept_headers(&response);
+                let unread = |headers| ResponseBody {
+                    body: None,
+                    truncated: true,
                     headers,
-                },
-                _ => unread(headers),
-            };
-            return Ok((outcome, Some(body)));
-        }
-        // A body cut off mid-read is a failed poll, not an empty answer.
-        Ok(match read_capped(&mut response, max).await {
-            Ok((body, truncated)) => (
-                outcome,
-                Some(ResponseBody {
-                    body: Some(body),
-                    truncated,
-                    headers: vec![],
-                }),
-            ),
-            Err(_) => (Outcome::Network, None),
+                };
+                let left = started + ATTEMPT_TIMEOUT_MS - CAPTURE_READ_MARGIN_MS - now();
+                if left <= 0 {
+                    return Ok((outcome, Some(unread(headers))));
+                }
+                let read = read_capped(&mut response, max_bytes);
+                let limit = Delay::from(Duration::from_millis(left as u64));
+                futures_util::pin_mut!(read, limit);
+                let body = match select(read, limit).await {
+                    Either::Left((Ok((body, truncated)), _)) => ResponseBody {
+                        body: Some(body),
+                        truncated,
+                        headers,
+                    },
+                    _ => unread(headers),
+                };
+                (outcome, Some(body))
+            }
+            // A body cut off mid-read is a failed poll, not an empty answer.
+            ReadPlan::Poll { max_bytes } => match read_capped(&mut response, max_bytes).await {
+                Ok((body, truncated)) => (
+                    outcome,
+                    Some(ResponseBody {
+                        body: Some(body),
+                        truncated,
+                        headers: vec![],
+                    }),
+                ),
+                Err(_) => (Outcome::Network, None),
+            },
         })
     };
     let deadline = Delay::from(Duration::from_millis(ATTEMPT_TIMEOUT_MS as u64));
