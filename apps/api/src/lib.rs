@@ -8,6 +8,7 @@ pub mod db;
 pub mod delivery;
 pub mod http;
 pub mod ledger;
+pub mod routes;
 pub mod sealing;
 
 #[cfg(target_arch = "wasm32")]

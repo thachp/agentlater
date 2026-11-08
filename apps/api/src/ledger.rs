@@ -26,7 +26,10 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 mod hooks;
-pub use hooks::{token_hash, CreatedHook, HookList, HookOutcome, HookRow, HookView, Received};
+pub use hooks::{
+    hook_secret_name, token_hash, CreatedHook, HookDelivery, HookList, HookOutcome, HookReply,
+    HookRow, HookView, Received,
+};
 
 /// A published task that has not been claimed after this long is published again.
 pub const REPUBLISH_MS: i64 = 60_000;

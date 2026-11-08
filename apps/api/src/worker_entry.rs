@@ -1,24 +1,21 @@
 //! Cloudflare glue: HTTP entry, the per-project `TaskLedger` Durable Object, its alarm,
 //! and the queue consumer that makes delivery attempts. Logic lives in `ledger`.
 
-use crate::assertion::{self, Scope};
+use crate::assertion;
 use crate::db::{Db, DbError, Param};
 use crate::delivery::{attempt, Outgoing, ReadPlan, ResponseBody, Transport};
 use crate::ledger::{
-    ApiError, Claimed, Delivery, Dispatch, HookOutcome, Ledger, Received, ResponseRead,
-    SealedSecret,
+    hook_secret_name, ApiError, Claimed, Delivery, Dispatch, HookDelivery, HookReply, Ledger,
+    ResponseRead, SealedSecret,
 };
+use crate::routes::{Route, Verb};
 use crate::sealing::{SealingKey, NONCE_BYTES};
-use base64::Engine;
 use futures_util::future::{join_all, select, Either};
 use futures_util::StreamExt;
-use runlater_core::limits::{
-    ATTEMPT_TIMEOUT_MS, CAPTURED_HEADERS, HOOK_BODY_KEPT_BYTES, MAX_HOOK_REQUEST_BYTES,
-};
+use runlater_core::limits::{ATTEMPT_TIMEOUT_MS, CAPTURED_HEADERS};
 use runlater_core::{
-    accepts, cut, delivery_id, kept_headers as hook_headers, verify, CronRequest, HookRequest,
-    HookUpdate, Outcome, PollBody, ScheduleRequest, SecretRequest, Status, WakeRequest,
-    WatchRequest,
+    CronRequest, HookRequest, HookUpdate, Outcome, PollBody, ScheduleRequest, SecretRequest,
+    Status, WakeRequest, WatchRequest,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -115,39 +112,12 @@ impl Db for Sql {
 // ---------------------------------------------------------------------------------------
 // Entry Worker: authenticate the gateway, then hand the request to the project's ledger.
 
-fn required_scope(method: &Method, path: &[&str]) -> Option<Scope> {
-    Some(match (method, path) {
-        (Method::Post, ["v1", "projects"]) => Scope::Project,
-        (Method::Get, ["v1", "projects", "self"]) => Scope::Read,
-        (Method::Post, ["v1", "projects", "self", "credits"]) => Scope::Billing,
-        (Method::Post, ["v1", "tasks"]) => Scope::Schedule,
-        (Method::Get, ["v1", "tasks"]) => Scope::Read,
-        (Method::Get, ["v1", "tasks", _]) => Scope::Read,
-        (Method::Post, ["v1", "tasks", _, "cancel"]) => Scope::Cancel,
-        (Method::Post, ["v1", "tasks", _, "redrive"]) => Scope::Schedule,
-        (Method::Post, ["v1", "watches"]) => Scope::Schedule,
-        (Method::Post, ["v1", "crons"]) => Scope::Schedule,
-        (Method::Get, ["v1", "crons"]) => Scope::Read,
-        (Method::Get, ["v1", "crons", _]) => Scope::Read,
-        (Method::Post, ["v1", "crons", _, "delete"]) => Scope::Cancel,
-        // Acking is part of reading: it moves the project's one cursor, nothing else.
-        (Method::Post, ["v1", "inbox", "read"]) => Scope::Read,
-        (Method::Post, ["v1", "inbox", "ack"]) => Scope::Read,
-        (Method::Post, ["v1", "wake"]) => Scope::Schedule,
-        (Method::Post, ["v1", "wake", "delete"]) => Scope::Cancel,
-        (Method::Post, ["v1", "secrets"]) => Scope::Secrets,
-        // Names and hosts only; values are never returned.
-        (Method::Get, ["v1", "secrets"]) => Scope::Read,
-        (Method::Post, ["v1", "secrets", _, "delete"]) => Scope::Secrets,
-        (Method::Post, ["v1", "hooks"]) => Scope::Schedule,
-        // Names, settings and counts only; URLs and secrets are never returned.
-        (Method::Get, ["v1", "hooks"]) => Scope::Read,
-        (Method::Post, ["v1", "hooks", "_receive"]) => Scope::HooksReceive,
-        (Method::Post, ["v1", "hooks", _, "delete"]) => Scope::Cancel,
-        // After _receive: a hook name never starts with "_".
-        (Method::Post, ["v1", "hooks", _]) => Scope::Schedule,
-        _ => return None,
-    })
+fn verb(method: &Method) -> Option<Verb> {
+    match method {
+        Method::Get => Some(Verb::Get),
+        Method::Post => Some(Verb::Post),
+        _ => None,
+    }
 }
 
 fn segments(url: &Url) -> Vec<String> {
@@ -186,7 +156,8 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     if method == Method::Get && path == ["health"] {
         return json(&crate::health_body(), 200);
     }
-    let Some(scope) = required_scope(&method, &path) else {
+    let route = verb(&method).and_then(|v| Route::parse(v, &path));
+    let Some(scope) = route.and_then(Route::scope) else {
         return simple_error(404, "not_found", "no such route");
     };
     let Some(key) = gateway_key(&env) else {
@@ -279,24 +250,13 @@ struct InboxAckBody {
     up_to: i64,
 }
 
-/// A request a sender made to a hook, as the gateway forwards it.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HookDelivery {
-    token: String,
-    headers: Vec<(String, String)>,
-    /// The raw body, base64: the signature is over its exact bytes.
-    body: String,
-}
-
-/// The name a hook's verify secret is sealed under. Secret names are `A-Z0-9_`, so it can't
-/// be mistaken for (or opened as) a project secret.
-fn hook_secret_name(hook: &str) -> String {
-    format!("hook:{hook}")
-}
-
 /// What a hook's sender is told: a status and an empty body, never anything it sent.
-fn hook_answer(status: u16, reason: Option<&str>, retry_after_ms: Option<i64>) -> Result<Response> {
+fn hook_answer(reply: HookReply) -> Result<Response> {
+    let HookReply {
+        status,
+        reason,
+        retry_after_ms,
+    } = reply;
     let body = match reason {
         Some(r) => serde_json::json!({ "error": { "code": r } }),
         None => serde_json::json!({}),
@@ -307,6 +267,14 @@ fn hook_answer(status: u16, reason: Option<&str>, retry_after_ms: Option<i64>) -
             .set("Retry-After", &((ms + 999) / 1000).max(1).to_string())?;
     }
     Ok(r)
+}
+
+fn hooks_unavailable() -> Result<Response> {
+    simple_error(
+        503,
+        "secrets_unavailable",
+        "verified hooks are not configured on this deployment",
+    )
 }
 
 #[derive(Deserialize)]
@@ -330,75 +298,16 @@ fn created<T: Serialize>(value: &T, was_created: bool) -> Result<Response> {
 }
 
 impl TaskLedger {
-    /// Checks a hook request's signature, then lets the ledger write it. Nothing the sender
-    /// wrote goes back to it.
-    fn receive_hook(
-        &self,
-        ledger: &Ledger<'_, Sql>,
-        project_id: &str,
-        d: HookDelivery,
-        t: i64,
-    ) -> Result<Response> {
-        let failed = |e: DbError| Error::RustError(e.to_string());
-        let Some(hook) = ledger.hook_for_token(&d.token).map_err(failed)? else {
-            return hook_answer(404, Some("hook_not_found"), None);
+    /// Seals `value` under `name` for this project with a fresh nonce; None when secrets
+    /// aren't configured on this deployment.
+    fn seal(&self, project_id: &str, name: &str, value: &str) -> Result<Option<String>> {
+        let Some(key) = sealing_key(&self.env) else {
+            return Ok(None);
         };
-        let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(&d.body) else {
-            return hook_answer(400, Some("invalid_request"), None);
-        };
-        if raw.len() > MAX_HOOK_REQUEST_BYTES {
-            return hook_answer(413, Some("too_large"), None);
-        }
-        let headers: Vec<(String, String)> = d
-            .headers
-            .into_iter()
-            .map(|(k, v)| (k.to_ascii_lowercase(), v))
-            .collect();
-        let check = hook.verify().map_err(failed)?;
-        if let Some(spec) = &check {
-            let secret = sealing_key(&self.env).and_then(|key| {
-                key.open(
-                    project_id,
-                    &hook_secret_name(&hook.name),
-                    hook.sealed_secret.as_deref()?,
-                )
-            });
-            // Without the key nothing can be checked; the sender retries a 503 later.
-            let Some(secret) = secret else {
-                return hook_answer(503, Some("secrets_unavailable"), None);
-            };
-            if let Err(why) = verify(spec, secret.as_bytes(), &headers, &raw, t) {
-                ledger
-                    .hook_refused(&hook.name, why.as_str())
-                    .map_err(failed)?;
-                return hook_answer(401, Some(why.as_str()), None);
-            }
-        }
-        let keep = hook.keep_headers().map_err(failed)?;
-        let rules = hook.accept().map_err(failed)?;
-        let matches = || rules.as_ref().is_none_or(|r| accepts(r, &headers, &raw));
-        let text = String::from_utf8_lossy(&raw);
-        let body = cut(&text, HOOK_BODY_KEPT_BYTES);
-        let received = Received {
-            verified: check.is_some(),
-            delivery_id: delivery_id(check.as_ref(), &headers, &raw),
-            headers: hook_headers(check.as_ref(), &keep, &headers),
-            body,
-            body_bytes: raw.len(),
-            truncated: body.len() < text.len(),
-        };
-        match ledger
-            .receive_hook(&hook, received, matches, t)
-            .map_err(failed)?
-        {
-            HookOutcome::Accepted(_) | HookOutcome::Filtered => hook_answer(202, None, None),
-            HookOutcome::Duplicate => hook_answer(200, None, None),
-            HookOutcome::Refused {
-                status,
-                reason,
-                retry_after_ms,
-            } => hook_answer(status, Some(reason), retry_after_ms),
-        }
+        let nonce: [u8; NONCE_BYTES] = random_bytes(NONCE_BYTES as u32)?
+            .try_into()
+            .map_err(|_| Error::RustError("short nonce".into()))?;
+        Ok(Some(key.seal(project_id, name, value, nonce)))
     }
 
     fn sql(&self) -> Sql {
@@ -429,28 +338,29 @@ impl TaskLedger {
         let path: Vec<&str> = segs.iter().map(String::as_str).collect();
         let t = now();
 
-        let result = match (req.method(), path.as_slice()) {
-            (Method::Post, ["v1", "projects"]) => {
+        let Some(route) = verb(&req.method()).and_then(|v| Route::parse(v, &path)) else {
+            return simple_error(404, "not_found", "no such route");
+        };
+        let result = match route {
+            Route::CreateProject => {
                 let secret = format!("rls_{}", hex::encode(random_bytes(32)?));
                 ledger
                     .create_project(&project_id, &secret, t)
                     .map(|(p, c)| created(&p, c))
             }
-            (Method::Get, ["v1", "projects", "self"]) => ledger.project().map(|p| json(&p, 200)),
-            (Method::Post, ["v1", "projects", "self", "credits"]) => {
-                match body::<CreditBody>(req).await {
-                    Ok(c) => ledger
-                        .add_credit(&c.payment_id, c.attempts, t)
-                        .map(|(p, added)| {
-                            if added {
-                                record_stat(&self.env, &p.id, "payment", "real", c.attempts as f64);
-                            }
-                            created(&p, added)
-                        }),
-                    Err(e) => Err(e),
-                }
-            }
-            (Method::Post, ["v1", "tasks"]) => match body::<ScheduleRequest>(req).await {
+            Route::GetProject => ledger.project().map(|p| json(&p, 200)),
+            Route::AddCredit => match body::<CreditBody>(req).await {
+                Ok(c) => ledger
+                    .add_credit(&c.payment_id, c.attempts, t)
+                    .map(|(p, added)| {
+                        if added {
+                            record_stat(&self.env, &p.id, "payment", "real", c.attempts as f64);
+                        }
+                        created(&p, added)
+                    }),
+                Err(e) => Err(e),
+            },
+            Route::Schedule => match body::<ScheduleRequest>(req).await {
                 Ok(r) => {
                     let id = format!("task_{}", hex::encode(random_bytes(10)?));
                     ledger
@@ -459,70 +369,58 @@ impl TaskLedger {
                 }
                 Err(e) => Err(e),
             },
-            (Method::Post, ["v1", "watches"]) => match body::<WatchRequest>(req).await {
+            Route::Watch => match body::<WatchRequest>(req).await {
                 Ok(r) => {
                     let id = format!("task_{}", hex::encode(random_bytes(10)?));
                     ledger.watch(r, &id, t).map(|(task, c)| created(&task, c))
                 }
                 Err(e) => Err(e),
             },
-            (Method::Get, ["v1", "tasks"]) => match serde_urlencoded_query::<ListQuery>(&url) {
+            Route::ListTasks => match serde_urlencoded_query::<ListQuery>(&url) {
                 Ok(q) => ledger
                     .list(q.status, q.lane.as_deref(), q.cursor.as_deref(), q.limit)
                     .map(|p| json(&p, 200)),
                 Err(e) => Err(e),
             },
-            (Method::Get, ["v1", "tasks", id]) => ledger.task(id).map(|v| json(&v, 200)),
-            (Method::Post, ["v1", "tasks", id, "cancel"]) => {
-                ledger.cancel(id, t).map(|v| json(&v, 200))
-            }
-            (Method::Post, ["v1", "tasks", id, "redrive"]) => {
-                ledger.redrive(id, t).map(|v| json(&v, 200))
-            }
-            (Method::Post, ["v1", "crons"]) => match body::<CronRequest>(req).await {
+            Route::GetTask(id) => ledger.task(id).map(|v| json(&v, 200)),
+            Route::CancelTask(id) => ledger.cancel(id, t).map(|v| json(&v, 200)),
+            Route::RedriveTask(id) => ledger.redrive(id, t).map(|v| json(&v, 200)),
+            Route::PutCron => match body::<CronRequest>(req).await {
                 Ok(r) => ledger.put_cron(r, t).map(|(c, was)| created(&c, was)),
                 Err(e) => Err(e),
             },
-            (Method::Get, ["v1", "crons"]) => ledger.crons().map(|c| json(&c, 200)),
-            (Method::Get, ["v1", "crons", name]) => ledger.cron(name).map(|c| json(&c, 200)),
-            (Method::Post, ["v1", "crons", name, "delete"]) => {
-                ledger.delete_cron(name).map(|c| json(&c, 200))
-            }
-            (Method::Post, ["v1", "inbox", "read"]) => match body::<InboxReadBody>(req).await {
+            Route::ListCrons => ledger.crons().map(|c| json(&c, 200)),
+            Route::GetCron(name) => ledger.cron(name).map(|c| json(&c, 200)),
+            Route::DeleteCron(name) => ledger.delete_cron(name).map(|c| json(&c, 200)),
+            Route::ReadInbox => match body::<InboxReadBody>(req).await {
                 Ok(r) => ledger
                     .read_inbox(r.after, r.limit, r.ack)
                     .map(|p| json(&p, 200)),
                 Err(e) => Err(e),
             },
-            (Method::Post, ["v1", "inbox", "ack"]) => match body::<InboxAckBody>(req).await {
+            Route::AckInbox => match body::<InboxAckBody>(req).await {
                 Ok(a) => ledger.ack_inbox(a.up_to).map(|c| json(&c, 200)),
                 Err(e) => Err(e),
             },
-            (Method::Post, ["v1", "wake"]) => match body::<WakeRequest>(req).await {
+            Route::SetWake => match body::<WakeRequest>(req).await {
                 Ok(w) => ledger.set_wake(w, t).map(|v| json(&v, 200)),
                 Err(e) => Err(e),
             },
-            (Method::Post, ["v1", "wake", "delete"]) => {
-                ledger.delete_wake(t).map(|v| json(&v, 200))
-            }
-            (Method::Post, ["v1", "secrets"]) => match body::<SecretRequest>(req).await {
-                Ok(r) => match (r.validate(), sealing_key(&self.env)) {
-                    (Err(e), _) => Err(ApiError {
+            Route::DeleteWake => ledger.delete_wake(t).map(|v| json(&v, 200)),
+            Route::PutSecret => match body::<SecretRequest>(req).await {
+                Ok(r) => match r.validate() {
+                    Err(e) => Err(ApiError {
                         field: Some(e.field()),
                         ..ApiError::bad_request(e.to_string())
                     }),
-                    (Ok(_), None) => {
-                        return simple_error(
-                            503,
-                            "secrets_unavailable",
-                            "secrets are not configured on this deployment",
-                        )
-                    }
-                    (Ok(spec), Some(key)) => {
-                        let nonce: [u8; NONCE_BYTES] = random_bytes(NONCE_BYTES as u32)?
-                            .try_into()
-                            .map_err(|_| Error::RustError("short nonce".into()))?;
-                        let sealed = key.seal(&project_id, &spec.name, &spec.value, nonce);
+                    Ok(spec) => {
+                        let Some(sealed) = self.seal(&project_id, &spec.name, &spec.value)? else {
+                            return simple_error(
+                                503,
+                                "secrets_unavailable",
+                                "secrets are not configured on this deployment",
+                            );
+                        };
                         ledger
                             .put_secret(
                                 &spec.name,
@@ -536,33 +434,22 @@ impl TaskLedger {
                 },
                 Err(e) => Err(e),
             },
-            (Method::Get, ["v1", "secrets"]) => ledger.secrets().map(|s| json(&s, 200)),
-            (Method::Post, ["v1", "hooks"]) => match body::<HookRequest>(req).await {
+            Route::ListSecrets => ledger.secrets().map(|s| json(&s, 200)),
+            Route::PutHook => match body::<HookRequest>(req).await {
                 Ok(r) => match r.validate() {
                     Err(e) => Err(ApiError {
                         field: Some(e.field()),
                         ..ApiError::bad_request(e.to_string())
                     }),
                     Ok(spec) => {
-                        let sealed = match (&spec.verify, sealing_key(&self.env)) {
-                            (None, _) => None,
-                            (Some(_), None) => {
-                                return simple_error(
-                                    503,
-                                    "secrets_unavailable",
-                                    "verified hooks are not configured on this deployment",
-                                )
-                            }
-                            (Some((_, secret)), Some(key)) => {
-                                let nonce: [u8; NONCE_BYTES] = random_bytes(NONCE_BYTES as u32)?
-                                    .try_into()
-                                    .map_err(|_| Error::RustError("short nonce".into()))?;
-                                Some(key.seal(
-                                    &project_id,
-                                    &hook_secret_name(&spec.name),
-                                    secret,
-                                    nonce,
-                                ))
+                        let sealed = match &spec.verify {
+                            None => None,
+                            Some((_, secret)) => {
+                                let name = hook_secret_name(&spec.name);
+                                let Some(sealed) = self.seal(&project_id, &name, secret)? else {
+                                    return hooks_unavailable();
+                                };
+                                Some(sealed)
                             }
                         };
                         let token = format!("hk_{}", hex::encode(random_bytes(32)?));
@@ -573,37 +460,34 @@ impl TaskLedger {
                 },
                 Err(e) => Err(e),
             },
-            (Method::Get, ["v1", "hooks"]) => ledger.hooks().map(|h| json(&h, 200)),
-            (Method::Post, ["v1", "hooks", "_receive"]) => {
+            Route::ListHooks => ledger.hooks().map(|h| json(&h, 200)),
+            Route::ReceiveHook => {
                 let d = match body::<HookDelivery>(req).await {
                     Ok(d) => d,
                     Err(e) => return error(e),
                 };
-                return self.receive_hook(ledger, &project_id, d, t);
+                let key = sealing_key(&self.env);
+                let open = |name: &str, sealed: &str| key?.open(&project_id, name, sealed);
+                return match ledger.take_hook_request(d, open, t) {
+                    Ok(reply) => hook_answer(reply),
+                    Err(e) => Err(Error::RustError(e.to_string())),
+                };
             }
-            (Method::Post, ["v1", "hooks", name, "delete"]) => {
-                ledger.delete_hook(name).map(|v| json(&v, 200))
-            }
-            (Method::Post, ["v1", "hooks", name]) => match body::<HookUpdate>(req).await {
+            Route::DeleteHook(name) => ledger.delete_hook(name).map(|v| json(&v, 200)),
+            Route::UpdateHook(name) => match body::<HookUpdate>(req).await {
                 Ok(u) => match u.validate() {
                     Err(e) => Err(ApiError {
                         field: Some(e.field()),
                         ..ApiError::bad_request(e.to_string())
                     }),
                     Ok(patch) => {
-                        let sealed = match (&patch.verify, sealing_key(&self.env)) {
-                            (Some(Some(_)), None) => {
-                                return simple_error(
-                                    503,
-                                    "secrets_unavailable",
-                                    "verified hooks are not configured on this deployment",
-                                )
-                            }
-                            (Some(Some((_, secret))), Some(key)) => {
-                                let nonce: [u8; NONCE_BYTES] = random_bytes(NONCE_BYTES as u32)?
-                                    .try_into()
-                                    .map_err(|_| Error::RustError("short nonce".into()))?;
-                                Some(key.seal(&project_id, &hook_secret_name(name), secret, nonce))
+                        let sealed = match &patch.verify {
+                            Some(Some((_, secret))) => {
+                                let name = hook_secret_name(name);
+                                let Some(sealed) = self.seal(&project_id, &name, secret)? else {
+                                    return hooks_unavailable();
+                                };
+                                Some(sealed)
                             }
                             _ => None,
                         };
@@ -614,10 +498,8 @@ impl TaskLedger {
                 },
                 Err(e) => Err(e),
             },
-            (Method::Post, ["v1", "secrets", name, "delete"]) => {
-                ledger.delete_secret(name).map(|v| json(&v, 200))
-            }
-            (Method::Post, ["internal", "claim"]) => match body::<ClaimBody>(req).await {
+            Route::DeleteSecret(name) => ledger.delete_secret(name).map(|v| json(&v, 200)),
+            Route::Claim => match body::<ClaimBody>(req).await {
                 Ok(c) => ledger.claim(&c.task_id, c.generation, t).map(|claimed| {
                     let reply = match claimed {
                         Claimed::Deliver(d) => ClaimReply {
@@ -633,7 +515,7 @@ impl TaskLedger {
                 }),
                 Err(e) => Err(e),
             },
-            (Method::Post, ["internal", "finish"]) => match body::<FinishBody>(req).await {
+            Route::Finish => match body::<FinishBody>(req).await {
                 Ok(f) => ledger
                     .finish_response(
                         &f.task_id,
@@ -653,7 +535,6 @@ impl TaskLedger {
                     .map_err(ApiError::from),
                 Err(e) => Err(e),
             },
-            _ => return simple_error(404, "not_found", "no such route"),
         };
         match result {
             Ok(response) => response,
