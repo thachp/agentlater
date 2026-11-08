@@ -9,6 +9,28 @@ export interface CapabilityDefinition {
   description: string;
   /** JSON Schema for the capability's `arguments`. */
   input: Record<string, unknown> & { properties: Record<string, Record<string, unknown>>; required?: string[] };
+  /** The one call it makes on the private API. None for get_payment_link, which the gateway answers itself. */
+  api?: ApiBinding;
+}
+
+/** A scope a gateway assertion grants; the API checks it on every route (openapi.yaml's `x-scope`). */
+export type ApiScope = "project" | "schedule" | "read" | "cancel" | "billing" | "secrets" | "hooks.receive";
+
+/** How a capability calls the private API (packages/contracts/openapi.yaml). */
+export interface ApiBinding {
+  method: "GET" | "POST";
+  /**
+   * The path. `{arg}` is filled with the argument of that name, which must match the pattern its
+   * input schema gives, since it becomes part of the path.
+   */
+  path: string;
+  scope: ApiScope;
+  /**
+   * What is sent: every argument, for the API to validate ("args"); the arguments not in the path
+   * ("rest"); `{}` ("empty"); or no body (omitted). Without "args" or "rest" only path arguments
+   * are accepted.
+   */
+  body?: "args" | "rest" | "empty";
 }
 
 const TASK_ID = { type: "string", pattern: "^task_[0-9a-f]{20}$", description: "The task id returned by schedule_http or queue_http." };
@@ -116,6 +138,7 @@ const HTTP_REQUEST = {
 export const capabilities: CapabilityDefinition[] = [
   {
     name: "create_project",
+    api: { method: "POST", path: "/v1/projects", scope: "project" },
     description:
       "Create this agent's AgentLater project with a free trial (1,000 delivery attempts, 7 days). " +
       "Call once before scheduling; calling again returns the same project and never resets the trial. " +
@@ -124,6 +147,7 @@ export const capabilities: CapabilityDefinition[] = [
   },
   {
     name: "get_project",
+    api: { method: "GET", path: "/v1/projects/self", scope: "read" },
     description:
       "Show this agent's project: trial expiry, delivery attempts used and remaining, the signing secret, inbox_unread " +
       "(inbox events waiting for read_inbox), and wake (see set_wake). Calling it at the start of a session tells you whether anything finished while you were away.",
@@ -142,6 +166,7 @@ export const capabilities: CapabilityDefinition[] = [
   },
   {
     name: "schedule_http",
+    api: { method: "POST", path: "/v1/tasks", scope: "schedule", body: "args" },
     description:
       "Send an HTTP request to a public https:// URL at a time: after a delay (\"90s\", \"15m\", \"24h\", \"7d\"), " +
       "or at run_at_ms (unix milliseconds), at most 7 days ahead. To send as soon as possible, use queue_http. " +
@@ -174,6 +199,7 @@ export const capabilities: CapabilityDefinition[] = [
   },
   {
     name: "queue_http",
+    api: { method: "POST", path: "/v1/tasks", scope: "schedule", body: "args" },
     description:
       "Send an HTTP request to a public https:// URL in the background, as soon as possible. Pass queue to run related requests " +
       "one at a time, in order; each then waits its turn behind the ones ahead of it. To send at a later time, use schedule_http. " +
@@ -200,11 +226,13 @@ export const capabilities: CapabilityDefinition[] = [
   },
   {
     name: "get_task",
+    api: { method: "GET", path: "/v1/tasks/{task_id}", scope: "read" },
     description: "Get a task's status and every delivery attempt (time, HTTP status or error).",
     input: taskArgs,
   },
   {
     name: "list_tasks",
+    api: { method: "GET", path: "/v1/tasks", scope: "read" },
     description: "List this project's tasks, newest first. Pass next_cursor from a previous page to continue.",
     input: {
       type: "object",
@@ -220,16 +248,19 @@ export const capabilities: CapabilityDefinition[] = [
   },
   {
     name: "cancel_task",
+    api: { method: "POST", path: "/v1/tasks/{task_id}/cancel", scope: "cancel" },
     description: "Cancel a task that has not been delivered yet. A task mid-delivery is canceled once that attempt ends, unless it succeeds.",
     input: taskArgs,
   },
   {
     name: "redrive_task",
+    api: { method: "POST", path: "/v1/tasks/{task_id}/redrive", scope: "schedule" },
     description: "Retry a failed task from now, with a fresh set of attempts. Its attempt history is kept.",
     input: taskArgs,
   },
   {
     name: "create_cron",
+    api: { method: "POST", path: "/v1/crons", scope: "schedule", body: "args" },
     description:
       "Run an HTTP request on a recurring schedule: a 5-field cron expression in UTC with a single minute value (at most once an hour) " +
       "(e.g. \"0 6 * * *\" is daily at 06:00 UTC). Each run is an ordinary task (see get_task) and costs delivery attempts. " +
@@ -287,22 +318,26 @@ export const capabilities: CapabilityDefinition[] = [
   },
   {
     name: "get_cron",
+    api: { method: "GET", path: "/v1/crons/{name}", scope: "read" },
     description:
       "Show a cron: its schedule, next run, health (pending, healthy or failing, with the reason), last run task and last success.",
     input: cronArgs,
   },
   {
     name: "list_crons",
+    api: { method: "GET", path: "/v1/crons", scope: "read" },
     description: "List this project's crons with their health and next run.",
     input: noArgs,
   },
   {
     name: "delete_cron",
+    api: { method: "POST", path: "/v1/crons/{name}/delete", scope: "cancel" },
     description: "Stop and remove a cron. A run already started still finishes.",
     input: cronArgs,
   },
   {
     name: "watch_http",
+    api: { method: "POST", path: "/v1/watches", scope: "schedule", body: "args" },
     description:
       "Hand off waiting on a long-running job: AgentLater polls a public https:// URL (now, then every 5m to 24h) until the " +
       "response matches `until`, the deadline passes (at most 7d), or 3 polls in a row fail (408, 425, 429, 5xx, timeout, " +
@@ -410,6 +445,7 @@ export const capabilities: CapabilityDefinition[] = [
   },
   {
     name: "read_inbox",
+    api: { method: "POST", path: "/v1/inbox/read", scope: "read", body: "args" },
     description:
       "Read what happened while you were away: events from tasks, watches and crons sent to callback_url or alert_url \"inbox\", " +
       "and requests to your hooks (create_hook), oldest first. Each event is { seq, at_ms, event, ... } with the same payload a " +
@@ -438,6 +474,7 @@ export const capabilities: CapabilityDefinition[] = [
   },
   {
     name: "ack_inbox",
+    api: { method: "POST", path: "/v1/inbox/ack", scope: "read", body: "args" },
     description:
       "Mark inbox events up to and including seq up_to as read, so read_inbox stops returning them. Only moves forward: " +
       "acking an older seq changes nothing. Ack only events you have read; up_to past the newest event is an error.",
@@ -450,6 +487,7 @@ export const capabilities: CapabilityDefinition[] = [
   },
   {
     name: "set_wake",
+    api: { method: "POST", path: "/v1/wake", scope: "schedule", body: "args" },
     description:
       "Have AgentLater start you when your inbox gets something, instead of waiting for someone to open a session. Give the " +
       "https:// URL that starts an agent run (a routine or workflow trigger, a chat webhook, your own server) and any headers it " +
@@ -483,11 +521,13 @@ export const capabilities: CapabilityDefinition[] = [
   },
   {
     name: "delete_wake",
+    api: { method: "POST", path: "/v1/wake/delete", scope: "cancel", body: "empty" },
     description: "Stop waking: AgentLater no longer calls the wake URL. A wake already being sent finishes; one not yet sent is canceled.",
     input: noArgs,
   },
   {
     name: "set_secret",
+    api: { method: "POST", path: "/v1/secrets", scope: "secrets", body: "args" },
     description:
       "Store a credential once and refer to it instead of pasting it into requests: put {{secret:NAME}} in a header value of " +
       "schedule_http, create_cron, watch_http or set_wake, e.g. \"Authorization\": \"Bearer {{secret:GITHUB_TOKEN}}\". AgentLater " +
@@ -522,17 +562,20 @@ export const capabilities: CapabilityDefinition[] = [
   },
   {
     name: "list_secrets",
+    api: { method: "GET", path: "/v1/secrets", scope: "read" },
     description: "List this project's secrets: names, allowed hosts and when each was set. Never values.",
     input: noArgs,
   },
   {
     name: "delete_secret",
+    api: { method: "POST", path: "/v1/secrets/{name}/delete", scope: "secrets", body: "empty" },
     description:
       "Delete a secret. Work that still refers to it fails without using an attempt when it next comes due (failure: secret_missing).",
     input: { type: "object", additionalProperties: false, required: ["name"], properties: { name: SECRET_NAME } },
   },
   {
     name: "create_hook",
+    api: { method: "POST", path: "/v1/hooks", scope: "schedule", body: "args" },
     description:
       "Get a URL that receives webhooks for you: GitHub, Stripe, a CI system or any service that POSTs when something happens, " +
       "so you hear about it without polling or running a server. Each POST becomes a hook.received event in your inbox (read_inbox), " +
@@ -557,6 +600,7 @@ export const capabilities: CapabilityDefinition[] = [
   },
   {
     name: "list_hooks",
+    api: { method: "GET", path: "/v1/hooks", scope: "read" },
     description:
       "List this project's hooks: how each verifies, what it keeps, when it last received something, and how many requests it " +
       "wrote, filtered out (accept) and refused (by reason: signature_invalid, rate_limited, …). Never their URLs or secrets.",
@@ -564,6 +608,7 @@ export const capabilities: CapabilityDefinition[] = [
   },
   {
     name: "update_hook",
+    api: { method: "POST", path: "/v1/hooks/{name}", scope: "schedule", body: "rest" },
     description:
       "Change a hook's verify, accept or keep_headers. Its URL stays the same, as do its counts and the delivery ids it has seen, so " +
       "the sender needs no change. Fields left out stay as they are; accept: null keeps everything again, verify: null stops checking " +
@@ -582,6 +627,7 @@ export const capabilities: CapabilityDefinition[] = [
   },
   {
     name: "delete_hook",
+    api: { method: "POST", path: "/v1/hooks/{name}/delete", scope: "cancel", body: "empty" },
     description: "Delete a hook. Its URL answers 404 from now on; events it already wrote stay in the inbox.",
     input: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { ...CRON_NAME, description: "The hook's name." } } },
   },

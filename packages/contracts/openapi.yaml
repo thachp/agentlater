@@ -7,6 +7,10 @@ info:
     is reached only over a service binding. Every route except /health requires a
     RunLater-Assertion header signed by the gateway; the project comes from the
     assertion, never from the path or body. See docs/spec/ARCHITECTURE.md.
+
+    Each operation's `x-scope` is the assertion scope it requires. The API's route table
+    (apps/api/src/routes.rs) and the capability bindings in src/capabilities.ts are both
+    tested against it.
 servers:
   - url: https://api.internal
 security:
@@ -30,6 +34,7 @@ paths:
   /v1/projects:
     post:
       operationId: createProject
+      x-scope: project
       description: >
         Creates the project with a fresh trial. Idempotent: a repeat returns the existing
         project unchanged (200) and never refills the trial or rotates the secret.
@@ -41,6 +46,7 @@ paths:
   /v1/projects/self:
     get:
       operationId: getProject
+      x-scope: read
       description: "Scope: read."
       responses:
         "200": { $ref: "#/components/responses/Project" }
@@ -48,6 +54,7 @@ paths:
   /v1/projects/self/credits:
     post:
       operationId: addCredit
+      x-scope: billing
       description: >
         Adds attempts bought with one payment. The balance, including attempts left from the
         trial or an earlier purchase unless they have expired, becomes valid for 365 days from
@@ -72,6 +79,7 @@ paths:
   /v1/tasks:
     post:
       operationId: scheduleTask
+      x-scope: schedule
       description: >
         Schedules an HTTP request. 201 when created; 200 when idempotency_key replays an
         identical earlier request. Scope: schedule.
@@ -86,6 +94,7 @@ paths:
         default: { $ref: "#/components/responses/Error" }
     get:
       operationId: listTasks
+      x-scope: read
       description: "Newest first. Scope: read."
       parameters:
         - { name: status, in: query, schema: { $ref: "#/components/schemas/Status" } }
@@ -107,6 +116,7 @@ paths:
   /v1/tasks/{id}:
     get:
       operationId: getTask
+      x-scope: read
       description: "Includes attempt history. Scope: read."
       parameters: [{ $ref: "#/components/parameters/TaskId" }]
       responses:
@@ -115,6 +125,7 @@ paths:
   /v1/tasks/{id}/cancel:
     post:
       operationId: cancelTask
+      x-scope: cancel
       description: >
         Cancels a waiting task. If an attempt is in flight the task becomes canceled when
         it ends, unless it succeeds. 409 task_finished if already succeeded or failed.
@@ -126,6 +137,7 @@ paths:
   /v1/tasks/{id}/redrive:
     post:
       operationId: redriveTask
+      x-scope: schedule
       description: >
         Gives a failed task a fresh set of attempts, starting now. 409 task_not_failed
         otherwise. Scope: schedule.
@@ -136,6 +148,7 @@ paths:
   /v1/watches:
     post:
       operationId: watch
+      x-scope: schedule
       description: >
         Starts a watch: a task whose attempts poll `url` (now, then every `every`) until the
         response matches `until`, the deadline passes, or three polls in a row fail. Each poll
@@ -154,6 +167,7 @@ paths:
   /v1/crons:
     post:
       operationId: putCron
+      x-scope: schedule
       description: >
         Creates a cron (201) or replaces the definition of the one with this name (200), keeping
         its health and history. 429 cron_limit past 10 crons. Scope: schedule.
@@ -168,6 +182,7 @@ paths:
         default: { $ref: "#/components/responses/Error" }
     get:
       operationId: listCrons
+      x-scope: read
       description: "By name. Scope: read."
       responses:
         "200":
@@ -183,6 +198,7 @@ paths:
   /v1/crons/{name}:
     get:
       operationId: getCron
+      x-scope: read
       description: "404 cron_not_found. Scope: read."
       parameters: [{ $ref: "#/components/parameters/CronName" }]
       responses:
@@ -191,6 +207,7 @@ paths:
   /v1/crons/{name}/delete:
     post:
       operationId: deleteCron
+      x-scope: cancel
       description: "Removes the cron and returns it as it was. Runs already started finish. Scope: cancel."
       parameters: [{ $ref: "#/components/parameters/CronName" }]
       responses:
@@ -199,6 +216,7 @@ paths:
   /v1/inbox/read:
     post:
       operationId: readInbox
+      x-scope: read
       description: >
         Events after `after` (default: the acked cursor), oldest first. Reading does not move
         the cursor unless `ack` is true, which acks up to the last event returned. `dropped`
@@ -225,6 +243,7 @@ paths:
   /v1/inbox/ack:
     post:
       operationId: ackInbox
+      x-scope: read
       description: >
         Moves the cursor forward to up_to; an older up_to changes nothing. 400 ack_beyond_inbox
         when up_to is past the newest event. Scope: read (acking is part of reading).
@@ -248,6 +267,7 @@ paths:
   /v1/wake:
     post:
       operationId: setWake
+      x-scope: schedule
       description: >
         Sets where wakes go, replacing any earlier setting and turning a disabled wake back on.
         A wake not yet sent is canceled; if the inbox has unread events, a new one is queued.
@@ -267,6 +287,7 @@ paths:
   /v1/wake/delete:
     post:
       operationId: deleteWake
+      x-scope: cancel
       description: >
         Stops wakes and returns the wake as it was. One being sent finishes; one not yet sent is
         canceled. 404 wake_not_set. Scope: cancel.
@@ -280,6 +301,7 @@ paths:
   /v1/secrets:
     post:
       operationId: setSecret
+      x-scope: secrets
       description: >
         Seals and stores a secret, or replaces the one with this name (201 created, 200 replaced).
         The value is never returned by any route. 429 secret_limit past 50; 503
@@ -295,6 +317,7 @@ paths:
         default: { $ref: "#/components/responses/Error" }
     get:
       operationId: listSecrets
+      x-scope: read
       description: "Names and hosts, by name; never values. Scope: read."
       responses:
         "200":
@@ -310,6 +333,7 @@ paths:
   /v1/secrets/{name}/delete:
     post:
       operationId: deleteSecret
+      x-scope: secrets
       description: "Returns the secret as it was. 404 secret_not_found. Scope: secrets."
       parameters:
         - { name: name, in: path, required: true, schema: { type: string, pattern: "^[A-Z][A-Z0-9_]{0,63}$" } }
@@ -319,6 +343,7 @@ paths:
   /v1/hooks:
     post:
       operationId: createHook
+      x-scope: schedule
       description: >
         Creates an inbound hook, or replaces the one with this name with a new token (201 created,
         200 replaced; the old URL stops working). Returns url_path, /h/{project_id}/{token}, this
@@ -336,6 +361,7 @@ paths:
         default: { $ref: "#/components/responses/Error" }
     get:
       operationId: listHooks
+      x-scope: read
       description: "Hooks by name, with their counts; never URLs or secrets. Scope: read."
       responses:
         "200":
@@ -351,6 +377,7 @@ paths:
   /v1/hooks/_receive:
     post:
       operationId: receiveHook
+      x-scope: hooks.receive
       description: >
         A request a sender made to a hook, forwarded by the gateway's public /h/ route. Checks the
         signature, the rate limits (per hook, and per project per UTC day) and the sender's
@@ -378,6 +405,7 @@ paths:
   /v1/hooks/{name}:
     post:
       operationId: updateHook
+      x-scope: schedule
       description: >
         Changes verify, accept or keep_headers, keeping the hook's URL, counts and the delivery
         ids it has seen. Fields left out stay; verify or accept null clears it. A new verify
@@ -403,6 +431,7 @@ paths:
   /v1/hooks/{name}/delete:
     post:
       operationId: deleteHook
+      x-scope: cancel
       description: "Returns the hook as it was; its URL answers 404 from now on. 404 hook_not_found. Scope: cancel."
       parameters:
         - { $ref: "#/components/parameters/CronName" }
