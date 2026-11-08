@@ -149,7 +149,7 @@ impl<D: Db> Ledger<'_, D> {
                 "this project's attempts have expired",
             ));
         }
-        let owed = self.owed_to_admitted()?;
+        let owed = self.owed()?;
         let cap = project.max_retained_tasks();
         if cost.rows > 0 && owed.rows + cost.rows > cap {
             return Err(ApiError::new(
@@ -171,13 +171,16 @@ impl<D: Db> Ledger<'_, D> {
         Ok(())
     }
 
-    /// Rows held and owed, and attempts promised, as admission counts them.
-    fn owed_to_admitted(&self) -> Result<Owed, DbError> {
+    /// Rows held and owed, and attempts promised to waiting work: one per task not yet
+    /// attempted (scheduled, or retrying after a failed attempt) and one per follow-up it owes.
+    /// An attempt under way was charged when it started, and a retry is never promised, so a
+    /// delivering task is owed only its follow-ups. Wakes are never promised anything.
+    fn owed(&self) -> Result<Owed, DbError> {
         let owed: Vec<Owed> = self.db.query(
             &format!(
                 "SELECT COUNT(*) + COALESCE(SUM({OWES}), 0) AS owed_rows, \
-                 COALESCE(SUM(CASE WHEN status IN ('scheduled', 'retrying', 'delivering') \
-                 THEN 1 ELSE 0 END + {OWES}), 0) AS attempts \
+                 COALESCE(SUM(CASE WHEN wake_call = 0 \
+                 THEN (status IN ('scheduled', 'retrying')) + {OWES} ELSE 0 END), 0) AS attempts \
                  FROM tasks"
             ),
             vec![],
@@ -185,17 +188,9 @@ impl<D: Db> Ledger<'_, D> {
         Ok(owed.first().copied().unwrap_or_default())
     }
 
-    /// Attempts promised to waiting work, as a wake counts them: one per task not yet
-    /// attempted (scheduled or retrying) and its owed follow-ups. Wakes are not counted.
+    /// Attempts promised to waiting work, which a wake may not spend.
     pub(super) fn reserved_attempts(&self) -> Result<i64, DbError> {
-        let owed: Vec<Owed> = self.db.query(
-            &format!(
-                "SELECT 0 AS owed_rows, COALESCE(SUM(status IN ('scheduled', 'retrying')), 0) \
-                 + COALESCE(SUM({OWES}), 0) AS attempts FROM tasks WHERE wake_call = 0"
-            ),
-            vec![],
-        )?;
-        Ok(owed.first().map_or(0, |o| o.attempts))
+        Ok(self.owed()?.attempts)
     }
 
     /// Charges one attempt.

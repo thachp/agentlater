@@ -3358,6 +3358,19 @@ mod tests {
     }
 
     #[test]
+    fn an_attempt_under_way_is_not_promised_twice() {
+        let db = Memory::new();
+        let l = setup(&db);
+        db.0.execute("UPDATE project SET attempt_budget = 2", [])
+            .unwrap();
+        l.schedule(req("https://a.example.com/"), "t1", T0).unwrap();
+        let d = l.publish_due(P, T0).unwrap().remove(0);
+        deliver(&l, &d, T0);
+        // t1's attempt is charged and under way; one attempt is left and nothing is waiting.
+        l.schedule(req("https://a.example.com/"), "t2", T0).unwrap();
+    }
+
+    #[test]
     fn caps_retained_tasks_even_when_canceled() {
         let db = Memory::new();
         let l = setup(&db);
@@ -5205,6 +5218,19 @@ mod tests {
         let a = deliver(l, &d, now);
         l.finish(&id, a.fence, http(status), now, 0.0).unwrap();
         a
+    }
+
+    #[test]
+    fn a_pending_wake_holds_no_attempts_back_from_new_work() {
+        let db = Memory::new();
+        let l = setup(&db);
+        db.0.execute("UPDATE project SET attempt_budget = 2", [])
+            .unwrap();
+        l.set_wake(waking(serde_json::json!({})), T0).unwrap();
+        finish_to_inbox(&l, "t1", T0);
+        assert_eq!(wake_tasks(&db), 1);
+        // A wake only spends what nothing else was promised, so the last attempt is free.
+        l.schedule(req("https://a.example.com/"), "t2", T0).unwrap();
     }
 
     fn wake_tasks(db: &Memory) -> i64 {
