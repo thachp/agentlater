@@ -1275,7 +1275,7 @@ impl<'a, D: Db> Ledger<'a, D> {
             NewTask {
                 id: task_id,
                 kind: Kind::Watch {
-                    watch: &watch,
+                    settings: &watch,
                     on_match: on_match.as_deref(),
                 },
                 task: Task::new(request.run_at_ms, request.max_attempts),
@@ -2748,7 +2748,7 @@ impl<'a, D: Db> Ledger<'a, D> {
                         },
                         ..NewTask::internal(
                             &id,
-                            Kind::Action { watch: &row.id },
+                            Kind::Action { watch_id: &row.id },
                             Task::new(now, action.max_attempts),
                             action.method,
                             &action.url,

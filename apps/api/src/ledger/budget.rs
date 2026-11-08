@@ -124,11 +124,11 @@ pub(super) fn verdict(
             return Ok(Verdict::StandDown("inbox_read"));
         }
         let reserved = reserved()?;
-        if standing.left - reserved >= 1 {
-        } else if reserved == 0 {
+        if standing.left - reserved < 1 {
+            if reserved > 0 {
+                return Ok(Verdict::StandDown("budget_reserved"));
+            }
             last_try = true;
-        } else {
-            return Ok(Verdict::StandDown("budget_reserved"));
         }
     }
     Ok(match (standing.can_attempt, last_try) {
@@ -258,7 +258,7 @@ mod tests {
         for kind in [
             Kind::Request { lane: None },
             Kind::Callback { task: "t" },
-            Kind::Action { watch: "w" },
+            Kind::Action { watch_id: "w" },
         ] {
             assert_eq!(
                 verdict(kind, &tried(0, 0), true, ok, no_reads).unwrap(),
@@ -290,11 +290,11 @@ mod tests {
             "one try, no retries"
         );
         assert_eq!(
-            v(Kind::Action { watch: "w" }, tried(0, 0)),
+            v(Kind::Action { watch_id: "w" }, tried(0, 0)),
             Verdict::LastTry
         );
         assert_eq!(
-            v(Kind::Action { watch: "w" }, tried(0, 2)),
+            v(Kind::Action { watch_id: "w" }, tried(0, 2)),
             Verdict::Exhausted,
             "a redriven action is admitted like any task"
         );

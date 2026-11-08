@@ -10,7 +10,7 @@ _Avoid_: job, message
 
 **Attempt**:
 One try at sending a task. Every attempt is charged to the project's budget.
-_Avoid_: delivery (as a count), call
+_Avoid_: "delivery" alone as a count ("delivery attempt" is fine), call
 
 **Task kind**:
 Who made a task: an agent's request or watch, a cron's run or alert, a wake, a watch's action, or another task's callback. Every task has exactly one, fixed when it is made.
