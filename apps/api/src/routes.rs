@@ -183,4 +183,44 @@ mod tests {
             Some(Route::UpdateHook("gh"))
         );
     }
+
+    /// Every operation in the API's contract with the scope it says, and no route it leaves out.
+    #[test]
+    fn matches_the_contract() {
+        let doc = include_str!("../../../packages/contracts/openapi.yaml");
+        let (mut path, mut verb) = ("", None);
+        let mut checked = 0;
+        for line in doc.lines() {
+            if let Some(p) = line.strip_prefix("  /").and_then(|p| p.strip_suffix(':')) {
+                path = p;
+            } else if let Some(v) = line.strip_prefix("    ").and_then(|v| v.strip_suffix(':')) {
+                verb = match v {
+                    "get" => Some(Get),
+                    "post" => Some(Post),
+                    _ => None,
+                };
+            } else if let Some(want) = line.strip_prefix("      x-scope: ") {
+                let verb = verb.expect("x-scope under a method");
+                // Fill each {param} with a sample segment.
+                let segments: Vec<&str> = path
+                    .split('/')
+                    .map(|s| if s.starts_with('{') { "p" } else { s })
+                    .collect();
+                let route = Route::parse(verb, &segments);
+                let have = route.and_then(Route::scope).map(|s| match s {
+                    Scope::Project => "project",
+                    Scope::Schedule => "schedule",
+                    Scope::Read => "read",
+                    Scope::Cancel => "cancel",
+                    Scope::Billing => "billing",
+                    Scope::Secrets => "secrets",
+                    Scope::HooksReceive => "hooks.receive",
+                });
+                assert_eq!(have, Some(want), "{verb:?} /{path}");
+                checked += 1;
+            }
+        }
+        // Every route with a scope is in the contract.
+        assert_eq!(checked, 25);
+    }
 }
