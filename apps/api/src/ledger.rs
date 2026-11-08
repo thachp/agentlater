@@ -29,7 +29,10 @@ mod budget;
 mod hooks;
 mod tasks;
 use budget::{verdict, Cost, Standing, Verdict};
-pub use hooks::{token_hash, CreatedHook, HookList, HookOutcome, HookRow, HookView, Received};
+pub use hooks::{
+    hook_secret_name, token_hash, CreatedHook, HookDelivery, HookList, HookOutcome, HookReply,
+    HookRow, HookView, Received,
+};
 use tasks::{Kind, NewTask, Reporting};
 
 /// A published task that has not been claimed after this long is published again.

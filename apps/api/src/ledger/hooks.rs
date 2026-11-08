@@ -6,11 +6,16 @@
 //! retries the sender marked with a delivery id, and writes the event.
 
 use super::*;
+use base64::Engine;
 use runlater_core::limits::{
-    DAY_MS, HOOK_BURST, HOOK_DEDUPE_MS, HOOK_EVENTS_PER_DAY, HOOK_EVENTS_PER_DAY_PAID,
-    HOOK_INTERVAL_MS, HOOK_UNVERIFIED_EVENTS_PER_DAY, HOUR_MS, MAX_HOOKS, MAX_INBOX_EVENTS,
+    DAY_MS, HOOK_BODY_KEPT_BYTES, HOOK_BURST, HOOK_DEDUPE_MS, HOOK_EVENTS_PER_DAY,
+    HOOK_EVENTS_PER_DAY_PAID, HOOK_INTERVAL_MS, HOOK_UNVERIFIED_EVENTS_PER_DAY, HOUR_MS, MAX_HOOKS,
+    MAX_HOOK_REQUEST_BYTES, MAX_INBOX_EVENTS,
 };
-use runlater_core::{check_keep, AcceptRule, HookPatch, HookSpec, VerifySpec};
+use runlater_core::{
+    accepts, check_keep, cut, delivery_id, kept_headers, AcceptRule, HookPatch, HookSpec,
+    VerifySpec,
+};
 
 /// A hook as callers see it: never its URL or secret.
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -134,6 +139,40 @@ pub enum HookOutcome {
         reason: &'static str,
         retry_after_ms: Option<i64>,
     },
+}
+
+/// A request a sender made to a hook, as the gateway forwards it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookDelivery {
+    pub token: String,
+    pub headers: Vec<(String, String)>,
+    /// The raw body, base64: the signature is over its exact bytes.
+    pub body: String,
+}
+
+/// What a hook's sender is told: a status, and why it was refused. Never anything it sent.
+#[derive(Debug, PartialEq, Eq)]
+pub struct HookReply {
+    pub status: u16,
+    pub reason: Option<&'static str>,
+    pub retry_after_ms: Option<i64>,
+}
+
+impl HookReply {
+    fn refused(status: u16, reason: &'static str) -> Self {
+        HookReply {
+            status,
+            reason: Some(reason),
+            retry_after_ms: None,
+        }
+    }
+}
+
+/// The name a hook's verify secret is sealed under. Secret names are `A-Z0-9_`, so it can't
+/// be mistaken for (or opened as) a project secret.
+pub fn hook_secret_name(hook: &str) -> String {
+    format!("hook:{hook}")
 }
 
 /// The SHA-256 a hook's token is stored and looked up by.
@@ -333,6 +372,81 @@ impl<D: Db> Ledger<'_, D> {
             "UPDATE hooks SET refused = ? WHERE name = ?",
             vec![refused.into(), hook.into()],
         )
+    }
+
+    /// Takes a request a sender made to a hook: finds the hook by its token, checks the
+    /// signature if the hook has one, and writes what passes. `open_secret` opens a sealed
+    /// secret under its name; without it nothing can be checked, so the sender is told to try
+    /// again later (503).
+    pub fn take_hook_request(
+        &self,
+        d: HookDelivery,
+        open_secret: impl FnOnce(&str, &str) -> Option<String>,
+        now: i64,
+    ) -> Result<HookReply, DbError> {
+        let Some(hook) = self.hook_for_token(&d.token)? else {
+            return Ok(HookReply::refused(404, "hook_not_found"));
+        };
+        let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(&d.body) else {
+            return Ok(HookReply::refused(400, "invalid_request"));
+        };
+        if raw.len() > MAX_HOOK_REQUEST_BYTES {
+            return Ok(HookReply::refused(413, "too_large"));
+        }
+        let headers: Vec<(String, String)> = d
+            .headers
+            .into_iter()
+            .map(|(k, v)| (k.to_ascii_lowercase(), v))
+            .collect();
+        let check = hook.verify()?;
+        if let Some(spec) = &check {
+            let name = hook_secret_name(&hook.name);
+            let secret = hook
+                .sealed_secret
+                .as_deref()
+                .and_then(|sealed| open_secret(&name, sealed));
+            let Some(secret) = secret else {
+                return Ok(HookReply::refused(503, "secrets_unavailable"));
+            };
+            if let Err(why) = runlater_core::verify(spec, secret.as_bytes(), &headers, &raw, now) {
+                self.hook_refused(&hook.name, why.as_str())?;
+                return Ok(HookReply::refused(401, why.as_str()));
+            }
+        }
+        let keep = hook.keep_headers()?;
+        let rules = hook.accept()?;
+        let matches = || rules.as_ref().is_none_or(|r| accepts(r, &headers, &raw));
+        let text = String::from_utf8_lossy(&raw);
+        let body = cut(&text, HOOK_BODY_KEPT_BYTES);
+        let received = Received {
+            verified: check.is_some(),
+            delivery_id: delivery_id(check.as_ref(), &headers, &raw),
+            headers: kept_headers(check.as_ref(), &keep, &headers),
+            body,
+            body_bytes: raw.len(),
+            truncated: body.len() < text.len(),
+        };
+        Ok(match self.receive_hook(&hook, received, matches, now)? {
+            HookOutcome::Accepted(_) | HookOutcome::Filtered => HookReply {
+                status: 202,
+                reason: None,
+                retry_after_ms: None,
+            },
+            HookOutcome::Duplicate => HookReply {
+                status: 200,
+                reason: None,
+                retry_after_ms: None,
+            },
+            HookOutcome::Refused {
+                status,
+                reason,
+                retry_after_ms,
+            } => HookReply {
+                status,
+                reason: Some(reason),
+                retry_after_ms,
+            },
+        })
     }
 
     /// Writes a request the API accepted (signature checked, if the hook has one) as an inbox
@@ -1071,5 +1185,157 @@ mod tests {
         l.hook_refused("h", "signature_invalid").unwrap();
         l.hook_refused("gone", "signature_invalid").unwrap();
         assert_eq!(l.hooks().unwrap().hooks[0].refused["signature_invalid"], 2);
+    }
+
+    // -- taking a sender's request --------------------------------------------------------
+
+    const GH_SECRET: &str = "whsec_0123456789abcdef";
+    const SEALED: &str = "v1:sealed-gh";
+
+    /// HMAC-SHA256, as a sender signs.
+    fn hmac(key: &[u8], msg: &[u8]) -> String {
+        let mut k = [0u8; 64];
+        k[..key.len()].copy_from_slice(key);
+        let pad = |b: u8| k.iter().map(|x| x ^ b).collect::<Vec<u8>>();
+        let inner = Sha256::new()
+            .chain_update(pad(0x36))
+            .chain_update(msg)
+            .finalize();
+        hex::encode(
+            Sha256::new()
+                .chain_update(pad(0x5c))
+                .chain_update(inner)
+                .finalize(),
+        )
+    }
+
+    fn github_hook(l: &Ledger<'_, Memory>) {
+        let s = spec(serde_json::json!({
+            "name": "gh",
+            "verify": { "scheme": "github", "secret": GH_SECRET },
+        }));
+        l.put_hook(&s, TOKEN, Some(SEALED), T0).unwrap();
+    }
+
+    fn request(body: &[u8], headers: &[(&str, &str)]) -> HookDelivery {
+        HookDelivery {
+            token: TOKEN.into(),
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: base64::engine::general_purpose::STANDARD.encode(body),
+        }
+    }
+
+    /// Opens only the GitHub hook's sealed secret, under its own name.
+    fn open(name: &str, sealed: &str) -> Option<String> {
+        assert_eq!((name, sealed), ("hook:gh", SEALED));
+        Some(GH_SECRET.into())
+    }
+
+    #[test]
+    fn a_correctly_signed_request_is_written_as_verified() {
+        let db = Memory::new();
+        let l = setup(&db);
+        github_hook(&l);
+        let body = br#"{"action":"completed"}"#;
+        let sig = format!("sha256={}", hmac(GH_SECRET.as_bytes(), body));
+        let reply = l
+            .take_hook_request(
+                request(
+                    body,
+                    &[("X-Hub-Signature-256", &sig), ("X-GitHub-Delivery", "d1")],
+                ),
+                open,
+                T0,
+            )
+            .unwrap();
+        assert_eq!(reply.status, 202);
+        let event = &events(&l)[0];
+        assert_eq!(event["verified"], true);
+        assert_eq!(event["delivery_id"], "d1");
+
+        let again = request(
+            body,
+            &[("x-hub-signature-256", &sig), ("x-github-delivery", "d1")],
+        );
+        assert_eq!(
+            l.take_hook_request(again, open, T0 + 1).unwrap().status,
+            200,
+            "a retry of the same delivery"
+        );
+    }
+
+    #[test]
+    fn a_bad_signature_is_refused_and_counted() {
+        let db = Memory::new();
+        let l = setup(&db);
+        github_hook(&l);
+        let wrong = format!("sha256={}", hmac(b"another-secret", b"{}"));
+        let reply = l
+            .take_hook_request(request(b"{}", &[("x-hub-signature-256", &wrong)]), open, T0)
+            .unwrap();
+        assert_eq!(
+            (reply.status, reply.reason),
+            (401, Some("signature_invalid"))
+        );
+        let reply = l.take_hook_request(request(b"{}", &[]), open, T0).unwrap();
+        assert_eq!(reply.reason, Some("signature_missing"));
+        let hook = &l.hooks().unwrap().hooks[0];
+        assert_eq!(hook.refused["signature_invalid"], 1);
+        assert_eq!(hook.refused["signature_missing"], 1);
+        assert!(events(&l).is_empty());
+    }
+
+    #[test]
+    fn without_the_key_a_verified_hook_asks_the_sender_to_retry() {
+        let db = Memory::new();
+        let l = setup(&db);
+        github_hook(&l);
+        let reply = l
+            .take_hook_request(request(b"{}", &[]), |_, _| None, T0)
+            .unwrap();
+        assert_eq!(
+            (reply.status, reply.reason),
+            (503, Some("secrets_unavailable"))
+        );
+        // An unverified hook needs no key.
+        let l2db = Memory::new();
+        let l2 = setup(&l2db);
+        hook(&l2, "plain", TOKEN);
+        let reply = l2
+            .take_hook_request(request(b"{}", &[]), |_, _| panic!("nothing to open"), T0)
+            .unwrap();
+        assert_eq!(reply.status, 202);
+    }
+
+    #[test]
+    fn unknown_malformed_and_oversized_requests_are_refused_before_any_check() {
+        let db = Memory::new();
+        let l = setup(&db);
+        github_hook(&l);
+        let never = |_: &str, _: &str| -> Option<String> { panic!("no check reached") };
+        let unknown = HookDelivery {
+            token: format!("hk_{}", "0".repeat(64)),
+            ..request(b"{}", &[])
+        };
+        assert_eq!(
+            l.take_hook_request(unknown, never, T0).unwrap(),
+            HookReply::refused(404, "hook_not_found")
+        );
+        let garbled = HookDelivery {
+            body: "not base64!".into(),
+            ..request(b"", &[])
+        };
+        assert_eq!(
+            l.take_hook_request(garbled, never, T0).unwrap(),
+            HookReply::refused(400, "invalid_request")
+        );
+        let big = vec![b'a'; MAX_HOOK_REQUEST_BYTES + 1];
+        assert_eq!(
+            l.take_hook_request(request(&big, &[]), never, T0).unwrap(),
+            HookReply::refused(413, "too_large")
+        );
     }
 }
