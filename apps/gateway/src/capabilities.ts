@@ -102,7 +102,10 @@ export function route(capability: string, args: Args): Call {
   const fields = [...api.path.matchAll(/\{(\w+)\}/g)].map((m) => m[1]!);
   if (api.body !== "args" && api.body !== "rest") only(args, fields);
   let path = api.path;
-  for (const field of fields) path = path.replace(`{${field}}`, pathArg(definition, field, args[field]));
+  for (const field of fields) {
+    const value = pathArg(definition, field, args[field]);
+    path = path.replace(`{${field}}`, () => value);
+  }
   const call: Call = { method: api.method, path, scope: api.scope };
   if (api.body === "args") call.body = args;
   if (api.body === "rest") call.body = Object.fromEntries(Object.entries(args).filter(([k]) => !fields.includes(k)));

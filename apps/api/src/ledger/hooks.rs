@@ -1281,7 +1281,10 @@ mod tests {
             (401, Some("signature_invalid"))
         );
         let reply = l.take_hook_request(request(b"{}", &[]), open, T0).unwrap();
-        assert_eq!(reply.reason, Some("signature_missing"));
+        assert_eq!(
+            (reply.status, reply.reason),
+            (401, Some("signature_missing"))
+        );
         let hook = &l.hooks().unwrap().hooks[0];
         assert_eq!(hook.refused["signature_invalid"], 1);
         assert_eq!(hook.refused["signature_missing"], 1);

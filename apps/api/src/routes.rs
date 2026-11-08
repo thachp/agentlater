@@ -4,7 +4,7 @@
 use crate::assertion::Scope;
 
 /// The two methods the API answers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Verb {
     Get,
     Post,
@@ -189,7 +189,7 @@ mod tests {
     fn matches_the_contract() {
         let doc = include_str!("../../../packages/contracts/openapi.yaml");
         let (mut path, mut verb) = ("", None);
-        let mut checked = 0;
+        let mut seen = std::collections::HashSet::new();
         for line in doc.lines() {
             if let Some(p) = line.strip_prefix("  /").and_then(|p| p.strip_suffix(':')) {
                 path = p;
@@ -207,20 +207,15 @@ mod tests {
                     .map(|s| if s.starts_with('{') { "p" } else { s })
                     .collect();
                 let route = Route::parse(verb, &segments);
-                let have = route.and_then(Route::scope).map(|s| match s {
-                    Scope::Project => "project",
-                    Scope::Schedule => "schedule",
-                    Scope::Read => "read",
-                    Scope::Cancel => "cancel",
-                    Scope::Billing => "billing",
-                    Scope::Secrets => "secrets",
-                    Scope::HooksReceive => "hooks.receive",
-                });
-                assert_eq!(have, Some(want), "{verb:?} /{path}");
-                checked += 1;
+                assert_eq!(
+                    route.and_then(Route::scope),
+                    Some(Scope::parse(want).expect("a known scope")),
+                    "{verb:?} /{path}"
+                );
+                assert!(seen.insert((verb, path)), "{verb:?} /{path} listed twice");
             }
         }
-        // Every route with a scope is in the contract.
-        assert_eq!(checked, 25);
+        // Every route with a scope is in the contract, once.
+        assert_eq!(seen.len(), 25);
     }
 }

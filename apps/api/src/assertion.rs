@@ -41,7 +41,7 @@ pub enum Scope {
 }
 
 impl Scope {
-    fn parse(s: &str) -> Option<Self> {
+    pub(crate) fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "project" => Self::Project,
             "schedule" => Self::Schedule,

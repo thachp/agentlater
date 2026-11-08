@@ -69,7 +69,7 @@ flowchart LR
 | `/billing/mpp/{link}` | An agent buying a pack | HMAC in the link, then the payment challenge |
 | `/openapi.json`, `/llms.txt`, `/health` | Discovery documents; `/health` also checks the API | None |
 
-- **Two identities, one path.** `runCapability` (`src/projects.ts`) takes an owner, either an Agent Auth host id or `mcp:<id>` from a grant, finds its project in `runlater_project`, and maps the capability to exactly one API call (`src/capabilities.ts`). The exception is `get_payment_link`, which the gateway answers itself. A project id is never taken from the caller.
+- **Two identities, one path.** `runCapability` (`src/projects.ts`) takes an owner, either an Agent Auth host id or `mcp:<id>` from a grant, finds its project in `runlater_project`, and makes the one API call named by the capability's `api` binding in `packages/contracts` (`src/capabilities.ts`). The exception is `get_payment_link`, which the gateway answers itself. A project id is never taken from the caller.
 - **The local bridge.** `@auth/agent-cli mcp --url <gateway>` is a stdio MCP server that holds an agent's keys and exposes generic tools (`execute_capability`, …). Nothing in the gateway is specific to it.
 - **Rate limits** are Workers Rate Limiting bindings, alongside Better Auth's own limiter on the Agent Auth routes: registration 10/min per IP; OAuth registration and consent 20/min per IP and path; MPP 10/min; hooks 120/min per IP and 600/min per project. `/mcp` tool calls have none ([open question](PRODUCT.md#open-questions)).
 - **Billing.** `get_payment_link` creates a Checkout Session and returns `agentlater.io/pay#key=…&secret=…` and an `mpp_url`. Payments reach the ledger through `POST /v1/projects/self/credits` (scope `billing`), keyed by session or PaymentIntent id, so a retried webhook adds nothing. `payment_intent.succeeded` is the backstop if an MPP credit fails after the charge.
@@ -78,10 +78,10 @@ flowchart LR
 
 Not on any public route (`workers_dev: false`, no custom domain). It is reached only through a service binding from the gateway.
 
-- **Assertions.** Each request carries `RunLater-Assertion`: `{aud, sub: project_id, scope, iat, exp}` signed with Ed25519 by the gateway, living at most 5 minutes. The route table in `worker_entry.rs` names the scope each route needs. Scopes: `project`, `schedule`, `read`, `cancel`, `secrets`, plus two no agent is granted: `billing` and `hooks.receive`. A shared test vector pins the format across TypeScript and Rust.
+- **Assertions.** Each request carries `RunLater-Assertion`: `{aud, sub: project_id, scope, iat, exp}` signed with Ed25519 by the gateway, living at most 5 minutes. The route table in `routes.rs` names the scope each route needs; `openapi.yaml` states the same scope as `x-scope`, and tests on both sides fail if they disagree. Scopes: `project`, `schedule`, `read`, `cancel`, `secrets`, plus two no agent is granted: `billing` and `hooks.receive`. A shared test vector pins the format across TypeScript and Rust.
 - **The ledger.** `src/ledger.rs` is plain synchronous Rust behind a small `Db` trait, so the same code runs against rusqlite in `cargo test` and against Durable Object SQLite in workerd. A run of storage calls with no `await` between them commits atomically, and that is what makes "record the match and queue the action" one transaction.
 - **Sealing.** `src/sealing.rs` holds AES-256-GCM with a per-project key derived by HKDF from `SECRETS_KEY`. The API seals before the ledger stores, so `ledger.rs` never holds plaintext. Two places open sealed values: the consumer at send time, and the Durable Object's entry code when it checks a hook's signature.
-- **Glue.** `src/worker_entry.rs` is the HTTP entry, the `TaskLedger` class, its alarm and the queue consumer.
+- **Glue.** `src/worker_entry.rs` is the HTTP entry, the `TaskLedger` class, its alarm and the queue consumer. The delivery attempt itself is `src/delivery.rs`, which takes the network as a `Transport` so `cargo test` can run it.
 
 ### `apps/web`
 
@@ -171,7 +171,7 @@ GET    /health
 runlater/
 ├── apps/
 │   ├── api/                 Rust Worker
-│   │   ├── src/             worker_entry, ledger (+ ledger/hooks), assertion, sealing, db, http
+│   │   ├── src/             worker_entry, routes, delivery, ledger (+ ledger/hooks), assertion, sealing, db, http
 │   │   └── test/            workerd e2e
 │   ├── gateway/             TS Worker
 │   │   ├── src/             index, mcp, consent, auth, store, projects, capabilities,
@@ -202,10 +202,10 @@ runlater/
 
 1. Change the rules in `PRODUCT.md` first; `crates/core/src/limits.rs` follows it.
 2. Define it in `packages/contracts/src/capabilities.ts`. That is what agents read and what the docs render.
-3. Map it to one API call in `apps/gateway/src/capabilities.ts`, unless the gateway can answer it alone, as with `get_payment_link`.
-4. Add the route and its scope in `worker_entry.rs`, the logic in the ledger, and any schema change as a new `MIGRATIONS` entry.
+3. Give it an `api` binding (method, path, scope) in the same file, unless the gateway can answer it alone, as with `get_payment_link`. Only an unusual argument shape needs a `prepare` entry in `apps/gateway/src/capabilities.ts`.
+4. Add the route and its scope in `apps/api/src/routes.rs`, the operation with its `x-scope` in `openapi.yaml`, the logic in the ledger, and any schema change as a new `MIGRATIONS` entry.
 5. Add a D1 migration granting it to existing hosts. `test/host-capabilities.test.ts` fails until there is one.
-6. Update `openapi.yaml`, the delivery docs and `lib/site.ts` (the web test checks the stated limits against `crates/core`), then the plugin's `SKILL.md` and `reference.md`, bumping its version in both manifests.
+6. Update the delivery docs and `lib/site.ts` (the web test checks the stated limits against `crates/core`), then the plugin's `SKILL.md` and `reference.md`, bumping its version in both manifests.
 7. Follow the rules for agent-facing design in [DESIGN.md](DESIGN.md#designing-for-agents).
 
 ## Environments
@@ -238,7 +238,6 @@ One `wrangler.jsonc` per app with `env.staging` and `env.production` (the receiv
 | Thin alerting | One GitHub email, from a workflow GitHub pauses after 60 days without repository activity. |
 | `AuthStore` is a single Durable Object | Every Agent Auth call goes through it for replay checks, so it is a throughput ceiling and a shared point of failure for that path. Hosted MCP doesn't use it. Fine at today's traffic; untested at scale. |
 | `SECRETS_KEY` is never rotated | One per environment. Losing it loses every sealed secret and hook verify secret; leaking it exposes them if the ledgers leak too. |
-| Contract drift | `openapi.yaml` isn't checked against the routes, so it can go stale without a test failing. |
 | Concentration in `ledger.rs` | About 6,500 lines including tests, and every feature passes through it. Hooks have already moved to their own module; the others may follow. |
 
 ## History

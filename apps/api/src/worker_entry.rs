@@ -1,5 +1,5 @@
 //! Cloudflare glue: HTTP entry, the per-project `TaskLedger` Durable Object, its alarm,
-//! and the queue consumer that makes delivery attempts. Logic lives in `ledger`.
+//! and the queue consumer that makes delivery attempts. Logic lives in `ledger`, `delivery` and `routes`.
 
 use crate::assertion;
 use crate::db::{Db, DbError, Param};
@@ -778,11 +778,13 @@ struct WorkersFetch;
 
 impl Transport for WorkersFetch {
     async fn send(&self, request: &Outgoing) -> (Outcome, Option<ResponseBody>) {
-        fetch(request).await.unwrap_or((Outcome::Network, None))
+        send_with_fetch(request)
+            .await
+            .unwrap_or((Outcome::Network, None))
     }
 }
 
-async fn fetch(r: &Outgoing) -> Result<(Outcome, Option<ResponseBody>)> {
+async fn send_with_fetch(r: &Outgoing) -> Result<(Outcome, Option<ResponseBody>)> {
     let headers = Headers::new();
     for (k, v) in &r.headers {
         headers.set(k, v)?;
