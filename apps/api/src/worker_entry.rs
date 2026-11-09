@@ -542,22 +542,18 @@ impl DurableObject for TaskLedger {
     async fn alarm(&self) -> Result<Response> {
         let sql = self.sql();
         let ledger = Ledger::open(&sql).map_err(|e| Error::RustError(e.to_string()))?;
-        let t = now();
-        let failed = |e: DbError| Error::RustError(e.to_string());
-        for e in ledger.recover(t, jitter).map_err(failed)?.unreadable {
+        let tick = ledger
+            .tick(now(), jitter)
+            .map_err(|e| Error::RustError(e.to_string()))?;
+        for e in tick.unreadable {
             console_error!("failed an unreadable task row: {e}");
         }
-        ledger.purge(t).map_err(failed)?;
-        ledger.fire_crons(t).map_err(failed)?;
-        if let Ok(project) = ledger.project() {
-            let due = ledger.publish_due(&project.id, t).map_err(failed)?;
-            if !due.is_empty() {
-                // Already marked published: a failed send is retried after REPUBLISH_MS.
-                let queue = self.env.queue("READY")?;
-                for dispatch in due {
-                    if let Err(e) = queue.send(&dispatch).await {
-                        console_error!("queue send failed for {}: {e}", dispatch.task_id);
-                    }
+        if !tick.dispatches.is_empty() {
+            // Already marked published: a failed send is retried after REPUBLISH_MS.
+            let queue = self.env.queue("READY")?;
+            for dispatch in tick.dispatches {
+                if let Err(e) = queue.send(&dispatch).await {
+                    console_error!("queue send failed for {}: {e}", dispatch.task_id);
                 }
             }
         }

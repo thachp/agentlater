@@ -360,12 +360,20 @@ pub struct ProjectView {
     pub wake: Option<WakeView>,
 }
 
+/// What a [`Ledger::tick`] leaves its caller: tasks to put on the queue, already marked
+/// published, and the rows it could not read (failed where they stood).
+#[derive(Debug, Default)]
+pub struct Tick {
+    pub dispatches: Vec<Dispatch>,
+    pub unreadable: Vec<DbError>,
+}
+
 /// What `recover` did: how many expired leases it settled, and the rows it could not read
 /// (failed where they stood).
 #[derive(Debug, Default)]
-pub struct Recovery {
-    pub recovered: usize,
-    pub unreadable: Vec<DbError>,
+struct Recovery {
+    recovered: usize,
+    unreadable: Vec<DbError>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -1061,7 +1069,7 @@ impl<'a, D: Db> Ledger<'a, D> {
 
     /// Due tasks to put on the queue. Marks them published so the next alarm does not
     /// republish them until [`REPUBLISH_MS`] has passed without a claim.
-    pub fn publish_due(&self, project_id: &str, now: i64) -> Result<Vec<Dispatch>, DbError> {
+    fn publish_due(&self, project_id: &str, now: i64) -> Result<Vec<Dispatch>, DbError> {
         let due: Vec<DueRow> = self.db.query(
             &format!(
                 "SELECT id, generation FROM tasks t \
@@ -1293,7 +1301,7 @@ impl<'a, D: Db> Ledger<'a, D> {
 
     /// Settles attempts whose consumer vanished. A row that can't be read is failed on its
     /// own, so it can't hold up the others (or wake the ledger again every time).
-    pub fn recover(&self, now: i64, mut jitter: impl FnMut() -> f64) -> Result<Recovery, DbError> {
+    fn recover(&self, now: i64, mut jitter: impl FnMut() -> f64) -> Result<Recovery, DbError> {
         let rows: Vec<TaskRow> = self.db.query(
             &format!(
                 "SELECT {TASK_COLUMNS} FROM tasks \
@@ -1352,7 +1360,7 @@ impl<'a, D: Db> Ledger<'a, D> {
 
     /// Deletes tasks whose retention period has passed, captured responses a week after
     /// their task finished, and old inbox events. Returns how many tasks.
-    pub fn purge(&self, now: i64) -> Result<usize, DbError> {
+    fn purge(&self, now: i64) -> Result<usize, DbError> {
         self.db.exec(
             "UPDATE tasks SET response = NULL WHERE response IS NOT NULL \
              AND terminal_ms IS NOT NULL AND terminal_ms <= ?",
@@ -1376,6 +1384,24 @@ impl<'a, D: Db> Ledger<'a, D> {
             )?;
         }
         Ok(expired.len())
+    }
+
+    /// Everything the ledger does on its own once time has passed, in the order it must happen:
+    /// settle lost attempts, purge what is past retention, start due cron runs, then publish
+    /// what is due (so a run started here is dispatched here). The caller queues the
+    /// dispatches and sets the alarm to [`Self::next_wake`].
+    pub fn tick(&self, now: i64, jitter: impl FnMut() -> f64) -> Result<Tick, DbError> {
+        let unreadable = self.recover(now, jitter)?.unreadable;
+        self.purge(now)?;
+        self.fire_crons(now)?;
+        let dispatches = match self.project_row()? {
+            Some(project) => self.publish_due(&project.id, now)?,
+            None => vec![],
+        };
+        Ok(Tick {
+            dispatches,
+            unreadable,
+        })
     }
 
     /// When the alarm should next run, if there is anything left to do.
@@ -2706,6 +2732,31 @@ mod tests {
         let a = deliver(l, &d, now);
         l.finish(&id, a.fence, http(status), now, 0.0).unwrap();
         id
+    }
+
+    /// One tick does the alarm's work in order: a cron run started in it is dispatched in it,
+    /// and so is the alert for a run it found lost.
+    #[test]
+    fn a_tick_dispatches_what_it_starts() {
+        let db = Memory::new();
+        let l = setup(&db);
+        assert!(l.tick(T0, || 0.0).unwrap().dispatches.is_empty());
+        l.put_cron(daily("backup"), T0).unwrap();
+        let tick = l.tick(SIX, || 0.0).unwrap();
+        assert_eq!(tick.dispatches.len(), 1, "the run it started");
+        assert!(tick.unreadable.is_empty());
+        let d = &tick.dispatches[0];
+        assert!(matches!(
+            l.claim(&d.task_id, d.generation, SIX).unwrap(),
+            Claimed::Deliver(_)
+        ));
+
+        // The consumer vanishes. The tick at the lease's end fails the run (its only attempt)
+        // and dispatches the alert that failure raised.
+        let after = l.tick(SIX + LEASE_MS, || 0.0).unwrap().dispatches;
+        assert_eq!(after.len(), 1);
+        assert_ne!(after[0].task_id, d.task_id);
+        assert_eq!(alerts(&db, "backup").len(), 1);
     }
 
     #[test]

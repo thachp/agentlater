@@ -210,7 +210,7 @@ impl<D: Db> Ledger<'_, D> {
     /// Starts a run for every cron that is due. A run that cannot be admitted, or a trial
     /// that has ended, marks the cron failing (and alerts) instead. Missed slots are not
     /// made up: a cron runs at most once per call. Returns how many runs started.
-    pub fn fire_crons(&self, now: i64) -> Result<usize, DbError> {
+    pub(super) fn fire_crons(&self, now: i64) -> Result<usize, DbError> {
         let Some(project) = self.project_row()? else {
             return Ok(0);
         };
