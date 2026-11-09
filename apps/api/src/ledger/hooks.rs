@@ -10,7 +10,7 @@ use base64::Engine;
 use runlater_core::limits::{
     DAY_MS, HOOK_BODY_KEPT_BYTES, HOOK_BURST, HOOK_DEDUPE_MS, HOOK_EVENTS_PER_DAY,
     HOOK_EVENTS_PER_DAY_PAID, HOOK_INTERVAL_MS, HOOK_UNVERIFIED_EVENTS_PER_DAY, HOUR_MS, MAX_HOOKS,
-    MAX_HOOK_REQUEST_BYTES, MAX_INBOX_EVENTS,
+    MAX_HOOK_REQUEST_BYTES,
 };
 use runlater_core::{
     accepts, check_keep, cut, delivery_id, kept_headers, AcceptRule, HookPatch, HookSpec,
@@ -535,17 +535,7 @@ impl<D: Db> Ledger<'_, D> {
         if hook.verify.is_none() && hook_count >= HOOK_UNVERIFIED_EVENTS_PER_DAY {
             return refuse(429, "daily_limit", tomorrow);
         }
-        // A hook event may push out an acked event or an older hook event, never an unread
-        // result of the project's own work.
-        let inbox: Vec<Counts> = self.db.query(
-            "SELECT COUNT(*) AS total, COALESCE(SUM(seq <= (SELECT inbox_acked_seq FROM project) \
-             OR json_extract(event, '$.event') = 'hook.received'), 0) AS waiting FROM inbox",
-            vec![],
-        )?;
-        if inbox
-            .first()
-            .is_some_and(|c| c.total >= MAX_INBOX_EVENTS && c.waiting == 0)
-        {
+        if !self.room_for_hook_event()? {
             return refuse(429, "inbox_full", Some(HOUR_MS));
         }
         self.db.exec(
@@ -571,7 +561,6 @@ impl<D: Db> Ledger<'_, D> {
                 ],
             )?;
         }
-        let seq = self.next_inbox_seq()?;
         let event = serde_json::json!({
             "event": "hook.received",
             "hook": hook.name,
@@ -585,12 +574,11 @@ impl<D: Db> Ledger<'_, D> {
                 "truncated": r.truncated,
             },
         });
-        self.add_to_inbox(seq, &event, now)?;
         self.db.exec(
             "UPDATE hooks SET received = received + 1, last_received_ms = ? WHERE name = ?",
             vec![now.into(), hook.name.as_str().into()],
         )?;
-        self.wake_soon(now)?;
+        let seq = self.post(now, |_| Ok(event))?;
         Ok(HookOutcome::Accepted(seq))
     }
 }
@@ -605,7 +593,7 @@ struct DayRow {
 mod tests {
     use super::*;
     use crate::db::sqlite::Memory;
-    use runlater_core::limits::{CAPTURE_RETENTION_MS, TRIAL_DURATION_MS};
+    use runlater_core::limits::{CAPTURE_RETENTION_MS, MAX_INBOX_EVENTS, TRIAL_DURATION_MS};
     use runlater_core::{HookRequest, WakeRequest};
 
     #[test]
@@ -953,8 +941,7 @@ mod tests {
         verified_hook(&l, "h", TOKEN);
         let fill = |event: &str, n: i64| {
             for _ in 0..n {
-                let seq = l.next_inbox_seq().unwrap();
-                l.add_to_inbox(seq, &serde_json::json!({ "event": event }), T0)
+                l.post(T0, |_| Ok(serde_json::json!({ "event": event })))
                     .unwrap();
             }
         };
