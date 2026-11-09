@@ -36,9 +36,6 @@ One task a cron makes for one slot of its schedule.
 **Alert**:
 The task that posts a change in a cron's health to its alert URL.
 
-**Wake**:
-The POST that tells an agent its inbox has unread events.
-
 **Reporting**:
 Where a finished task's result goes (a callback URL, the inbox, or nowhere) and whether it carries the captured response. Separate from the task kind: many kinds can report.
 
@@ -54,3 +51,6 @@ _Avoid_: message, notification
 
 **Ack**:
 Marking every event up to a number as read. It only moves forward.
+
+**Wake**:
+The POST that tells an agent its inbox has unread events.

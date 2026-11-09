@@ -10,10 +10,9 @@
 use crate::db::{Db, DbError, Param};
 use runlater_core::limits::{
     CAPTURED_HEADERS, CAPTURE_BODY_BYTES, CAPTURE_RETENTION_MS, CREDIT_VALIDITY_MS,
-    DEFAULT_MAX_ATTEMPTS, INBOX_ACKED_RETENTION_MS, INBOX_DEFAULT_PAGE, INBOX_MAX_PAGE,
-    MAX_CREDIT_ATTEMPTS, MAX_CRONS, MAX_HEADER_BYTES, MAX_INBOX_EVENTS, MAX_RETAINED_TASKS,
-    MAX_RETAINED_TASKS_PAID, MAX_SECRETS, MAX_WAKE_FAILURES, RETENTION_MS, TRIAL_ATTEMPTS,
-    TRIAL_DURATION_MS, WATCH_EXCERPT_BYTES,
+    DEFAULT_MAX_ATTEMPTS, MAX_CREDIT_ATTEMPTS, MAX_CRONS, MAX_HEADER_BYTES, MAX_RETAINED_TASKS,
+    MAX_RETAINED_TASKS_PAID, MAX_SECRETS, RETENTION_MS, TRIAL_ATTEMPTS, TRIAL_DURATION_MS,
+    WATCH_EXCERPT_BYTES,
 };
 use runlater_core::{
     fill, header_references, host_allowed, judge, next_poll, valid_lane, Attempt, CancelError,
@@ -1760,7 +1759,7 @@ impl<'a, D: Db> Ledger<'a, D> {
 
     /// When the alarm should next run, if there is anything left to do.
     pub fn next_wake(&self) -> Result<Option<i64>, DbError> {
-        let rows: Vec<Wake> = self.db.query(
+        let rows: Vec<Due> = self.db.query(
             &format!(
                 "SELECT MIN(t) AS t FROM ( \
                  SELECT CASE WHEN published_ms IS NOT NULL AND published_ms + {REPUBLISH_MS} > due_ms \
@@ -1774,7 +1773,7 @@ impl<'a, D: Db> Ledger<'a, D> {
             vec![],
         )?;
         // Separate queries: Durable Object SQLite allows at most five terms in a compound SELECT.
-        let captures: Vec<Wake> = self.db.query(
+        let captures: Vec<Due> = self.db.query(
             &format!(
                 "SELECT MIN(terminal_ms) + {CAPTURE_RETENTION_MS} AS t FROM tasks \
                  WHERE response IS NOT NULL AND terminal_ms IS NOT NULL"
@@ -2547,8 +2546,9 @@ struct SeqRow {
     seq: i64,
 }
 
+/// An earliest due time, from a `SELECT MIN(t) AS t`.
 #[derive(Deserialize)]
-struct Wake {
+struct Due {
     t: Option<i64>,
 }
 
@@ -2556,7 +2556,9 @@ struct Wake {
 mod tests {
     use super::*;
     use crate::db::sqlite::Memory;
-    use runlater_core::limits::LEASE_MS;
+    use runlater_core::limits::{
+        INBOX_ACKED_RETENTION_MS, LEASE_MS, MAX_INBOX_EVENTS, MAX_WAKE_FAILURES,
+    };
 
     #[test]
     fn derived_ids_are_the_start_of_a_sha256() {
