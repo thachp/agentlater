@@ -521,6 +521,9 @@ impl TaskLedger {
                     Ok(c) => json(
                         &serde_json::json!({
                             "rotation": keys.rotation(),
+                            // Which GitHub slot the deploy took the current key from, so
+                            // scripts/rotate-secrets-key.mjs can tell the sweep saw these keys.
+                            "slot": self.env.var("SECRETS_KEY_SLOT").ok().map(|v| v.to_string()),
                             "resealed": c.resealed,
                             "unreadable": c.unreadable,
                         }),

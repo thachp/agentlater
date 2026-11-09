@@ -36,7 +36,12 @@ out when an attempt is claimed, and the ledger's entry code when it checks a hoo
    key into a "previous" secret. Instead the key has two slots, `SECRETS_KEY` and `SECRETS_KEY_2`.
    `SECRETS_KEY_SLOT` picks the current slot, and while `SECRETS_KEY_ROTATING` is true the deploy
    passes the other slot as `SECRETS_KEY_PREVIOUS`. `scripts/rotate-secrets-key.mjs` runs `start`,
-   `undo` and `finish`, and only ever writes keys. `wrangler deploy --secrets-file` never deletes a
+   `undo` and `finish`, and only ever writes keys. `start` sets the rotating flag before it switches
+   the slot, so a deploy between the two still hands the API both keys. `finish` deletes a key, so
+   it checks first: the sweep's row must show a pass completed over an hour ago, for the slot the
+   deploy reports as current, and checked since the slot variables last changed. Without that,
+   `undo` followed quickly by `finish` would read an old completion and delete the only key
+   that opens every value. `wrangler deploy --secrets-file` never deletes a
    secret, so the deploy explicitly deletes `SECRETS_KEY_PREVIOUS` once a rotation is finished.
    The steps are in `docs/DEPLOY.md`.
 

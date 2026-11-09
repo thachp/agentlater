@@ -248,16 +248,18 @@ environment, `staging` first:
    npx wrangler d1 execute DB --env production --remote --command "SELECT * FROM secrets_rotation"
    ```
 
-   `completed_at` set means done. `unreadable` counts values no key opens (already broken before the
-   rotation); keeping the old key doesn't help them.
+   `completed_at` set, with `slot` the current slot, means done. `unreadable` counts values no key opens
+   (already broken before the rotation); keeping the old key doesn't help them.
 3. **Wait an hour more**, for attempts claimed with old ciphertext to finish.
-4. **Finish.** `node scripts/rotate-secrets-key.mjs --env production finish` sets `SECRETS_KEY_ROTATING=false`
-   and deletes the old slot. Deploy; the deploy deletes `SECRETS_KEY_PREVIOUS` from the Worker, since
-   `--secrets-file` never deletes on its own.
+4. **Finish.** `node scripts/rotate-secrets-key.mjs --env production finish` (needs wrangler logged in)
+   sets `SECRETS_KEY_ROTATING=false` and deletes the old slot. It refuses unless that row shows a pass
+   completed more than an hour ago, for the current slot, and checked since the slot variables last
+   changed: finishing early would delete the only key some values open with. Deploy; the deploy deletes
+   `SECRETS_KEY_PREVIOUS` from the Worker, since `--secrets-file` never deletes on its own.
 
 To back out before finishing, run `undo` and deploy: the old key is current again and the new one still
-opens, so nothing is lost. The sweep starts a new pass (it reseals back under the old key); wait for it to
-complete before `finish`, which then deletes the new key.
+opens, so nothing is lost. The sweep starts a new pass (it reseals back under the old key), and `finish`
+waits for it before deleting the new key.
 
 ## Lost keys: refund the unused attempts
 

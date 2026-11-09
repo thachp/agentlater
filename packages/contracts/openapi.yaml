@@ -358,9 +358,10 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [rotation, resealed, unreadable]
+                required: [rotation, slot, resealed, unreadable]
                 properties:
                   rotation: { type: [string, "null"] }
+                  slot: { type: [string, "null"], description: "The deploy's SECRETS_KEY_SLOT: where the current key came from." }
                   resealed: { type: integer, minimum: 0 }
                   unreadable: { type: integer, minimum: 0 }
         default: { $ref: "#/components/responses/Error" }

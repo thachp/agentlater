@@ -12,18 +12,31 @@ export const PROJECTS_PER_RUN = 200;
 export interface SweepState {
   /** The API's name for its pair of keys; null when no rotation is on. */
   rotation: string | null;
+  /** The GitHub slot the deploy took the current key from (`SECRETS_KEY_SLOT`). */
+  slot: string | null;
   cursor: string;
   resealed: number;
   unreadable: number;
   /** When a full pass resealed nothing: the previous key is no longer needed. */
   completedAt: number | null;
+  /** The last time a ledger answered with these keys. */
+  checkedAt: number | null;
 }
 
-export const FRESH: SweepState = { rotation: null, cursor: "", resealed: 0, unreadable: 0, completedAt: null };
+export const FRESH: SweepState = {
+  rotation: null,
+  slot: null,
+  cursor: "",
+  resealed: 0,
+  unreadable: 0,
+  completedAt: null,
+  checkedAt: null,
+};
 
 /** One ledger's answer. `rotation` is null when the API has no previous key. */
 export interface Reseal {
   rotation: string | null;
+  slot: string | null;
   resealed: number;
   unreadable: number;
 }
@@ -36,9 +49,9 @@ export interface SweepStore {
 }
 
 /**
- * One cron run. A new pair of keys (a new rotation, or an undo) starts a fresh pass; no previous
- * key resets the sweep; a complete rotation is only probed. A failed call ends the run where it
- * is, and the next run carries on from there.
+ * One cron run. New keys (a new rotation, or an undo) start a fresh pass; no previous key resets
+ * the sweep; a complete rotation is only probed, which keeps `checkedAt` current. A failed call
+ * ends the run where it is, and the next run carries on from there.
  */
 export async function sweep(
   store: SweepStore,
@@ -48,6 +61,8 @@ export async function sweep(
 ): Promise<SweepState> {
   const loaded = await store.load();
   let state = loaded;
+  const restart = (r: Reseal): SweepState => (r.rotation === null ? FRESH : { ...FRESH, rotation: r.rotation, slot: r.slot });
+  const sameKeys = (r: Reseal) => r.rotation === state.rotation && r.slot === state.slot;
   try {
     const page = await store.projects(state.cursor, limit);
     // The first project of the page also answers which rotation, if any, is on.
@@ -55,24 +70,34 @@ export async function sweep(
     if (probe === undefined) return state;
     if (state.completedAt !== null) {
       const r = await reseal(probe);
-      if (r.rotation !== state.rotation) state = { ...FRESH, rotation: r.rotation };
-      return state;
+      return (state = sameKeys(r) ? { ...state, checkedAt: now } : restart(r));
     }
-    for (const projectId of page) {
+    // A pass can end on an empty page; one project is still asked, so the end is checked
+    // against the keys deployed now, not the ones the pass started with.
+    for (const projectId of page.length > 0 ? page : [probe]) {
       const r = await reseal(projectId);
       if (r.rotation === null) return (state = FRESH);
-      if (r.rotation !== state.rotation) {
+      if (!sameKeys(r)) {
         // Keys changed mid-pass: start over from the first project next run.
-        if (state.cursor !== "") return (state = { ...FRESH, rotation: r.rotation });
-        state = { ...state, rotation: r.rotation };
+        if (state.cursor !== "") return (state = restart(r));
+        state = { ...state, rotation: r.rotation, slot: r.slot };
       }
-      state = { ...state, cursor: projectId, resealed: state.resealed + r.resealed, unreadable: state.unreadable + r.unreadable };
+      state = {
+        ...state,
+        cursor: page.length > 0 ? projectId : state.cursor,
+        resealed: state.resealed + r.resealed,
+        unreadable: state.unreadable + r.unreadable,
+        checkedAt: now,
+      };
     }
     if (page.length < limit) {
       // End of a pass: complete if it resealed nothing (values no key opens can't be helped by
       // keeping the old one), else go round again to confirm.
-      const { rotation, unreadable } = state;
-      state = state.resealed === 0 ? { ...FRESH, rotation, unreadable, completedAt: now } : { ...FRESH, rotation };
+      const { rotation, slot, unreadable } = state;
+      state =
+        state.resealed === 0
+          ? { ...FRESH, rotation, slot, unreadable, completedAt: now, checkedAt: now }
+          : { ...FRESH, rotation, slot };
     }
     return state;
   } finally {
@@ -85,20 +110,37 @@ export function d1SweepStore(db: D1Database): SweepStore {
   return {
     async load() {
       const row = await db
-        .prepare("SELECT rotation, cursor, resealed, unreadable, completed_at FROM secrets_rotation WHERE id = 1")
-        .first<{ rotation: string | null; cursor: string; resealed: number; unreadable: number; completed_at: number | null }>();
+        .prepare("SELECT rotation, slot, cursor, resealed, unreadable, completed_at, checked_at FROM secrets_rotation WHERE id = 1")
+        .first<{
+          rotation: string | null;
+          slot: string | null;
+          cursor: string;
+          resealed: number;
+          unreadable: number;
+          completed_at: number | null;
+          checked_at: number | null;
+        }>();
       return row
-        ? { rotation: row.rotation, cursor: row.cursor, resealed: row.resealed, unreadable: row.unreadable, completedAt: row.completed_at }
+        ? {
+            rotation: row.rotation,
+            slot: row.slot,
+            cursor: row.cursor,
+            resealed: row.resealed,
+            unreadable: row.unreadable,
+            completedAt: row.completed_at,
+            checkedAt: row.checked_at,
+          }
         : FRESH;
     },
     async save(s) {
       await db
         .prepare(
-          "INSERT INTO secrets_rotation (id, rotation, cursor, resealed, unreadable, completed_at) VALUES (1, ?, ?, ?, ?, ?) " +
-            "ON CONFLICT (id) DO UPDATE SET rotation = excluded.rotation, cursor = excluded.cursor, " +
-            "resealed = excluded.resealed, unreadable = excluded.unreadable, completed_at = excluded.completed_at",
+          "INSERT INTO secrets_rotation (id, rotation, slot, cursor, resealed, unreadable, completed_at, checked_at) " +
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET rotation = excluded.rotation, " +
+            "slot = excluded.slot, cursor = excluded.cursor, resealed = excluded.resealed, " +
+            "unreadable = excluded.unreadable, completed_at = excluded.completed_at, checked_at = excluded.checked_at",
         )
-        .bind(s.rotation, s.cursor, s.resealed, s.unreadable, s.completedAt)
+        .bind(s.rotation, s.slot, s.cursor, s.resealed, s.unreadable, s.completedAt, s.checkedAt)
         .run();
     },
     async projects(after, limit) {

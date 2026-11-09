@@ -64,11 +64,15 @@ jobs:
             trap 'rm -f "$secrets"' EXIT
             node -e 'const { SECRETS_KEY, SECRETS_KEY_PREVIOUS } = process.env;
               process.stdout.write(JSON.stringify(SECRETS_KEY_PREVIOUS ? { SECRETS_KEY, SECRETS_KEY_PREVIOUS } : { SECRETS_KEY }))' > "$secrets"
-            npx wrangler deploy --env "$DEPLOY_ENV" --var "GATEWAY_PUBLIC_KEY:$GATEWAY_PUBLIC_KEY" --secrets-file "$secrets"
-            # --secrets-file never deletes, so the previous key of a finished rotation is deleted here.
-            if [ -z "$SECRETS_KEY_PREVIOUS" ] &&
-              npx wrangler secret list --env "$DEPLOY_ENV" --format json | jq --exit-status 'any(.[]; .name == "SECRETS_KEY_PREVIOUS")' > /dev/null; then
-              npx wrangler secret delete SECRETS_KEY_PREVIOUS --env "$DEPLOY_ENV"
+            npx wrangler deploy --env "$DEPLOY_ENV" --var "GATEWAY_PUBLIC_KEY:$GATEWAY_PUBLIC_KEY" \
+              --var "SECRETS_KEY_SLOT:$CURRENT_SLOT" --secrets-file "$secrets"
+            # --secrets-file never deletes, so the previous key of a finished rotation is deleted
+            # here. A failed lookup fails the deploy: a leaked key must not quietly stay.
+            if [ -z "$SECRETS_KEY_PREVIOUS" ]; then
+              names="$(npx wrangler secret list --env "$DEPLOY_ENV" --format json)"
+              if jq --exit-status 'any(.[]; .name == "SECRETS_KEY_PREVIOUS")' <<<"$names" > /dev/null; then
+                npx wrangler secret delete SECRETS_KEY_PREVIOUS --env "$DEPLOY_ENV"
+              fi
             fi
           fi
         working-directory: apps/api

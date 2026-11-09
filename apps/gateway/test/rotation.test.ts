@@ -19,26 +19,29 @@ function memoryStore(ids: string[], start: SweepState = FRESH): SweepStore & { s
   return store;
 }
 
-/** A fake API: each project's values reseal once, then are current. */
+/** A fake API: each project's values reseal once, then are current. p2 has one unreadable value. */
 function api(rotation: string | null, toReseal: Record<string, number> = {}, fails = new Set<string>()) {
   const calls: string[] = [];
   const fake = {
     rotation,
+    slot: "2" as string | null,
     calls,
     reseal: async (id: string): Promise<Reseal> => {
       calls.push(id);
       if (fails.has(id)) throw new Error("ledger unavailable");
       const resealed = fake.rotation ? (toReseal[id] ?? 0) : 0;
       toReseal[id] = 0;
-      return { rotation: fake.rotation, resealed, unreadable: id === "p2" ? 1 : 0 };
+      return { rotation: fake.rotation, slot: fake.slot, resealed, unreadable: id === "p2" ? 1 : 0 };
     },
   };
   return fake;
 }
 
+const started = (rotation: string, slot = "2"): SweepState => ({ ...FRESH, rotation, slot });
+
 describe("SECRETS_KEY reseal sweep", () => {
   it("asks one project and resets when no rotation is on", async () => {
-    const store = memoryStore(["p1", "p2", "p3"], { ...FRESH, cursor: "p1", resealed: 4 });
+    const store = memoryStore(["p1", "p2", "p3"], { ...started("r1"), cursor: "p1", resealed: 4 });
     const { reseal, calls } = api(null);
     expect(await sweep(store, reseal, 2, NOW)).toEqual(FRESH);
     expect(calls).toEqual(["p2"]);
@@ -48,23 +51,48 @@ describe("SECRETS_KEY reseal sweep", () => {
     const store = memoryStore(["p1", "p2", "p3"]);
     const { reseal, calls } = api("r1", { p1: 2, p3: 1 });
 
-    expect(await sweep(store, reseal, 2, NOW)).toMatchObject({ rotation: "r1", cursor: "p2", resealed: 2, completedAt: null });
+    expect(await sweep(store, reseal, 2, NOW)).toMatchObject({ rotation: "r1", slot: "2", cursor: "p2", resealed: 2, completedAt: null });
     // End of the first pass: it resealed values, so another pass confirms.
-    expect(await sweep(store, reseal, 2, NOW)).toEqual({ ...FRESH, rotation: "r1" });
+    expect(await sweep(store, reseal, 2, NOW)).toEqual(started("r1"));
     expect(calls).toEqual(["p1", "p2", "p3"]);
 
     await sweep(store, reseal, 2, NOW);
-    expect(await sweep(store, reseal, 2, NOW)).toEqual({ ...FRESH, rotation: "r1", unreadable: 1, completedAt: NOW });
+    expect(await sweep(store, reseal, 2, NOW)).toEqual({ ...started("r1"), unreadable: 1, completedAt: NOW, checkedAt: NOW });
 
-    // Complete: one probe a run, and nothing else, until the previous key is dropped.
+    // Complete: one probe a run, which keeps checkedAt current, until the previous key is dropped.
     calls.length = 0;
-    expect((await sweep(store, reseal, 2, NOW + 1)).completedAt).toBe(NOW);
+    expect(await sweep(store, reseal, 2, NOW + 1)).toMatchObject({ completedAt: NOW, checkedAt: NOW + 1 });
     expect(calls).toEqual(["p1"]);
   });
 
   it("starts over once the previous key is dropped, ready for the next rotation", async () => {
-    const store = memoryStore(["p1"], { ...FRESH, rotation: "r1", completedAt: NOW });
+    const store = memoryStore(["p1"], { ...started("r1"), completedAt: NOW, checkedAt: NOW });
     expect(await sweep(store, api(null).reseal, 2, NOW)).toEqual(FRESH);
+  });
+
+  it("starts a fresh pass when the keys change: a new rotation, an undo, or only the slot", async () => {
+    const fake = api("r1", { p1: 1, p2: 1, p3: 1 });
+    const store = memoryStore(["p1", "p2", "p3"], { ...started("r1"), completedAt: NOW, checkedAt: NOW });
+    fake.rotation = "r2";
+    expect(await sweep(store, fake.reseal, 2, NOW)).toEqual(started("r2"));
+
+    // Mid-pass too: what was resealed under r2 may need resealing again under r3.
+    await sweep(store, fake.reseal, 2, NOW);
+    expect(store.state).toMatchObject({ rotation: "r2", cursor: "p2" });
+    fake.rotation = "r3";
+    expect(await sweep(store, fake.reseal, 2, NOW)).toEqual(started("r3"));
+
+    fake.slot = "1";
+    store.state = { ...started("r3"), completedAt: NOW, checkedAt: NOW };
+    expect(await sweep(store, fake.reseal, 2, NOW)).toEqual(started("r3", "1"));
+  });
+
+  it("checks the end of a pass against the keys deployed now, even on an empty last page", async () => {
+    // The last run ended exactly on a full page; the keys changed before the next one.
+    const fake = api("r2");
+    const store = memoryStore(["p1", "p2"], { ...started("r1"), cursor: "p2" });
+    expect(await sweep(store, fake.reseal, 2, NOW)).toEqual(started("r2"));
+    expect(fake.calls).toEqual(["p1"]);
   });
 
   it("keeps its place when a ledger fails, and carries on next run", async () => {
@@ -75,21 +103,8 @@ describe("SECRETS_KEY reseal sweep", () => {
     expect(store.state).toMatchObject({ cursor: "p1", resealed: 1 });
 
     fails.clear();
-    expect(await sweep(store, reseal, 5, NOW)).toEqual({ ...FRESH, rotation: "r1" });
+    expect(await sweep(store, reseal, 5, NOW)).toEqual(started("r1"));
     expect(calls).toEqual(["p1", "p2", "p2", "p3"]);
-  });
-
-  it("starts a fresh pass when the keys change: a new rotation, or an undo", async () => {
-    const fake = api("r1", { p1: 1, p2: 1, p3: 1 });
-    const store = memoryStore(["p1", "p2", "p3"], { ...FRESH, rotation: "r1", completedAt: NOW });
-    fake.rotation = "r2";
-    expect(await sweep(store, fake.reseal, 2, NOW)).toEqual({ ...FRESH, rotation: "r2" });
-
-    // Mid-pass too: what was resealed under r2 may need resealing again under r3.
-    await sweep(store, fake.reseal, 2, NOW);
-    expect(store.state).toMatchObject({ rotation: "r2", cursor: "p2" });
-    fake.rotation = "r3";
-    expect(await sweep(store, fake.reseal, 2, NOW)).toEqual({ ...FRESH, rotation: "r3" });
   });
 
   it("does nothing without projects", async () => {
