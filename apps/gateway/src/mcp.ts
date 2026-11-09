@@ -7,9 +7,8 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker";
 import { ApiError } from "./api";
-import type { BillingEnv } from "./billing";
 import { ArgumentError, capabilities, capabilityNames } from "./capabilities";
-import { runCapability } from "./projects";
+import { runCapability, type CapabilityEnv } from "./projects";
 
 /** What a grant carries to every /mcp request (`ctx.props`). */
 export interface McpProps {
@@ -17,11 +16,7 @@ export interface McpProps {
   owner: string;
 }
 
-export interface McpEnv extends BillingEnv {
-  PUBLIC_URL: string;
-  DB: D1Database;
-  API: Fetcher;
-}
+export type McpEnv = CapabilityEnv;
 
 const INSTRUCTIONS =
   "AgentLater makes HTTP requests later and records whether they happened. Call create_project once, " +
