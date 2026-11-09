@@ -3,6 +3,10 @@
 //! in a full inbox, and queuing a debounced wake happen here, in the same transaction.
 
 use super::*;
+use runlater_core::limits::{
+    INBOX_ACKED_RETENTION_MS, INBOX_DEFAULT_PAGE, INBOX_MAX_PAGE, MAX_INBOX_EVENTS,
+    MAX_WAKE_FAILURES,
+};
 
 /// Header values are never echoed back, as for tasks.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -53,6 +57,20 @@ impl<D: Db> Ledger<'_, D> {
         Ok(seq)
     }
 
+    /// Whether a hook event can be added. A full inbox makes room by dropping an acked event or
+    /// an older hook event, never an unread result of the project's own work, so with none of
+    /// those it is full for hooks.
+    pub(super) fn room_for_hook_event(&self) -> Result<bool, DbError> {
+        let inbox: Vec<Counts> = self.db.query(
+            "SELECT COUNT(*) AS total, COALESCE(SUM(seq <= (SELECT inbox_acked_seq FROM project) \
+             OR json_extract(event, '$.event') = 'hook.received'), 0) AS waiting FROM inbox",
+            vec![],
+        )?;
+        Ok(inbox
+            .first()
+            .is_none_or(|c| c.total < MAX_INBOX_EVENTS || c.waiting > 0))
+    }
+
     /// The project's wake setting, if any.
     pub(super) fn wake_view(&self) -> Result<Option<WakeView>, DbError> {
         self.wake_row()?.map(|w| w.view()).transpose()
@@ -70,7 +88,7 @@ impl<D: Db> Ledger<'_, D> {
 
     /// The earliest time an inbox event or its captured body is due to go.
     pub(super) fn inbox_next_due(&self) -> Result<Option<i64>, DbError> {
-        let rows: Vec<Wake> = self.db.query(
+        let rows: Vec<Due> = self.db.query(
             &format!(
                 "SELECT MIN(t) AS t FROM ( \
                  SELECT MIN(at_ms) + {INBOX_ACKED_RETENTION_MS} AS t FROM inbox \
@@ -240,7 +258,8 @@ impl<D: Db> Ledger<'_, D> {
                          disabled_reason = 'wake_failing', updated_ms = ?",
                         vec![failures.into(), now.into()],
                     )?;
-                    // Not a wake trigger: the wake is off, and this is why.
+                    // Not through post: this is the one event that must not wake (the wake is
+                    // off, and this is why).
                     let seq = self.next_inbox_seq()?;
                     let event = serde_json::json!({
                         "event": "wake.disabled",
