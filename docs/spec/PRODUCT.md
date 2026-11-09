@@ -115,7 +115,7 @@ scheduled ──(due time reached)──▶ delivering ──2xx──▶ succee
 
 Each one is an Agent Auth capability. MCP clients reach them two ways:
 
-- **Hosted MCP server** at `https://gateway.agentlater.io/mcp` (Streamable HTTP). Each capability is a tool. Clients sign in with standard MCP OAuth: on first connect a AgentLater consent page opens, the person clicks **Connect**, and there is no account. Each approved connection is its own owner with its own project and trial, separate from any Agent Auth identity; the OAuth grant is its only key (refresh tokens last 30 days from last use). Over either path, one owner may make 300 tool calls a minute; more get `429 rate_limited`.
+- **Hosted MCP server** at `https://gateway.agentlater.io/mcp` (Streamable HTTP). Each capability is a tool. Clients sign in with standard MCP OAuth: on first connect a AgentLater consent page opens, the person clicks **Connect**, and there is no account. Each approved connection is its own owner with its own project and trial, separate from any Agent Auth identity; the OAuth grant is its only key (refresh tokens last 30 days from last use). Over either path, one owner may make 300 tool calls a minute; more get a `rate_limited` error (a tool error over MCP, HTTP 429 over Agent Auth).
 - **Agent Auth MCP bridge**, which runs locally and exposes generic tools (`connect_agent`, `list_capabilities`, `execute_capability`); the agent picks a AgentLater capability by name inside `execute_capability`:
 
 ```json

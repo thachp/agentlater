@@ -51,7 +51,6 @@ export async function ensureProject(db: D1Database, owner: string, trialsPerDay?
   return existing;
 }
 
-/** Runs a capability for an owner: create_project allocates its project, anything else needs one. */
 /** What running a capability needs, for either identity. */
 export interface CapabilityEnv extends BillingEnv {
   DB: D1Database;
@@ -63,6 +62,7 @@ export interface CapabilityEnv extends BillingEnv {
   TOOL_RATE: RateLimit;
 }
 
+/** Runs a capability for an owner: create_project allocates its project, anything else needs one. */
 export async function runCapability(
   env: CapabilityEnv,
   key: CryptoKey,

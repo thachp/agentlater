@@ -31,7 +31,7 @@ describe("TOOL_RATE in wrangler.jsonc", () => {
     const { dirname, join } = await import("node:path");
     const { fileURLToPath } = await import("node:url");
     const config = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../wrangler.jsonc"), "utf8");
-    const limits = [...config.matchAll(/"name": "TOOL_RATE"[^}]*"limit": (\d+)/g)].map((m) => Number(m[1]));
+    const limits = [...config.matchAll(/"name": "TOOL_RATE"[^}]*"limit": (\d+), "period": 60 /g)].map((m) => Number(m[1]));
     expect(limits.length).toBeGreaterThan(0);
     for (const limit of limits) expect(limit).toBe(TOOL_CALLS_PER_MINUTE);
   });
