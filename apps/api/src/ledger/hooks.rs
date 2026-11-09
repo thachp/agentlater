@@ -1,9 +1,8 @@
 //! Inbound hooks: each delivery to a hook's URL becomes a `hook.received` inbox event.
 //!
 //! The ledger stores a hook by the SHA-256 of its token, so not even a copy of the database
-//! gives the URL back. The API checks signatures (it holds the key that opens the hook's
-//! secret) and hands the ledger what to keep; the ledger applies the rate limits, drops
-//! retries the sender marked with a delivery id, and writes the event.
+//! gives the URL back. It checks signatures, applies the rate limits, drops retries the sender
+//! marked with a delivery id, and writes the event.
 
 use super::*;
 use base64::Engine;
@@ -54,7 +53,7 @@ pub struct HookList {
 pub struct HookRow {
     pub name: String,
     verify: Option<String>,
-    /// The verify secret, sealed by the API.
+    /// The verify secret, sealed.
     pub sealed_secret: Option<String>,
     keep_headers: String,
     created_ms: i64,
@@ -177,12 +176,6 @@ impl HookReply {
     }
 }
 
-/// The name a hook's verify secret is sealed under. Secret names are `A-Z0-9_`, so it can't
-/// be mistaken for (or opened as) a project secret.
-pub fn hook_secret_name(hook: &str) -> String {
-    format!("hook:{hook}")
-}
-
 /// The SHA-256 a hook's token is stored and looked up by.
 pub fn token_hash(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
@@ -205,7 +198,6 @@ impl<D: Db> Ledger<'_, D> {
         &self,
         spec: &HookSpec,
         token: &str,
-        sealed_secret: Option<&str>,
         now: i64,
     ) -> Result<(CreatedHook, bool), ApiError> {
         let project = self.project_row()?.ok_or_else(no_project)?;
@@ -229,6 +221,10 @@ impl<D: Db> Ledger<'_, D> {
                 ));
             }
         }
+        let sealed_secret = match &spec.verify {
+            Some((_, secret)) => Some(self.seal_hook_secret(&project.id, &spec.name, secret)?),
+            None => None,
+        };
         let verify = spec
             .verify
             .as_ref()
@@ -284,22 +280,19 @@ impl<D: Db> Ledger<'_, D> {
     }
 
     /// Changes a hook's `verify`, `accept` or `keep_headers`, keeping its URL, counts and the
-    /// delivery ids it has seen. `sealed_secret` is the new `verify`'s secret, sealed by the
-    /// API; it is only read when `patch.verify` is given.
-    pub fn update_hook(
-        &self,
-        name: &str,
-        patch: HookPatch,
-        sealed_secret: Option<&str>,
-    ) -> Result<HookView, ApiError> {
-        self.project_row()?.ok_or_else(no_project)?;
+    /// delivery ids it has seen. A new `verify`'s secret is sealed here.
+    pub fn update_hook(&self, name: &str, patch: HookPatch) -> Result<HookView, ApiError> {
+        let project = self.project_row()?.ok_or_else(no_project)?;
         let row = self.hook_row(name)?.ok_or_else(|| {
             ApiError::not_found("hook_not_found", "no hook with that name in this project")
         })?;
         let (verify, sealed) = match patch.verify {
             None => (row.verify()?, row.sealed_secret.clone()),
             Some(None) => (None, None),
-            Some(Some((spec, _))) => (Some(spec), sealed_secret.map(String::from)),
+            Some(Some((spec, secret))) => (
+                Some(spec),
+                Some(self.seal_hook_secret(&project.id, name, &secret)?),
+            ),
         };
         // The headers kept must still pass with the verify that now applies.
         let keep = check_keep(
@@ -383,15 +376,10 @@ impl<D: Db> Ledger<'_, D> {
     }
 
     /// Takes a request a sender made to a hook: finds the hook by its token, checks the
-    /// signature if the hook has one, and writes what passes. `open_secret` opens a sealed
-    /// secret under its name; without it nothing can be checked, so the sender is told to try
-    /// again later (503).
-    pub fn take_hook_request(
-        &self,
-        d: HookDelivery,
-        open_secret: impl FnOnce(&str, &str) -> Option<String>,
-        now: i64,
-    ) -> Result<HookReply, DbError> {
+    /// signature if the hook has one, and writes what passes. Without the key that
+    /// opens the hook's secret nothing can be checked, so the sender is told to try again later
+    /// (503).
+    pub fn take_hook_request(&self, d: HookDelivery, now: i64) -> Result<HookReply, DbError> {
         let Some(hook) = self.hook_for_token(&d.token)? else {
             return Ok(HookReply::refused(404, "hook_not_found"));
         };
@@ -408,11 +396,10 @@ impl<D: Db> Ledger<'_, D> {
             .collect();
         let check = hook.verify()?;
         if let Some(spec) = &check {
-            let name = hook_secret_name(&hook.name);
-            let secret = hook
-                .sealed_secret
-                .as_deref()
-                .and_then(|sealed| open_secret(&name, sealed));
+            let secret = match &hook.sealed_secret {
+                Some(sealed) => self.open_hook_secret(&hook.name, sealed)?,
+                None => None,
+            };
             let Some(secret) = secret else {
                 return Ok(HookReply::refused(503, "secrets_unavailable"));
             };
@@ -593,8 +580,6 @@ struct DayRow {
 mod tests {
     use super::*;
     use crate::db::sqlite::Memory;
-    use crate::ledger::ResealCount;
-    use crate::sealing::Resealed;
     use runlater_core::limits::{CAPTURE_RETENTION_MS, MAX_INBOX_EVENTS, TRIAL_DURATION_MS};
     use runlater_core::{HookRequest, WakeRequest};
 
@@ -612,7 +597,9 @@ mod tests {
     const TOKEN: &str = "hk_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     fn setup(db: &Memory) -> Ledger<'_, Memory> {
-        let l = Ledger::open(db).unwrap();
+        let l = Ledger::open(db)
+            .unwrap()
+            .with_sealer(Some(secrets::test_sealer()));
         l.create_project(P, "secret", T0).unwrap();
         l
     }
@@ -625,7 +612,7 @@ mod tests {
     }
 
     fn hook(l: &Ledger<'_, Memory>, name: &str, token: &str) -> CreatedHook {
-        l.put_hook(&spec(serde_json::json!({ "name": name })), token, None, T0)
+        l.put_hook(&spec(serde_json::json!({ "name": name })), token, T0)
             .unwrap()
             .0
     }
@@ -656,75 +643,6 @@ mod tests {
         l.read_inbox(None, Some(50), false).unwrap().events
     }
 
-    /// Resealing rewrites what only the old key opens, in both tables, under the name each was
-    /// sealed with, and leaves current and unreadable values as they are.
-    #[test]
-    fn reseals_secrets_and_hook_secrets() {
-        let db = Memory::new();
-        let l = setup(&db);
-        let hosts = vec!["api.github.com".to_string()];
-        l.put_secret("OLD", "old:a", 1, &hosts, T0).unwrap();
-        l.put_secret("NEW", "new:b", 1, &hosts, T0).unwrap();
-        l.put_secret("LOST", "lost:c", 1, &hosts, T0).unwrap();
-        let verified = spec(serde_json::json!({
-            "name": "gh-ci",
-            "verify": { "scheme": "github", "secret": "whsec_0123456789abcdef" },
-        }));
-        l.put_hook(&verified, TOKEN, Some("old:d"), T0).unwrap();
-        l.put_hook(
-            &spec(serde_json::json!({ "name": "plain" })),
-            "other-token-0123456789abcdef",
-            None,
-            T0,
-        )
-        .unwrap();
-
-        let mut seen = Vec::new();
-        let count = l
-            .reseal(|name, sealed| {
-                seen.push(name.to_string());
-                Ok(match sealed.split_once(':') {
-                    Some(("old", v)) => Resealed::Again(format!("new:{v}")),
-                    Some(("new", _)) => Resealed::Current,
-                    _ => Resealed::Unreadable,
-                })
-            })
-            .unwrap();
-        assert_eq!(
-            count,
-            ResealCount {
-                resealed: 2,
-                unreadable: 1
-            }
-        );
-        seen.sort();
-        let mut expected = vec![
-            "LOST".to_string(),
-            "NEW".into(),
-            "OLD".into(),
-            hook_secret_name("gh-ci"),
-        ];
-        expected.sort();
-        assert_eq!(
-            seen, expected,
-            "only sealed values, each under its own name"
-        );
-
-        let sealed = |sql: &str| -> String { db.0.query_row(sql, [], |r| r.get(0)).unwrap() };
-        assert_eq!(
-            sealed("SELECT sealed FROM secrets WHERE name = 'OLD'"),
-            "new:a"
-        );
-        assert_eq!(
-            sealed("SELECT sealed FROM secrets WHERE name = 'LOST'"),
-            "lost:c"
-        );
-        assert_eq!(
-            sealed("SELECT sealed_secret FROM hooks WHERE name = 'gh-ci'"),
-            "new:d"
-        );
-    }
-
     #[test]
     fn creates_lists_and_deletes_hooks_without_their_url() {
         let db = Memory::new();
@@ -734,7 +652,7 @@ mod tests {
             "verify": { "scheme": "github", "secret": "whsec_0123456789abcdef" },
             "keep_headers": ["X-Request-Id"],
         }));
-        let (created, new) = l.put_hook(&s, TOKEN, Some("v1:sealed"), T0).unwrap();
+        let (created, new) = l.put_hook(&s, TOKEN, T0).unwrap();
         assert!(new);
         assert_eq!(created.url_path, format!("/h/{P}/{TOKEN}"));
         assert_eq!(created.hook.keep_headers, ["x-request-id"]);
@@ -745,7 +663,7 @@ mod tests {
 
         let listed = serde_json::to_string(&l.hooks().unwrap()).unwrap();
         assert!(
-            !listed.contains(TOKEN) && !listed.contains("sealed"),
+            !listed.contains(TOKEN) && !listed.contains("v1:") && !listed.contains("whsec_"),
             "{listed}"
         );
         let stored: Vec<IdRow> = db
@@ -767,12 +685,7 @@ mod tests {
         hook(&l, "h", TOKEN);
         send(&l, TOKEN, None, T0);
         let (again, new) = l
-            .put_hook(
-                &spec(serde_json::json!({ "name": "h" })),
-                "hk_new",
-                None,
-                T0 + 1,
-            )
+            .put_hook(&spec(serde_json::json!({ "name": "h" })), "hk_new", T0 + 1)
             .unwrap();
         assert!(!new);
         assert_eq!(again.hook.received, 0, "the counts start again");
@@ -788,16 +701,11 @@ mod tests {
             hook(&l, &format!("h{i}"), &format!("hk_{i}"));
         }
         let e = l
-            .put_hook(
-                &spec(serde_json::json!({ "name": "one-more" })),
-                "hk_x",
-                None,
-                T0,
-            )
+            .put_hook(&spec(serde_json::json!({ "name": "one-more" })), "hk_x", T0)
             .unwrap_err();
         assert_eq!((e.status, e.code), (429, "hook_limit"));
         // Replacing one is not a new hook.
-        l.put_hook(&spec(serde_json::json!({ "name": "h0" })), "hk_y", None, T0)
+        l.put_hook(&spec(serde_json::json!({ "name": "h0" })), "hk_y", T0)
             .unwrap();
     }
 
@@ -942,12 +850,7 @@ mod tests {
         );
         assert!(events(&l).is_empty());
         let e = l
-            .put_hook(
-                &spec(serde_json::json!({ "name": "late" })),
-                "hk_late",
-                None,
-                end,
-            )
+            .put_hook(&spec(serde_json::json!({ "name": "late" })), "hk_late", end)
             .unwrap_err();
         assert_eq!(e.code, "trial_expired");
     }
@@ -969,7 +872,7 @@ mod tests {
             "name": name,
             "verify": { "scheme": "github", "secret": "whsec_0123456789abcdef" },
         }));
-        l.put_hook(&s, token, Some("v1:sealed"), T0).unwrap();
+        l.put_hook(&s, token, T0).unwrap();
     }
 
     #[test]
@@ -1077,7 +980,7 @@ mod tests {
             "name": "ci",
             "accept": [{ "headers": { "x-github-event": ["workflow_run"] } }],
         }));
-        l.put_hook(&s, TOKEN, None, T0).unwrap();
+        l.put_hook(&s, TOKEN, T0).unwrap();
     }
 
     #[test]
@@ -1162,12 +1065,17 @@ mod tests {
         let db = Memory::new();
         let l = setup(&db);
         verified_hook(&l, "h", TOKEN);
+        let sealed_secret = || -> Option<String> {
+            db.0.query_row("SELECT sealed_secret FROM hooks", [], |r| r.get(0))
+                .unwrap()
+        };
+        let before = sealed_secret();
+        assert!(before.is_some());
         send(&l, TOKEN, Some("d-1"), T0);
         let v = l
             .update_hook(
                 "h",
                 patch(serde_json::json!({ "accept": [{ "headers": { "X-Event": ["push"] } }] })),
-                None,
             )
             .unwrap();
         assert_eq!(v.received, 1, "counts kept");
@@ -1178,37 +1086,27 @@ mod tests {
             send(&l, TOKEN, Some("d-1"), T0 + 1_000),
             HookOutcome::Duplicate
         );
-        let sealed: Vec<IdRow> = db
-            .query("SELECT sealed_secret AS id FROM hooks", vec![])
-            .unwrap();
-        assert_eq!(sealed[0].id, "v1:sealed", "secret untouched");
+        assert_eq!(sealed_secret(), before, "secret untouched");
 
         let v = l
             .update_hook(
                 "h",
                 patch(serde_json::json!({ "accept": null, "verify": null })),
-                None,
             )
             .unwrap();
         assert_eq!((v.accept, v.verify), (None, None));
-        let sealed: Vec<Counts> = db
-            .query(
-                "SELECT COUNT(*) AS total, 0 AS waiting FROM hooks WHERE sealed_secret IS NULL",
-                vec![],
-            )
-            .unwrap();
-        assert_eq!(sealed[0].total, 1, "the old secret is gone with verify");
+        assert_eq!(sealed_secret(), None, "the old secret is gone with verify");
 
         let v = l
             .update_hook(
                 "h",
                 patch(serde_json::json!({ "verify": { "scheme": "github", "secret": "whsec_new_0123456789" } })),
-                Some("v1:new"),
             )
             .unwrap();
         assert_eq!(v.verify.unwrap().scheme.as_str(), "github");
+        assert!(sealed_secret().is_some_and(|s| Some(&s) != before.as_ref()));
         assert_eq!(
-            l.update_hook("gone", patch(serde_json::json!({})), None)
+            l.update_hook("gone", patch(serde_json::json!({})))
                 .unwrap_err()
                 .code,
             "hook_not_found"
@@ -1223,13 +1121,9 @@ mod tests {
             "name": "h",
             "verify": { "scheme": "hmac_sha256", "secret": "whsec_0123456789abcdef", "header": "X-Sig" },
         }));
-        l.put_hook(&s, TOKEN, Some("v1:sealed"), T0).unwrap();
+        l.put_hook(&s, TOKEN, T0).unwrap();
         let e = l
-            .update_hook(
-                "h",
-                patch(serde_json::json!({ "keep_headers": ["X-Sig"] })),
-                None,
-            )
+            .update_hook("h", patch(serde_json::json!({ "keep_headers": ["X-Sig"] })))
             .unwrap_err();
         assert_eq!((e.status, e.field), (400, Some("keep_headers")));
     }
@@ -1248,7 +1142,6 @@ mod tests {
     // -- taking a sender's request --------------------------------------------------------
 
     const GH_SECRET: &str = "whsec_0123456789abcdef";
-    const SEALED: &str = "v1:sealed-gh";
 
     /// HMAC-SHA256, as a sender signs.
     fn hmac(key: &[u8], msg: &[u8]) -> String {
@@ -1272,7 +1165,7 @@ mod tests {
             "name": "gh",
             "verify": { "scheme": "github", "secret": GH_SECRET },
         }));
-        l.put_hook(&s, TOKEN, Some(SEALED), T0).unwrap();
+        l.put_hook(&s, TOKEN, T0).unwrap();
     }
 
     fn request(body: &[u8], headers: &[(&str, &str)]) -> HookDelivery {
@@ -1284,12 +1177,6 @@ mod tests {
                 .collect(),
             body: base64::engine::general_purpose::STANDARD.encode(body),
         }
-    }
-
-    /// Opens only the GitHub hook's sealed secret, under its own name.
-    fn open(name: &str, sealed: &str) -> Option<String> {
-        assert_eq!((name, sealed), ("hook:gh", SEALED));
-        Some(GH_SECRET.into())
     }
 
     #[test]
@@ -1305,7 +1192,6 @@ mod tests {
                     body,
                     &[("X-Hub-Signature-256", &sig), ("X-GitHub-Delivery", "d1")],
                 ),
-                open,
                 T0,
             )
             .unwrap();
@@ -1319,7 +1205,7 @@ mod tests {
             &[("x-hub-signature-256", &sig), ("x-github-delivery", "d1")],
         );
         assert_eq!(
-            l.take_hook_request(again, open, T0 + 1).unwrap().status,
+            l.take_hook_request(again, T0 + 1).unwrap().status,
             200,
             "a retry of the same delivery"
         );
@@ -1332,13 +1218,13 @@ mod tests {
         github_hook(&l);
         let wrong = format!("sha256={}", hmac(b"another-secret", b"{}"));
         let reply = l
-            .take_hook_request(request(b"{}", &[("x-hub-signature-256", &wrong)]), open, T0)
+            .take_hook_request(request(b"{}", &[("x-hub-signature-256", &wrong)]), T0)
             .unwrap();
         assert_eq!(
             (reply.status, reply.reason),
             (401, Some("signature_invalid"))
         );
-        let reply = l.take_hook_request(request(b"{}", &[]), open, T0).unwrap();
+        let reply = l.take_hook_request(request(b"{}", &[]), T0).unwrap();
         assert_eq!(
             (reply.status, reply.reason),
             (401, Some("signature_missing"))
@@ -1354,20 +1240,21 @@ mod tests {
         let db = Memory::new();
         let l = setup(&db);
         github_hook(&l);
-        let reply = l
-            .take_hook_request(request(b"{}", &[]), |_, _| None, T0)
-            .unwrap();
+        let keyless = Ledger::open(&db).unwrap();
+        let reply = keyless.take_hook_request(request(b"{}", &[]), T0).unwrap();
         assert_eq!(
             (reply.status, reply.reason),
             (503, Some("secrets_unavailable"))
         );
-        // An unverified hook needs no key.
-        let l2db = Memory::new();
-        let l2 = setup(&l2db);
-        hook(&l2, "plain", TOKEN);
-        let reply = l2
-            .take_hook_request(request(b"{}", &[]), |_, _| panic!("nothing to open"), T0)
-            .unwrap();
+        // Nor can a verified hook be made, but an unverified one needs no key.
+        let verified = spec(serde_json::json!({
+            "name": "v",
+            "verify": { "scheme": "github", "secret": GH_SECRET },
+        }));
+        let e = keyless.put_hook(&verified, "hk_other", T0).unwrap_err();
+        assert_eq!((e.status, e.code), (503, "secrets_unavailable"));
+        hook(&keyless, "gh", TOKEN);
+        let reply = keyless.take_hook_request(request(b"{}", &[]), T0).unwrap();
         assert_eq!(reply.status, 202);
     }
 
@@ -1376,13 +1263,12 @@ mod tests {
         let db = Memory::new();
         let l = setup(&db);
         github_hook(&l);
-        let never = |_: &str, _: &str| -> Option<String> { panic!("no check reached") };
         let unknown = HookDelivery {
             token: format!("hk_{}", "0".repeat(64)),
             ..request(b"{}", &[])
         };
         assert_eq!(
-            l.take_hook_request(unknown, never, T0).unwrap(),
+            l.take_hook_request(unknown, T0).unwrap(),
             HookReply::refused(404, "hook_not_found")
         );
         let garbled = HookDelivery {
@@ -1390,12 +1276,12 @@ mod tests {
             ..request(b"", &[])
         };
         assert_eq!(
-            l.take_hook_request(garbled, never, T0).unwrap(),
+            l.take_hook_request(garbled, T0).unwrap(),
             HookReply::refused(400, "invalid_request")
         );
         let big = vec![b'a'; MAX_HOOK_REQUEST_BYTES + 1];
         assert_eq!(
-            l.take_hook_request(request(&big, &[]), never, T0).unwrap(),
+            l.take_hook_request(request(&big, &[]), T0).unwrap(),
             HookReply::refused(413, "too_large")
         );
     }

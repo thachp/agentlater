@@ -5,8 +5,8 @@ use crate::assertion;
 use crate::db::{Db, DbError, Param};
 use crate::delivery::{attempt, Outgoing, ReadPlan, ResponseBody, Transport};
 use crate::ledger::{
-    hook_secret_name, ApiError, Claimed, Delivery, Dispatch, HookDelivery, HookReply, Ledger,
-    ResponseRead, SealedSecret,
+    ApiError, Claimed, Delivery, Dispatch, HookDelivery, HookReply, Ledger, ResponseRead,
+    SealedSecret, Sealer,
 };
 use crate::routes::{Route, Verb};
 use crate::sealing::{Keyring, SealingKey, NONCE_BYTES};
@@ -144,6 +144,14 @@ fn sealing_key(env: &Env) -> Option<Keyring> {
     Some(Keyring::new(current, previous))
 }
 
+/// What a ledger seals with: those keys, and nonces from the platform's secure randomness.
+fn sealer(env: &Env) -> Option<Sealer> {
+    Some(Sealer {
+        keys: sealing_key(env)?,
+        nonce: || random_bytes(NONCE_BYTES as u32).ok()?.try_into().ok(),
+    })
+}
+
 fn gateway_key(env: &Env) -> Option<assertion::VerifyingKey> {
     let raw = env
         .secret("GATEWAY_PUBLIC_KEY")
@@ -276,14 +284,6 @@ fn hook_answer(reply: HookReply) -> Result<Response> {
     Ok(r)
 }
 
-fn hooks_unavailable() -> Result<Response> {
-    simple_error(
-        503,
-        "secrets_unavailable",
-        "verified hooks are not configured on this deployment",
-    )
-}
-
 #[derive(Deserialize)]
 struct ListQuery {
     status: Option<Status>,
@@ -305,18 +305,6 @@ fn created<T: Serialize>(value: &T, was_created: bool) -> Result<Response> {
 }
 
 impl TaskLedger {
-    /// Seals `value` under `name` for this project with a fresh nonce; None when secrets
-    /// aren't configured on this deployment.
-    fn seal(&self, project_id: &str, name: &str, value: &str) -> Result<Option<String>> {
-        let Some(key) = sealing_key(&self.env) else {
-            return Ok(None);
-        };
-        let nonce: [u8; NONCE_BYTES] = random_bytes(NONCE_BYTES as u32)?
-            .try_into()
-            .map_err(|_| Error::RustError("short nonce".into()))?;
-        Ok(Some(key.seal(project_id, name, value, nonce)))
-    }
-
     fn sql(&self) -> Sql {
         Sql(self.state.storage().sql())
     }
@@ -420,24 +408,7 @@ impl TaskLedger {
                         field: Some(e.field()),
                         ..ApiError::bad_request(e.to_string())
                     }),
-                    Ok(spec) => {
-                        let Some(sealed) = self.seal(&project_id, &spec.name, &spec.value)? else {
-                            return simple_error(
-                                503,
-                                "secrets_unavailable",
-                                "secrets are not configured on this deployment",
-                            );
-                        };
-                        ledger
-                            .put_secret(
-                                &spec.name,
-                                &sealed,
-                                spec.value.len(),
-                                &spec.allowed_hosts,
-                                t,
-                            )
-                            .map(|(v, c)| created(&v, c))
-                    }
+                    Ok(spec) => ledger.put_secret(&spec, t).map(|(v, c)| created(&v, c)),
                 },
                 Err(e) => Err(e),
             },
@@ -449,19 +420,9 @@ impl TaskLedger {
                         ..ApiError::bad_request(e.to_string())
                     }),
                     Ok(spec) => {
-                        let sealed = match &spec.verify {
-                            None => None,
-                            Some((_, secret)) => {
-                                let name = hook_secret_name(&spec.name);
-                                let Some(sealed) = self.seal(&project_id, &name, secret)? else {
-                                    return hooks_unavailable();
-                                };
-                                Some(sealed)
-                            }
-                        };
                         let token = format!("hk_{}", hex::encode(random_bytes(32)?));
                         ledger
-                            .put_hook(&spec, &token, sealed.as_deref(), t)
+                            .put_hook(&spec, &token, t)
                             .map(|(h, c)| created(&h, c))
                     }
                 },
@@ -473,9 +434,7 @@ impl TaskLedger {
                     Ok(d) => d,
                     Err(e) => return error(e),
                 };
-                let key = sealing_key(&self.env);
-                let open = |name: &str, sealed: &str| key?.open(&project_id, name, sealed);
-                return match ledger.take_hook_request(d, open, t) {
+                return match ledger.take_hook_request(d, t) {
                     Ok(reply) => hook_answer(reply),
                     Err(e) => Err(Error::RustError(e.to_string())),
                 };
@@ -487,51 +446,24 @@ impl TaskLedger {
                         field: Some(e.field()),
                         ..ApiError::bad_request(e.to_string())
                     }),
-                    Ok(patch) => {
-                        let sealed = match &patch.verify {
-                            Some(Some((_, secret))) => {
-                                let name = hook_secret_name(name);
-                                let Some(sealed) = self.seal(&project_id, &name, secret)? else {
-                                    return hooks_unavailable();
-                                };
-                                Some(sealed)
-                            }
-                            _ => None,
-                        };
-                        ledger
-                            .update_hook(name, patch, sealed.as_deref())
-                            .map(|v| json(&v, 200))
-                    }
+                    Ok(patch) => ledger.update_hook(name, patch).map(|v| json(&v, 200)),
                 },
                 Err(e) => Err(e),
             },
             Route::DeleteSecret(name) => ledger.delete_secret(name).map(|v| json(&v, 200)),
-            Route::ResealSecrets => {
-                let Some(keys) = sealing_key(&self.env) else {
-                    return simple_error(503, "secrets_unavailable", "secrets are not configured");
-                };
-                let count = ledger.reseal(|name, sealed| {
-                    let nonce: [u8; NONCE_BYTES] = random_bytes(NONCE_BYTES as u32)
-                        .ok()
-                        .and_then(|b| b.try_into().ok())
-                        .ok_or_else(|| DbError("secure randomness unavailable".into()))?;
-                    Ok(keys.reseal(&project_id, name, sealed, nonce))
-                });
-                return match count {
-                    Ok(c) => json(
-                        &serde_json::json!({
-                            "rotation": keys.rotation(),
-                            // Which GitHub slot the deploy took the current key from, so
-                            // scripts/rotate-secrets-key.mjs can tell the sweep saw these keys.
-                            "slot": self.env.var("SECRETS_KEY_SLOT").ok().map(|v| v.to_string()),
-                            "resealed": c.resealed,
-                            "unreadable": c.unreadable,
-                        }),
-                        200,
-                    ),
-                    Err(e) => Err(Error::RustError(e.to_string())),
-                };
-            }
+            Route::ResealSecrets => ledger.reseal().map(|c| {
+                json(
+                    &serde_json::json!({
+                        "rotation": c.rotation,
+                        // Which GitHub slot the deploy took the current key from, so
+                        // scripts/rotate-secrets-key.mjs can tell the sweep saw these keys.
+                        "slot": self.env.var("SECRETS_KEY_SLOT").ok().map(|v| v.to_string()),
+                        "resealed": c.resealed,
+                        "unreadable": c.unreadable,
+                    }),
+                    200,
+                )
+            }),
             Route::Claim => match body::<ClaimBody>(req).await {
                 Ok(c) => ledger.claim(&c.task_id, c.generation, t).map(|claimed| {
                     let reply = match claimed {
@@ -599,8 +531,7 @@ impl DurableObject for TaskLedger {
     async fn fetch(&self, mut req: Request) -> Result<Response> {
         let sql = self.sql();
         let ledger = match Ledger::open(&sql) {
-            Ok(l) if sealing_key(&self.env).is_some() => l,
-            Ok(l) => l.without_secrets(),
+            Ok(l) => l.with_sealer(sealer(&self.env)),
             Err(e) => return error(e.into()),
         };
         let response = self.route(&mut req, &ledger).await?;
