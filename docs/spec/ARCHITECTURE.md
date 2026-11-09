@@ -171,7 +171,7 @@ GET    /health
 runlater/
 ├── apps/
 │   ├── api/                 Rust Worker
-│   │   ├── src/             worker_entry, routes, delivery, ledger (+ ledger/hooks, inbox, tasks, budget), assertion, sealing, db, http
+│   │   ├── src/             worker_entry, routes, delivery, ledger (+ ledger/hooks, inbox, crons, tasks, budget), assertion, sealing, db, http
 │   │   └── test/            workerd e2e
 │   ├── gateway/             TS Worker
 │   │   ├── src/             index, mcp, consent, auth, store, projects, capabilities,
@@ -238,7 +238,7 @@ One `wrangler.jsonc` per app with `env.staging` and `env.production` (the receiv
 | Thin alerting | One GitHub email, from a workflow GitHub pauses after 60 days without repository activity. |
 | `AuthStore` is a single Durable Object | Every Agent Auth call goes through it for replay checks, so it is a throughput ceiling and a shared point of failure for that path. Hosted MCP doesn't use it. Fine at today's traffic; untested at scale. |
 | `SECRETS_KEY` is never rotated | One per environment. Losing it loses every sealed secret and hook verify secret; leaking it exposes them if the ledgers leak too. |
-| Concentration in `ledger.rs` | About 6,000 lines including tests, and every feature passes through it. Hooks, the inbox and wake, task kinds and the attempt budget have their own modules; crons and watches may follow. |
+| Concentration in `ledger.rs` | About 5,600 lines including tests, and every feature passes through it. Hooks, the inbox and wake, crons, task kinds and the attempt budget have their own modules; watches may follow. |
 
 ## History
 

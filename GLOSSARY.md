@@ -30,8 +30,16 @@ _Avoid_: trigger, follow-up
 **Callback**:
 The task that posts another task's finish to its callback URL.
 
+**Cron**:
+A request an agent wants repeated on a schedule. Each slot of the schedule makes one cron run.
+_Avoid_: job, schedule (the schedule is only its timing)
+
 **Cron run**:
 One task a cron makes for one slot of its schedule.
+
+**Health**:
+How a cron's runs have been going: pending until one finishes, healthy after a success, failing after a failed run or a run that could not start. Turning failing, and recovering, each send one alert.
+_Avoid_: status (a task's status is something else)
 
 **Alert**:
 The task that posts a change in a cron's health to its alert URL.
