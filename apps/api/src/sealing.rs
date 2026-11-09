@@ -9,6 +9,11 @@
 //! ```text
 //! sealed = "v1:" base64(nonce[12] || ciphertext || tag[16])
 //! ```
+//!
+//! While the key is being rotated, a [`Keyring`] also holds the previous key
+//! (`SECRETS_KEY_PREVIOUS`), which opens but never seals. The format names no key: AES-GCM
+//! authenticates, so trying the current key and then the previous one is exact. See
+//! `docs/adr/0001-rotating-secrets-key.md`.
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
@@ -27,6 +32,14 @@ impl SealingKey {
     /// From the hex-encoded 32-byte master key.
     pub fn parse(hex_key: &str) -> Option<Self> {
         hex::decode(hex_key.trim()).ok()?.try_into().ok().map(Self)
+    }
+
+    fn fingerprint(&self) -> String {
+        let mut out = [0u8; 8];
+        Hkdf::<Sha256>::new(Some(SALT), &self.0)
+            .expand(b"fingerprint", &mut out)
+            .expect("8 bytes is a valid HKDF-SHA256 output length");
+        hex::encode(out)
     }
 
     fn project(&self, project_id: &str) -> Aes256Gcm {
@@ -79,6 +92,80 @@ impl SealingKey {
             )
             .ok()?;
         String::from_utf8(plain).ok()
+    }
+}
+
+/// The current key, and during a rotation the previous one.
+pub struct Keyring {
+    current: SealingKey,
+    previous: Option<SealingKey>,
+}
+
+/// What resealing one value found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Resealed {
+    /// The current key opens it; nothing to do.
+    Current,
+    /// Only the previous key opened it; here it is sealed again under the current key.
+    Again(String),
+    /// No key opens it.
+    Unreadable,
+}
+
+impl Keyring {
+    pub fn new(current: SealingKey, previous: Option<SealingKey>) -> Self {
+        Self { current, previous }
+    }
+
+    /// While a previous key is set, a name for this pair of keys, so the gateway's sweep can
+    /// tell one rotation (or an undo) from the next. Derived one-way from the keys; it reveals
+    /// nothing about them. None when there is no previous key.
+    pub fn rotation(&self) -> Option<String> {
+        let previous = self.previous.as_ref()?;
+        Some(format!(
+            "{}{}",
+            self.current.fingerprint(),
+            previous.fingerprint()
+        ))
+    }
+
+    /// Always under the current key. `nonce` must be fresh random bytes for every call.
+    pub fn seal(
+        &self,
+        project_id: &str,
+        name: &str,
+        value: &str,
+        nonce: [u8; NONCE_BYTES],
+    ) -> String {
+        self.current.seal(project_id, name, value, nonce)
+    }
+
+    /// Under the current key, or failing that the previous one.
+    pub fn open(&self, project_id: &str, name: &str, sealed: &str) -> Option<String> {
+        self.current
+            .open(project_id, name, sealed)
+            .or_else(|| self.previous.as_ref()?.open(project_id, name, sealed))
+    }
+
+    /// Seals again under the current key a value only the previous key opens.
+    pub fn reseal(
+        &self,
+        project_id: &str,
+        name: &str,
+        sealed: &str,
+        nonce: [u8; NONCE_BYTES],
+    ) -> Resealed {
+        if self.current.open(project_id, name, sealed).is_some() {
+            return Resealed::Current;
+        }
+        match self
+            .previous
+            .as_ref()
+            .and_then(|p| p.open(project_id, name, sealed))
+        {
+            Some(value) => Resealed::Again(self.current.seal(project_id, name, &value, nonce)),
+            None => Resealed::Unreadable,
+        }
     }
 }
 
@@ -142,5 +229,57 @@ mod tests {
         assert!(SealingKey::parse("abcd").is_none());
         assert!(SealingKey::parse("zz").is_none());
         assert!(SealingKey::parse(&format!(" {KEY}\n")).is_some());
+    }
+
+    #[test]
+    fn a_keyring_opens_under_either_key_and_reseals_under_the_current_one() {
+        let old = || SealingKey::parse(KEY).unwrap();
+        let new = || SealingKey::parse(&KEY.replace("00", "ee")).unwrap();
+        let sealed_old = old().seal("p", "N", "v", [1; NONCE_BYTES]);
+        let sealed_new = new().seal("p", "N", "v", [2; NONCE_BYTES]);
+
+        let rotating = Keyring::new(new(), Some(old()));
+        let rotation = rotating.rotation().unwrap();
+        assert_eq!(rotation.len(), 32);
+        assert_ne!(
+            Keyring::new(old(), Some(new())).rotation().unwrap(),
+            rotation,
+            "an undo is a new rotation"
+        );
+        assert!(!rotation.contains(&KEY[..16]));
+        assert_eq!(rotating.open("p", "N", &sealed_old).as_deref(), Some("v"));
+        assert_eq!(rotating.open("p", "N", &sealed_new).as_deref(), Some("v"));
+        assert_eq!(
+            rotating.reseal("p", "N", &sealed_new, [3; NONCE_BYTES]),
+            Resealed::Current
+        );
+        let Resealed::Again(again) = rotating.reseal("p", "N", &sealed_old, [3; NONCE_BYTES])
+        else {
+            panic!("expected a reseal");
+        };
+        assert_eq!(
+            new().open("p", "N", &again).as_deref(),
+            Some("v"),
+            "now under the new key"
+        );
+        assert_eq!(
+            rotating.reseal("q", "N", &sealed_old, [3; NONCE_BYTES]),
+            Resealed::Unreadable
+        );
+        assert_eq!(
+            new()
+                .open("p", "N", &rotating.seal("p", "N", "w", [4; NONCE_BYTES]))
+                .as_deref(),
+            Some("w"),
+            "seals under the new key"
+        );
+
+        let settled = Keyring::new(new(), None);
+        assert_eq!(settled.rotation(), None);
+        assert_eq!(settled.open("p", "N", &sealed_old), None, "old key dropped");
+        assert_eq!(
+            settled.reseal("p", "N", &sealed_old, [3; NONCE_BYTES]),
+            Resealed::Unreadable
+        );
     }
 }

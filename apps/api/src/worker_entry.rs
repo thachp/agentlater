@@ -9,7 +9,7 @@ use crate::ledger::{
     ResponseRead, SealedSecret,
 };
 use crate::routes::{Route, Verb};
-use crate::sealing::{SealingKey, NONCE_BYTES};
+use crate::sealing::{Keyring, SealingKey, NONCE_BYTES};
 use futures_util::future::{join_all, select, Either};
 use futures_util::StreamExt;
 use runlater_core::limits::{ATTEMPT_TIMEOUT_MS, CAPTURED_HEADERS};
@@ -126,15 +126,22 @@ fn segments(url: &Url) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The key project secrets are sealed with (`SECRETS_KEY`, 32 bytes as hex). Secrets are
-/// unavailable without it.
-fn sealing_key(env: &Env) -> Option<SealingKey> {
-    let raw = env
-        .secret("SECRETS_KEY")
-        .map(|s| s.to_string())
-        .or_else(|_| env.var("SECRETS_KEY").map(|s| s.to_string()))
-        .ok()?;
-    SealingKey::parse(&raw)
+/// The keys project secrets are sealed with: `SECRETS_KEY` (32 bytes as hex), and while it is
+/// being rotated `SECRETS_KEY_PREVIOUS`. Secrets are unavailable without the first, and when
+/// either is malformed: a mistyped previous key must be loud, not quietly fail old values.
+fn sealing_key(env: &Env) -> Option<Keyring> {
+    let read = |name: &str| {
+        env.secret(name)
+            .map(|s| s.to_string())
+            .or_else(|_| env.var(name).map(|s| s.to_string()))
+            .ok()
+    };
+    let current = SealingKey::parse(&read("SECRETS_KEY")?)?;
+    let previous = match read("SECRETS_KEY_PREVIOUS") {
+        Some(raw) => Some(SealingKey::parse(&raw)?),
+        None => None,
+    };
+    Some(Keyring::new(current, previous))
 }
 
 fn gateway_key(env: &Env) -> Option<assertion::VerifyingKey> {
@@ -499,6 +506,29 @@ impl TaskLedger {
                 Err(e) => Err(e),
             },
             Route::DeleteSecret(name) => ledger.delete_secret(name).map(|v| json(&v, 200)),
+            Route::ResealSecrets => {
+                let Some(keys) = sealing_key(&self.env) else {
+                    return simple_error(503, "secrets_unavailable", "secrets are not configured");
+                };
+                let count = ledger.reseal(|name, sealed| {
+                    let nonce: [u8; NONCE_BYTES] = random_bytes(NONCE_BYTES as u32)
+                        .ok()
+                        .and_then(|b| b.try_into().ok())
+                        .ok_or_else(|| DbError("secure randomness unavailable".into()))?;
+                    Ok(keys.reseal(&project_id, name, sealed, nonce))
+                });
+                return match count {
+                    Ok(c) => json(
+                        &serde_json::json!({
+                            "rotation": keys.rotation(),
+                            "resealed": c.resealed,
+                            "unreadable": c.unreadable,
+                        }),
+                        200,
+                    ),
+                    Err(e) => Err(Error::RustError(e.to_string())),
+                };
+            }
             Route::Claim => match body::<ClaimBody>(req).await {
                 Ok(c) => ledger.claim(&c.task_id, c.generation, t).map(|claimed| {
                     let reply = match claimed {

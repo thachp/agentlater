@@ -15,6 +15,8 @@
   "vars": { "PUBLIC_URL": "http://localhost:8787" },
   // The task API is private; the gateway is its only caller.
   "services": [{ "binding": "API", "service": "runlater-api" }],
+  // Hourly: the SECRETS_KEY reseal sweep (src/rotation.ts), idle unless a rotation is on.
+  "triggers": { "crons": ["41 * * * *"] },
   "d1_databases": [
     { "binding": "DB", "database_name": "runlater-gateway", "database_id": "local", "migrations_dir": "migrations" }
   ],

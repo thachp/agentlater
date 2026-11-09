@@ -340,6 +340,30 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Secret" }
         default: { $ref: "#/components/responses/Error" }
+  /v1/secrets/_reseal:
+    post:
+      operationId: resealSecrets
+      x-scope: maintain
+      description: >
+        Seals again, under the current SECRETS_KEY, every project secret and hook verify secret
+        that only SECRETS_KEY_PREVIOUS opens. rotation names the pair of keys (a one-way
+        fingerprint), so a new rotation or an undo can be told apart; null when no previous key is
+        set, and then nothing needs resealing. unreadable counts values no key opens; they are left as they are.
+        503 secrets_unavailable without a SECRETS_KEY. Scope: maintain, which only the gateway's
+        reseal sweep uses (docs/adr/0001-rotating-secrets-key.md).
+      responses:
+        "200":
+          description: What this project's ledger resealed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rotation, resealed, unreadable]
+                properties:
+                  rotation: { type: [string, "null"] }
+                  resealed: { type: integer, minimum: 0 }
+                  unreadable: { type: integer, minimum: 0 }
+        default: { $ref: "#/components/responses/Error" }
   /v1/hooks:
     post:
       operationId: createHook
@@ -447,7 +471,7 @@ components:
       description: >
         base64url(claims JSON) "." base64url(Ed25519 signature over the first segment).
         Claims: aud "runlater-api", sub (project id, [A-Za-z0-9_-]{1,64}), scope
-        (space-separated: project schedule read cancel billing secrets hooks.receive), iat and exp in unix seconds,
+        (space-separated: project schedule read cancel billing secrets hooks.receive maintain), iat and exp in unix seconds,
         lifetime at most 300 s.
   parameters:
     TaskId:

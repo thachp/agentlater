@@ -13,6 +13,7 @@ import { handleHook, isHookPath, type HooksEnv } from "./hooks";
 import { envForHost, isHooksOnlyHost, type HostEnv } from "./hosts";
 import { handleMcp, type McpProps } from "./mcp";
 import { handleMpp } from "./mpp";
+import { d1SweepStore, resealOver, sweep } from "./rotation";
 
 export { AuthStore } from "./store";
 
@@ -232,5 +233,10 @@ export default {
       }
     }
     return provider(env).fetch(request, env, ctx);
+  },
+
+  /** Hourly: the SECRETS_KEY reseal sweep, which does nothing unless a rotation is on. */
+  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    await sweep(d1SweepStore(env.DB), resealOver(env.API, await signingKey(env)));
   },
 } satisfies ExportedHandler<Env>;

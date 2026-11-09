@@ -33,6 +33,8 @@ pub enum Route<'p> {
     PutSecret,
     ListSecrets,
     DeleteSecret(&'p str),
+    /// Seal again under the current key what only the previous key opens.
+    ResealSecrets,
     PutHook,
     ListHooks,
     ReceiveHook,
@@ -67,6 +69,7 @@ impl<'p> Route<'p> {
             (Post, ["v1", "wake", "delete"]) => Route::DeleteWake,
             (Post, ["v1", "secrets"]) => Route::PutSecret,
             (Get, ["v1", "secrets"]) => Route::ListSecrets,
+            (Post, ["v1", "secrets", "_reseal"]) => Route::ResealSecrets,
             (Post, ["v1", "secrets", name, "delete"]) => Route::DeleteSecret(name),
             (Post, ["v1", "hooks"]) => Route::PutHook,
             (Get, ["v1", "hooks"]) => Route::ListHooks,
@@ -99,6 +102,7 @@ impl<'p> Route<'p> {
             | Route::DeleteHook(_) => Scope::Cancel,
             Route::PutSecret | Route::DeleteSecret(_) => Scope::Secrets,
             Route::ReceiveHook => Scope::HooksReceive,
+            Route::ResealSecrets => Scope::Maintain,
             // Acking is part of reading: it moves the project's one cursor, nothing else.
             // Secret and hook lists hold names, hosts, settings and counts, never values or URLs.
             Route::GetProject
@@ -151,6 +155,7 @@ mod tests {
             (Post, "/v1/hooks", Scope::Schedule),
             (Get, "/v1/hooks", Scope::Read),
             (Post, "/v1/hooks/_receive", Scope::HooksReceive),
+            (Post, "/v1/secrets/_reseal", Scope::Maintain),
             (Post, "/v1/hooks/h/delete", Scope::Cancel),
             (Post, "/v1/hooks/h", Scope::Schedule),
         ];
@@ -216,6 +221,6 @@ mod tests {
             }
         }
         // Every route with a scope is in the contract, once.
-        assert_eq!(seen.len(), 25);
+        assert_eq!(seen.len(), 26);
     }
 }

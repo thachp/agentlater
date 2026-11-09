@@ -14,7 +14,7 @@ export interface CapabilityDefinition {
 }
 
 /** A scope a gateway assertion grants; the API checks it on every route (openapi.yaml's `x-scope`). */
-export type ApiScope = "project" | "schedule" | "read" | "cancel" | "billing" | "secrets" | "hooks.receive";
+export type ApiScope = "project" | "schedule" | "read" | "cancel" | "billing" | "secrets" | "hooks.receive" | "maintain";
 
 /** How a capability calls the private API (packages/contracts/openapi.yaml). */
 export interface ApiBinding {

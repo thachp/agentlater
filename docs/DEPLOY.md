@@ -42,8 +42,8 @@ Nothing deploys until `DEPLOY_ENABLED` is set, so the workflow can merge before 
      It sets `CLOUDFLARE_ACCOUNT_ID`, `ASSERTION_PRIVATE_KEY`, `BETTER_AUTH_SECRET`, `SECRETS_KEY`, the
      `GATEWAY_PUBLIC_KEY` variable and (staging) `RECEIVER_TOKEN`, skipping any already set. `--rotate` replaces
      them all except `SECRETS_KEY`; the key pair always changes together. `SECRETS_KEY` seals every project
-     secret, so it is never rotated: replacing it makes every stored secret unreadable (tasks that use one
-     then fail as `rejected`). Without it the API still deploys, with a warning, and `set_secret` answers
+     secret, so replacing it alone makes every stored secret unreadable; rotate it with the steps in
+     [Rotating `SECRETS_KEY`](#rotating-secrets_key). Without it the API still deploys, with a warning, and `set_secret` answers
      `503 secrets_unavailable`. The deploy workflow hands these to Cloudflare at deploy time
      (`--secrets-file` / `--var`), so nothing secret is committed or set with `wrangler secret put`.
    - Variable in each (once the gateway has a hostname): `GATEWAY_URL`, e.g. `https://gateway-staging.agentlater.io`. Setting it turns on the smoke check and, on staging, the required journey.
@@ -229,6 +229,35 @@ Reading them:
   signal, not p95.
 - p95 is weighted by volume, so one project's burst can drive it.
 - Under heavy sampling `max_ms` is a lower bound and `packs` an estimate. Stripe has the true payments.
+
+## Rotating `SECRETS_KEY`
+
+Do this if the key may have leaked. It doesn't help if the key is lost: those values are gone. The
+design is [ADR 1](adr/0001-rotating-secrets-key.md). GitHub secrets can't be read back, so the key has
+two slots, `SECRETS_KEY` and `SECRETS_KEY_2`, and the variable `SECRETS_KEY_SLOT` says which is current;
+[`scripts/rotate-secrets-key.mjs`](../scripts/rotate-secrets-key.mjs) only writes them. For one
+environment, `staging` first:
+
+1. **Start.** `node scripts/rotate-secrets-key.mjs --env production start` puts a new key in the other slot,
+   makes it current and sets `SECRETS_KEY_ROTATING=true`. Deploy. The API now seals with the new key and
+   opens with either (the old one as `SECRETS_KEY_PREVIOUS`).
+2. **Wait for the sweep.** The gateway's hourly cron reseals 200 projects a run, and the rotation is
+   complete once a full pass reseals nothing. From `apps/gateway`:
+
+   ```bash
+   npx wrangler d1 execute DB --env production --remote --command "SELECT * FROM secrets_rotation"
+   ```
+
+   `completed_at` set means done. `unreadable` counts values no key opens (already broken before the
+   rotation); keeping the old key doesn't help them.
+3. **Wait an hour more**, for attempts claimed with old ciphertext to finish.
+4. **Finish.** `node scripts/rotate-secrets-key.mjs --env production finish` sets `SECRETS_KEY_ROTATING=false`
+   and deletes the old slot. Deploy; the deploy deletes `SECRETS_KEY_PREVIOUS` from the Worker, since
+   `--secrets-file` never deletes on its own.
+
+To back out before finishing, run `undo` and deploy: the old key is current again and the new one still
+opens, so nothing is lost. The sweep starts a new pass (it reseals back under the old key); wait for it to
+complete before `finish`, which then deletes the new key.
 
 ## Lost keys: refund the unused attempts
 

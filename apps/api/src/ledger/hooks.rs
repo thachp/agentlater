@@ -593,6 +593,8 @@ struct DayRow {
 mod tests {
     use super::*;
     use crate::db::sqlite::Memory;
+    use crate::ledger::ResealCount;
+    use crate::sealing::Resealed;
     use runlater_core::limits::{CAPTURE_RETENTION_MS, MAX_INBOX_EVENTS, TRIAL_DURATION_MS};
     use runlater_core::{HookRequest, WakeRequest};
 
@@ -652,6 +654,75 @@ mod tests {
 
     fn events(l: &Ledger<'_, Memory>) -> Vec<serde_json::Value> {
         l.read_inbox(None, Some(50), false).unwrap().events
+    }
+
+    /// Resealing rewrites what only the old key opens, in both tables, under the name each was
+    /// sealed with, and leaves current and unreadable values as they are.
+    #[test]
+    fn reseals_secrets_and_hook_secrets() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let hosts = vec!["api.github.com".to_string()];
+        l.put_secret("OLD", "old:a", 1, &hosts, T0).unwrap();
+        l.put_secret("NEW", "new:b", 1, &hosts, T0).unwrap();
+        l.put_secret("LOST", "lost:c", 1, &hosts, T0).unwrap();
+        let verified = spec(serde_json::json!({
+            "name": "gh-ci",
+            "verify": { "scheme": "github", "secret": "whsec_0123456789abcdef" },
+        }));
+        l.put_hook(&verified, TOKEN, Some("old:d"), T0).unwrap();
+        l.put_hook(
+            &spec(serde_json::json!({ "name": "plain" })),
+            "other-token-0123456789abcdef",
+            None,
+            T0,
+        )
+        .unwrap();
+
+        let mut seen = Vec::new();
+        let count = l
+            .reseal(|name, sealed| {
+                seen.push(name.to_string());
+                Ok(match sealed.split_once(':') {
+                    Some(("old", v)) => Resealed::Again(format!("new:{v}")),
+                    Some(("new", _)) => Resealed::Current,
+                    _ => Resealed::Unreadable,
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            count,
+            ResealCount {
+                resealed: 2,
+                unreadable: 1
+            }
+        );
+        seen.sort();
+        let mut expected = vec![
+            "LOST".to_string(),
+            "NEW".into(),
+            "OLD".into(),
+            hook_secret_name("gh-ci"),
+        ];
+        expected.sort();
+        assert_eq!(
+            seen, expected,
+            "only sealed values, each under its own name"
+        );
+
+        let sealed = |sql: &str| -> String { db.0.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(
+            sealed("SELECT sealed FROM secrets WHERE name = 'OLD'"),
+            "new:a"
+        );
+        assert_eq!(
+            sealed("SELECT sealed FROM secrets WHERE name = 'LOST'"),
+            "lost:c"
+        );
+        assert_eq!(
+            sealed("SELECT sealed_secret FROM hooks WHERE name = 'gh-ci'"),
+            "new:d"
+        );
     }
 
     #[test]

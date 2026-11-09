@@ -8,6 +8,7 @@
 //! queue until a consumer claims it, so a lost queue message is simply republished.
 
 use crate::db::{Db, DbError, Param};
+use crate::sealing::Resealed;
 use runlater_core::limits::{
     CAPTURED_HEADERS, CAPTURE_BODY_BYTES, CAPTURE_RETENTION_MS, CREDIT_VALIDITY_MS,
     DEFAULT_MAX_ATTEMPTS, MAX_CREDIT_ATTEMPTS, MAX_CRONS, MAX_HEADER_BYTES, MAX_RETAINED_TASKS,
@@ -519,6 +520,13 @@ pub struct SecretView {
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct SecretList {
     pub secrets: Vec<SecretView>,
+}
+
+/// What a reseal found: values sealed again under the current key, and values no key opens.
+#[derive(Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ResealCount {
+    pub resealed: usize,
+    pub unreadable: usize,
 }
 
 #[derive(Deserialize)]
@@ -1541,6 +1549,53 @@ impl<'a, D: Db> Ledger<'a, D> {
         self.db
             .exec("DELETE FROM secrets WHERE name = ?", vec![name.into()])?;
         Ok(row.view()?)
+    }
+
+    /// Seals again, under the current key, every stored value only the previous key opens:
+    /// project secrets and hook verify secrets. `reseal` gets each value's name (its associated
+    /// data) and ciphertext. Unreadable values are counted and left as they are.
+    pub fn reseal(
+        &self,
+        mut reseal: impl FnMut(&str, &str) -> Result<Resealed, DbError>,
+    ) -> Result<ResealCount, DbError> {
+        #[derive(Deserialize)]
+        struct Sealed {
+            name: String,
+            sealed: String,
+        }
+        let mut count = ResealCount::default();
+        // (rows, sealed under which name, write back). A hook's secret is sealed under a name
+        // of its own, so it can't be swapped with a project secret.
+        let secret_name: fn(&str) -> String = |name| name.to_string();
+        let hook_name: fn(&str) -> String = hook_secret_name;
+        let tables = [
+            (
+                "SELECT name, sealed FROM secrets",
+                secret_name,
+                "UPDATE secrets SET sealed = ? WHERE name = ? AND sealed = ?",
+            ),
+            (
+                "SELECT name, sealed_secret AS sealed FROM hooks WHERE sealed_secret IS NOT NULL",
+                hook_name,
+                "UPDATE hooks SET sealed_secret = ? WHERE name = ? AND sealed_secret = ?",
+            ),
+        ];
+        for (select, sealed_as, update) in tables {
+            for row in self.db.query::<Sealed>(select, vec![])? {
+                match reseal(&sealed_as(&row.name), &row.sealed)? {
+                    Resealed::Current => {}
+                    Resealed::Unreadable => count.unreadable += 1,
+                    Resealed::Again(again) => {
+                        self.db.exec(
+                            update,
+                            vec![again.into(), row.name.into(), row.sealed.into()],
+                        )?;
+                        count.resealed += 1;
+                    }
+                }
+            }
+        }
+        Ok(count)
     }
 
     /// New work may refer only to secrets that exist and allow its host. This is what stops a

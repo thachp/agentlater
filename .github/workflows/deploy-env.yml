@@ -40,8 +40,20 @@ jobs:
       - name: Deploy api
         env:
           GATEWAY_PUBLIC_KEY: ${{ vars.GATEWAY_PUBLIC_KEY }}
-          SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
+          # The key has two slots so it can be rotated without reading it back
+          # (scripts/rotate-secrets-key.mjs): SECRETS_KEY_SLOT picks the current one, and while
+          # SECRETS_KEY_ROTATING is true the other is the API's SECRETS_KEY_PREVIOUS.
+          SLOT_1: ${{ secrets.SECRETS_KEY }}
+          SLOT_2: ${{ secrets.SECRETS_KEY_2 }}
+          ROTATING: ${{ vars.SECRETS_KEY_ROTATING == 'true' }}
+          CURRENT_SLOT: ${{ vars.SECRETS_KEY_SLOT == '2' && '2' || '1' }}
         run: |
+          if [ "$CURRENT_SLOT" = 2 ]; then SECRETS_KEY=$SLOT_2 SECRETS_KEY_PREVIOUS=$SLOT_1; else SECRETS_KEY=$SLOT_1 SECRETS_KEY_PREVIOUS=$SLOT_2; fi
+          if [ "$ROTATING" != true ]; then SECRETS_KEY_PREVIOUS=; fi
+          if [ "$ROTATING" = true ] && { [ -z "$SECRETS_KEY" ] || [ -z "$SECRETS_KEY_PREVIOUS" ]; }; then
+            echo "::error::SECRETS_KEY_ROTATING is true but a key slot is empty; see docs/DEPLOY.md, Rotating SECRETS_KEY"; exit 1
+          fi
+          export SECRETS_KEY SECRETS_KEY_PREVIOUS
           test -n "$GATEWAY_PUBLIC_KEY" || { echo "::error::GATEWAY_PUBLIC_KEY is not set; run scripts/setup-deploy-secrets.mjs"; exit 1; }
           # Without SECRETS_KEY the API runs, but set_secret answers 503 secrets_unavailable.
           if [ -z "$SECRETS_KEY" ]; then
@@ -50,8 +62,14 @@ jobs:
           else
             secrets="$(mktemp "$RUNNER_TEMP/secrets.XXXXXX")"
             trap 'rm -f "$secrets"' EXIT
-            node -e 'process.stdout.write(JSON.stringify({ SECRETS_KEY: process.env.SECRETS_KEY }))' > "$secrets"
+            node -e 'const { SECRETS_KEY, SECRETS_KEY_PREVIOUS } = process.env;
+              process.stdout.write(JSON.stringify(SECRETS_KEY_PREVIOUS ? { SECRETS_KEY, SECRETS_KEY_PREVIOUS } : { SECRETS_KEY }))' > "$secrets"
             npx wrangler deploy --env "$DEPLOY_ENV" --var "GATEWAY_PUBLIC_KEY:$GATEWAY_PUBLIC_KEY" --secrets-file "$secrets"
+            # --secrets-file never deletes, so the previous key of a finished rotation is deleted here.
+            if [ -z "$SECRETS_KEY_PREVIOUS" ] &&
+              npx wrangler secret list --env "$DEPLOY_ENV" --format json | jq --exit-status 'any(.[]; .name == "SECRETS_KEY_PREVIOUS")' > /dev/null; then
+              npx wrangler secret delete SECRETS_KEY_PREVIOUS --env "$DEPLOY_ENV"
+            fi
           fi
         working-directory: apps/api
 

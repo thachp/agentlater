@@ -527,6 +527,13 @@ describe("api", () => {
     assert.equal(JSON.stringify(listed).includes(token), false);
   });
 
+  test("reseals only for the gateway's maintain scope, and has nothing to do outside a rotation", async () => {
+    assert.equal((await api("POST", "/v1/secrets/_reseal", { scope: "secrets" })).status, 403);
+    const res = await api("POST", "/v1/secrets/_reseal", { scope: "maintain" });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json, { rotation: null, resealed: 0, unreadable: 0 });
+  });
+
   test("lists tasks newest first with a cursor", async () => {
     const page = await api("GET", "/v1/tasks?limit=2");
     assert.equal(page.json.tasks.length, 2);
