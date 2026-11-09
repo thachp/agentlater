@@ -227,7 +227,7 @@ One `wrangler.jsonc` per app with `env.staging` and `env.production` (the receiv
 
 - **`ci.yml`** on every PR and on `main`: `cargo fmt`, `clippy` (native and wasm), `cargo test`; `typecheck`, `test`; then `wrangler deploy --dry-run` per Worker and both e2e suites.
 - **`deploy.yml`** after CI passes on `main`, if `DEPLOY_ENABLED`: staging, then production behind the environment's required reviewer. Order within an environment: API, D1 migrations, gateway, web, receiver (staging only), health check, journey (staging only). A failed journey stops production.
-- **`monitor.yml`**: health, the main, pay and legal pages, and billing configuration every 15 minutes, the journey against production daily. A failed scheduled check opens a `Monitor: <check> is failing` issue for the repository's watchers, and the next passing run of that check closes it; each run also re-enables the workflow so GitHub's 60-day inactivity pause can't stop it. Workers Logs are on for the API, gateway and web Workers.
+- **`monitor.yml`**: health, the main, pay and legal pages, and billing configuration every 15 minutes, the journey against production daily. A failed scheduled check opens a `Monitor: <check> is failing` issue for the repository's watchers, and the next passing run of that check closes it; the daily run also re-enables the workflow against GitHub's 60-day inactivity pause. Workers Logs are on for the API, gateway and web Workers.
 - **Numbers**: the API writes a row to Workers Analytics Engine for each attempt (project id, real or probe, lateness) and each new payment, with no URLs or contents. `scripts/stats.mjs` reports them; the data lasts about three months.
 
 ## Risks

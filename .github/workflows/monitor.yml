@@ -1,7 +1,7 @@
 name: Monitor
-# Probes production. A failed scheduled run opens a "Monitor is failing" issue, which notifies the
-# repository's watchers; the next run that passes closes it. Each scheduled run also re-enables this
-# workflow, so GitHub's 60-day pause for inactive repositories never stops it.
+# Probes production. A failed scheduled check opens a "Monitor: <check> is failing" issue, which
+# notifies the repository's watchers; the next run of that check that passes closes it. The daily run
+# also re-enables this workflow, against GitHub's 60-day pause for inactive repositories.
 on:
   schedule:
     - cron: '*/15 * * * *' # health
@@ -102,15 +102,13 @@ jobs:
       NEEDS: ${{ toJSON(needs) }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
-      # Without this, GitHub pauses scheduled workflows after 60 days with no repository activity.
-      - name: Keep the schedule alive
-        run: gh api --method PUT "repos/$GH_REPO/actions/workflows/monitor.yml/enable"
       # One open issue per failing check: opened by its first failed run, closed by the next run of
-      # that same check that passes. Runs in between say nothing, so an outage is one notification.
+      # that same check that passes. Runs in between say nothing: an outage notifies when it starts and ends.
       # A check that was skipped (the journey, on the 15-minute runs) leaves its issue alone.
       - name: Open or close alert issues
+        shell: bash # -eo pipefail: a failed issue lookup must fail the step, not read as "none open"
         run: |
-          gh label create monitor --color B60205 --description "Production monitor alerts" 2>/dev/null || true
+          gh label create monitor --force --color B60205 --description "Production monitor alerts"
           for check in health billing journey; do
             result=$(jq --raw-output --arg c "$check" '.[$c].result' <<<"$NEEDS")
             title="Monitor: $check is failing"
@@ -124,3 +122,10 @@ jobs:
                 [ -z "$open" ] || gh issue close "$open" --comment "Passing again: $RUN_URL" ;;
             esac
           done
+      # GitHub pauses scheduled workflows after 60 days with no repository activity; re-enabling
+      # resets that in practice (GitHub doesn't document it). Once a day is plenty, and a failure
+      # here must not hold back the alerts above.
+      - name: Keep the schedule alive
+        if: github.event.schedule == '17 9 * * *'
+        continue-on-error: true
+        run: gh api --method PUT "repos/$GH_REPO/actions/workflows/monitor.yml/enable"
