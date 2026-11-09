@@ -236,10 +236,11 @@ mod tests {
     fn fresh_nonce() -> [u8; NONCE_BYTES] {
         use std::hash::{BuildHasher, RandomState};
         let state = RandomState::new();
-        let mut nonce = [0u8; NONCE_BYTES];
-        nonce[..8].copy_from_slice(&state.hash_one(0u8).to_le_bytes());
-        nonce[8..].copy_from_slice(&state.hash_one(1u8).to_le_bytes()[..4]);
-        nonce
+        let (a, b) = (
+            state.hash_one(0u8).to_le_bytes(),
+            state.hash_one(1u8).to_le_bytes(),
+        );
+        std::array::from_fn(|i| if i < 8 { a[i] } else { b[i - 8] })
     }
 
     #[test]
