@@ -25,6 +25,8 @@ export interface Env extends AuthEnv, BillingEnv, HooksEnv, HostEnv {
   OAUTH_RATE: RateLimit;
   /** MPP purchases, per IP and per project. */
   MPP_RATE: RateLimit;
+  /** Tool calls, per owner (one Agent Auth host or one MCP connection). */
+  TOOL_RATE: RateLimit;
   /** OAuth clients, grants and tokens for hosted MCP, managed by workers-oauth-provider. */
   OAUTH_KV: KVNamespace;
   /** Set by OAuthProvider before it calls the handlers below. */

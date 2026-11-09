@@ -39,6 +39,7 @@ scheduled ──(run_at reached)──▶ delivering ──2xx──▶ succeede
 | --- | --- |
 | `budget_exhausted`, `trial_expired` | `get_payment_link`, give the user `payment_url` |
 | `trials_paused` | New trials are full for today; call `create_project` again later |
+| `rate_limited` | Over 300 calls in a minute; wait a minute, then batch or slow down |
 | `secret_not_found`, `secret_host_not_allowed` | `set_secret` with the destination's exact host in `allowed_hosts` |
 | `watch_not_redrivable`, `wake_not_redrivable` | start a new watch / `set_wake` again |
 | `ack_beyond_inbox` | ack only up to the last `seq` you read |

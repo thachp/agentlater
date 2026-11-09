@@ -28,6 +28,8 @@ describe("verifyStripeSignature", () => {
   });
 });
 
+const allow = { limit: async () => ({ success: true }) } as unknown as RateLimit;
+
 describe("running out of attempts", () => {
   const db = { prepare: () => ({ bind: () => ({ first: async () => ({ project_id: "prj_1" }) }) }) } as unknown as D1Database;
   const api = {
@@ -38,7 +40,7 @@ describe("running out of attempts", () => {
   it("points the agent at get_payment_link only when billing is on", async () => {
     const key = (await crypto.subtle.generateKey("Ed25519", false, ["sign", "verify"])) as CryptoKeyPair;
     const run = (env: object) =>
-      runCapability({ DB: db, API: api, PUBLIC_URL: "https://gateway.test", ...env }, key.privateKey, "host", "schedule_http", { url: "https://a.example.com/" }).catch(
+      runCapability({ DB: db, API: api, PUBLIC_URL: "https://gateway.test", TOOL_RATE: allow, ...env }, key.privateKey, "host", "schedule_http", { url: "https://a.example.com/" }).catch(
         (e: ApiError) => e,
       );
     const on = (await run(stripe)) as ApiError;
@@ -46,7 +48,7 @@ describe("running out of attempts", () => {
     expect(on.body.error).toMatchObject({ code: "budget_exhausted", message: expect.stringContaining("get_payment_link") });
     const off = (await run({})) as ApiError;
     expect(off.body.error.message).not.toContain("get_payment_link");
-    await expect(runCapability({ DB: db, API: api, PUBLIC_URL: "https://gateway.test" }, key.privateKey, "host", "get_payment_link", {})).rejects.toMatchObject({
+    await expect(runCapability({ DB: db, API: api, PUBLIC_URL: "https://gateway.test", TOOL_RATE: allow }, key.privateKey, "host", "get_payment_link", {})).rejects.toMatchObject({
       body: { error: { code: "billing_unavailable" } },
     });
   });

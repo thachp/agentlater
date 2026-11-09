@@ -115,7 +115,7 @@ scheduled ──(due time reached)──▶ delivering ──2xx──▶ succee
 
 Each one is an Agent Auth capability. MCP clients reach them two ways:
 
-- **Hosted MCP server** at `https://gateway.agentlater.io/mcp` (Streamable HTTP). Each capability is a tool. Clients sign in with standard MCP OAuth: on first connect a AgentLater consent page opens, the person clicks **Connect**, and there is no account. Each approved connection is its own owner with its own project and trial, separate from any Agent Auth identity; the OAuth grant is its only key (refresh tokens last 30 days from last use).
+- **Hosted MCP server** at `https://gateway.agentlater.io/mcp` (Streamable HTTP). Each capability is a tool. Clients sign in with standard MCP OAuth: on first connect a AgentLater consent page opens, the person clicks **Connect**, and there is no account. Each approved connection is its own owner with its own project and trial, separate from any Agent Auth identity; the OAuth grant is its only key (refresh tokens last 30 days from last use). Over either path, one owner may make 300 tool calls a minute; more get `429 rate_limited`.
 - **Agent Auth MCP bridge**, which runs locally and exposes generic tools (`connect_agent`, `list_capabilities`, `execute_capability`); the agent picks a AgentLater capability by name inside `execute_capability`:
 
 ```json
@@ -340,7 +340,7 @@ Hosted MCP needs that one click, on the consent page, then `create_project` and 
 2. ~~**Key loss.**~~ Resolved: the project is gone with its keys, inbox included, and is never moved to a new owner: paying for a project doesn't prove owning it, and payment links are meant to be passed around. The unused part of its purchased attempts may be refunded to the original payment method by hand, at our discretion ([DEPLOY.md](../DEPLOY.md#lost-keys-refund-the-unused-attempts)).
 3. **Abuse.** New keys are new identities (Sybil). Today there are per-IP limits on registration (10 a minute) and on OAuth client registration and consent (20 a minute each), and a global cap on new trials (`NEW_TRIALS_PER_DAY`). The cap bounds the cost of free identities at about $3 a day at $0.03 per 1,000 attempts, but one abuser can use it up and block real sign-ups. Is that enough while the trial is free?
 4. ~~**What happens after the trial?**~~ Resolved: the agent's person buys attempt packs (*Buying attempts*).
-5. **Rate of calls on `/mcp`.** The gateway has no per-grant limit on tool calls; budgets bound what costs attempts, but reads and rejected calls are unbounded. Add one before it's needed, or wait for evidence?
+5. ~~**Rate of calls on `/mcp`.**~~ Resolved: 300 tool calls a minute per owner, over MCP and Agent Auth alike (`429 rate_limited`). Budgets bound what costs attempts; this bounds reads and refused calls, well above any agent's normal pace.
 6. ~~**Measuring lateness.**~~ Resolved: a metric recorded with each attempt, in Workers Analytics Engine, separating real use from the monitor's journey.
 
 ## The other specs

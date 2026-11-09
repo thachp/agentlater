@@ -5,19 +5,15 @@ import { agentAuth, agentError, type Capability } from "@better-auth/agent-auth"
 import { betterAuth, type BetterAuthOptions, type BetterAuthPlugin } from "better-auth";
 import { ApiError } from "./api";
 import { ArgumentError, capabilities, capabilityNames } from "./capabilities";
-import { runCapability } from "./projects";
+import { runCapability, type CapabilityEnv } from "./projects";
 import type { AuthStore } from "./store";
-import type { BillingEnv } from "./billing";
 import { providerNameFor } from "./hosts";
 
 export const BASE_PATH = "/api/auth";
 const WEEK_SECS = 7 * 24 * 3600;
 
-export interface AuthEnv extends BillingEnv {
-  DB: D1Database;
-  API: Fetcher;
+export interface AuthEnv extends CapabilityEnv {
   AUTH_STORE: DurableObjectNamespace<AuthStore>;
-  PUBLIC_URL: string;
   BETTER_AUTH_SECRET: string;
 }
 

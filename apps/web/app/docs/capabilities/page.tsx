@@ -37,6 +37,7 @@ const ERRORS: [string, number, string][] = [
   ["idempotency_conflict", 409, "The idempotency_key was used for a different request."],
   ["task_finished", 409, "Can't cancel: the task already succeeded or failed."],
   ["task_not_failed", 409, "Only failed tasks can be redriven."],
+  ["rate_limited", 429, "More than 300 calls in a minute from one agent or connection; wait a minute."],
   ["task_limit", 429, "The project holds 1,000 tasks (20,000 once paid); finished ones are purged after 30 days."],
 ];
 

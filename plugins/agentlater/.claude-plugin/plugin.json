@@ -1,6 +1,6 @@
 {
   "name": "agentlater",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "Let Claude make HTTP requests later, then pick up results, webhooks and wake-ups in a later session.",
   "author": {
     "name": "Patrick Thach"
