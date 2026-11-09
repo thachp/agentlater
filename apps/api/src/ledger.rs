@@ -1174,7 +1174,7 @@ impl<'a, D: Db> Ledger<'a, D> {
             }
             Verdict::Exhausted => {
                 if current && task.abandon(now) {
-                    self.watch_gave_up(&row, "budget_exhausted")?;
+                    self.watch_gave_up(&row, kind, "budget_exhausted")?;
                     self.save_row(&row, &task, now)?;
                     return Ok(Claimed::Skip("budget_exhausted"));
                 }
@@ -1206,7 +1206,7 @@ impl<'a, D: Db> Ledger<'a, D> {
                         "UPDATE tasks SET failure = ? WHERE id = ?",
                         vec![why.into(), task_id.into()],
                     )?;
-                    self.watch_gave_up(&row, why)?;
+                    self.watch_gave_up(&row, kind, why)?;
                     self.save_row(&row, &task, now)?;
                     return Ok(Claimed::Skip(why));
                 }

@@ -1,6 +1,7 @@
 //! Watches: tasks whose attempts are polls, and the action a match sends. The rest of the
 //! ledger hands a finished poll to [`Ledger::finish_poll`], tells a watch that gave up before
-//! polling, and tells it when it ended; the watch columns are read and written only here.
+//! polling, and tells it when it ended. A watch's progress (`watch_errors`, `watch_state`) is
+//! read and written only here; `tasks.rs` stores its settings and action as the kind's data.
 
 use super::*;
 
@@ -12,7 +13,9 @@ pub struct WatchView {
     /// Polls in a row that failed (5xx, timeout, network); three end the watch.
     pub consecutive_errors: u32,
     /// Why the watch ended: matched, timed_out, poll_failing, poll_rejected,
-    /// response_too_large or budget_exhausted. None while it is still polling, or if canceled.
+    /// response_too_large, budget_exhausted, or a secret failure (secret_missing,
+    /// secret_host_not_allowed, secret_too_large, secret_unavailable). None while it is still
+    /// polling, or if canceled.
     pub reason: Option<String>,
     /// The value that satisfied `until`.
     pub matched: Option<serde_json::Value>,
@@ -198,8 +201,13 @@ impl<D: Db> Ledger<'_, D> {
 
     /// The watch stopped before a poll could be made (out of attempts, or a secret it needs is
     /// gone): record why. Other kinds of task have nothing to record.
-    pub(super) fn watch_gave_up(&self, row: &TaskRow, reason: &str) -> Result<(), DbError> {
-        if row.watch.is_none() {
+    pub(super) fn watch_gave_up(
+        &self,
+        row: &TaskRow,
+        kind: Kind,
+        reason: &str,
+    ) -> Result<(), DbError> {
+        if !kind.is_watch() {
             return Ok(());
         }
         let state = WatchState {
