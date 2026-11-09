@@ -38,6 +38,9 @@ pub enum Scope {
     /// Hand the ledger a request a sender made to one of the project's hooks. Only the
     /// gateway's public hook route asks for it; no agent is granted it.
     HooksReceive,
+    /// Upkeep the gateway does on its own schedule, such as resealing secrets under a new key.
+    /// No agent is granted it.
+    Maintain,
 }
 
 impl Scope {
@@ -50,6 +53,7 @@ impl Scope {
             "billing" => Self::Billing,
             "secrets" => Self::Secrets,
             "hooks.receive" => Self::HooksReceive,
+            "maintain" => Self::Maintain,
             _ => return None,
         })
     }

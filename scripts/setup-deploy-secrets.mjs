@@ -10,8 +10,8 @@
 //   variable GATEWAY_PUBLIC_KEY     its public key (hex); the API verifies with it
 //   secret   BETTER_AUTH_SECRET     Better Auth signing secret
 //   secret   SECRETS_KEY            the API's master key for project secrets (32 bytes, hex).
-//                                  Never rotated, not even with --rotate: every stored
-//                                  secret is sealed with it and would become unreadable.
+//                                  Not changed by --rotate: every stored secret is sealed with
+//                                  it, so it has its own script, scripts/rotate-secrets-key.mjs.
 //   secret   CLOUDFLARE_ACCOUNT_ID  if --account-id is given
 // Staging only:
 //   secret   RECEIVER_TOKEN         reads recorded deliveries from the test receiver
@@ -68,7 +68,8 @@ for (const env of ENVS) {
     gh(["secret", "set", "BETTER_AUTH_SECRET", "--env", env], randomBytes(32).toString("hex"));
     done.push("BETTER_AUTH_SECRET");
   }
-  if (!secrets.has("SECRETS_KEY")) {
+  // After a rotation the key may be in its second slot (scripts/rotate-secrets-key.mjs).
+  if (!secrets.has("SECRETS_KEY") && !secrets.has("SECRETS_KEY_2")) {
     gh(["secret", "set", "SECRETS_KEY", "--env", env], randomBytes(32).toString("hex"));
     done.push("SECRETS_KEY");
   }

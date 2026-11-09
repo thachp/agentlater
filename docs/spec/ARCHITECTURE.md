@@ -78,9 +78,9 @@ flowchart LR
 
 Not on any public route (`workers_dev: false`, no custom domain). It is reached only through a service binding from the gateway.
 
-- **Assertions.** Each request carries `RunLater-Assertion`: `{aud, sub: project_id, scope, iat, exp}` signed with Ed25519 by the gateway, living at most 5 minutes. The route table in `routes.rs` names the scope each route needs; `openapi.yaml` states the same scope as `x-scope`, and tests on both sides fail if they disagree. Scopes: `project`, `schedule`, `read`, `cancel`, `secrets`, plus two no agent is granted: `billing` and `hooks.receive`. A shared test vector pins the format across TypeScript and Rust.
+- **Assertions.** Each request carries `RunLater-Assertion`: `{aud, sub: project_id, scope, iat, exp}` signed with Ed25519 by the gateway, living at most 5 minutes. The route table in `routes.rs` names the scope each route needs; `openapi.yaml` states the same scope as `x-scope`, and tests on both sides fail if they disagree. Scopes: `project`, `schedule`, `read`, `cancel`, `secrets`, plus three no agent is granted: `billing`, `hooks.receive` and `maintain` (the gateway's reseal sweep). A shared test vector pins the format across TypeScript and Rust.
 - **The ledger.** `src/ledger.rs` is plain synchronous Rust behind a small `Db` trait, so the same code runs against rusqlite in `cargo test` and against Durable Object SQLite in workerd. A run of storage calls with no `await` between them commits atomically, and that is what makes "record the match and queue the action" one transaction.
-- **Sealing.** `src/sealing.rs` holds AES-256-GCM with a per-project key derived by HKDF from `SECRETS_KEY`. The API seals before the ledger stores, so `ledger.rs` never holds plaintext. Two places open sealed values: the consumer at send time, and the Durable Object's entry code when it checks a hook's signature.
+- **Sealing.** `src/sealing.rs` holds AES-256-GCM with a per-project key derived by HKDF from `SECRETS_KEY`. While it is rotated, `SECRETS_KEY_PREVIOUS` also opens (never seals), and the gateway's hourly cron (`src/rotation.ts`) has each ledger reseal under the new key (ADR 1). The API seals before the ledger stores, so `ledger.rs` never holds plaintext. Two places open sealed values: the consumer at send time, and the Durable Object's entry code when it checks a hook's signature.
 - **Glue.** `src/worker_entry.rs` is the HTTP entry, the `TaskLedger` class, its alarm and the queue consumer. The delivery attempt itself is `src/delivery.rs`, which takes the network as a `Transport` so `cargo test` can run it.
 
 ### `apps/web`
@@ -237,7 +237,7 @@ One `wrangler.jsonc` per app with `env.staging` and `env.production` (the receiv
 | Agent Auth maturity | Server packages are at 0.6.x and the bridge at 0.5.1, and the protocol may change. Hosted MCP doesn't depend on it, and it is kept to `src/auth.ts`, `store.ts` and the routes in `index.ts`. |
 | Thin alerting | One GitHub issue per failing check, from one workflow. Nothing alerts if GitHub Actions itself can't run it. |
 | `AuthStore` is a single Durable Object | Every Agent Auth call goes through it for replay checks, so it is a throughput ceiling and a shared point of failure for that path. Hosted MCP doesn't use it. Fine at today's traffic; untested at scale. |
-| `SECRETS_KEY` is never rotated | One per environment. Losing it loses every sealed secret and hook verify secret; leaking it exposes them if the ledgers leak too. |
+| `SECRETS_KEY` is a single point of loss | One per environment. Losing it loses every sealed secret and hook verify secret. A leak can be answered by rotating it (ADR 1), but the values stay exposed under the old key until the sweep finishes. |
 | Concentration in `ledger.rs` | About 5,300 lines including tests, and every feature passes through it. Hooks, the inbox and wake, crons, watches, task kinds and the attempt budget have their own modules; what is left is the task lifecycle itself. |
 
 ## History
