@@ -10,7 +10,9 @@
 //   node scripts/rotate-secrets-key.mjs --env production finish   rotation over, old key deleted
 //
 // Deploy after each. Requires `gh` logged in with admin on the repo, and for `finish` wrangler
-// logged in to Cloudflare: finish refuses unless the gateway's sweep has completed a pass with the
+// logged in to Cloudflare with CLOUDFLARE_ACCOUNT_ID set to the account the Workers run in (wrangler
+// won't choose one when the login reaches several, and the repo is public, so the id isn't in its
+// config). finish refuses unless the gateway's sweep has completed a pass with the
 // keys deployed now, more than an hour ago, and checked them since the last change here.
 
 import { execFileSync } from "node:child_process";
@@ -23,6 +25,10 @@ const env = args[args.indexOf("--env") + 1];
 const step = args.find((a) => ["start", "undo", "finish"].includes(a));
 if (!["staging", "production"].includes(env ?? "") || !step || !args.includes("--env")) {
   console.error("usage: node scripts/rotate-secrets-key.mjs --env staging|production start|undo|finish");
+  process.exit(2);
+}
+if (step === "finish" && !process.env.CLOUDFLARE_ACCOUNT_ID) {
+  console.error("finish reads the gateway's D1: set CLOUDFLARE_ACCOUNT_ID to the Cloudflare account the Workers run in");
   process.exit(2);
 }
 
@@ -66,10 +72,15 @@ if (step === "start") {
   );
   const row = JSON.parse(out)[0]?.results?.[0];
   if (!row || row.rotation === null || row.completed_at === null) fail("the sweep hasn't completed a pass yet");
+  // The slot stands in for the keys: the fingerprint can't be checked here, since the keys can't be
+  // read back, and a slot only gets a new key from `start`, which also moves SECRETS_KEY_SLOT to it.
   if (row.slot !== String(current)) fail(`the sweep last saw slot ${row.slot}, not ${current}: deploy, then wait for a new pass`);
   if (row.checked_at <= changedAt) fail("the sweep hasn't checked the keys since the last change; deploy, then wait an hour");
   if (Date.now() - row.completed_at < HOUR) fail("the pass completed less than an hour ago; wait for attempts in flight");
   gh(["variable", "set", "SECRETS_KEY_ROTATING", "--env", env, "--body", "false"]);
   if (secrets.has(SLOTS[other])) gh(["secret", "delete", SLOTS[other], "--env", env]);
-  console.log(`${env}: rotation over, ${SLOTS[other]} deleted. Deploy now; the deploy removes the API's previous key.`);
+  console.log(
+    `${env}: rotation over (${row.resealed_total ?? "?"} values resealed, ${row.unreadable} no key opens), ${SLOTS[other]} deleted. ` +
+      "Deploy now; the deploy removes the API's previous key.",
+  );
 }

@@ -51,13 +51,13 @@ describe("SECRETS_KEY reseal sweep", () => {
     const store = memoryStore(["p1", "p2", "p3"]);
     const { reseal, calls } = api("r1", { p1: 2, p3: 1 });
 
-    expect(await sweep(store, reseal, 2, NOW)).toMatchObject({ rotation: "r1", slot: "2", cursor: "p2", resealed: 2, completedAt: null });
-    // End of the first pass: it resealed values, so another pass confirms.
-    expect(await sweep(store, reseal, 2, NOW)).toEqual(started("r1"));
+    expect(await sweep(store, reseal, 2, NOW)).toMatchObject({ rotation: "r1", slot: "2", cursor: "p2", resealed: 2, total: 2, completedAt: null });
+    // End of the first pass: it resealed values, so another pass confirms. The total carries over.
+    expect(await sweep(store, reseal, 2, NOW)).toEqual({ ...started("r1"), total: 3 });
     expect(calls).toEqual(["p1", "p2", "p3"]);
 
     await sweep(store, reseal, 2, NOW);
-    expect(await sweep(store, reseal, 2, NOW)).toEqual({ ...started("r1"), unreadable: 1, completedAt: NOW, checkedAt: NOW });
+    expect(await sweep(store, reseal, 2, NOW)).toEqual({ ...started("r1"), total: 3, unreadable: 1, completedAt: NOW, checkedAt: NOW });
 
     // Complete: one probe a run, which keeps checkedAt current, until the previous key is dropped.
     calls.length = 0;
@@ -103,7 +103,7 @@ describe("SECRETS_KEY reseal sweep", () => {
     expect(store.state).toMatchObject({ cursor: "p1", resealed: 1 });
 
     fails.clear();
-    expect(await sweep(store, reseal, 5, NOW)).toEqual(started("r1"));
+    expect(await sweep(store, reseal, 5, NOW)).toEqual({ ...started("r1"), total: 2 });
     expect(calls).toEqual(["p1", "p2", "p2", "p3"]);
   });
 

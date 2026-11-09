@@ -56,23 +56,25 @@ jobs:
           export SECRETS_KEY SECRETS_KEY_PREVIOUS
           test -n "$GATEWAY_PUBLIC_KEY" || { echo "::error::GATEWAY_PUBLIC_KEY is not set; run scripts/setup-deploy-secrets.mjs"; exit 1; }
           # Without SECRETS_KEY the API runs, but set_secret answers 503 secrets_unavailable.
+          deploy=(npx wrangler deploy --env "$DEPLOY_ENV" --var "GATEWAY_PUBLIC_KEY:$GATEWAY_PUBLIC_KEY"
+            --var "SECRETS_KEY_SLOT:$CURRENT_SLOT")
           if [ -z "$SECRETS_KEY" ]; then
             echo "::warning::SECRETS_KEY is not set, so project secrets are unavailable; run scripts/setup-deploy-secrets.mjs"
-            npx wrangler deploy --env "$DEPLOY_ENV" --var "GATEWAY_PUBLIC_KEY:$GATEWAY_PUBLIC_KEY"
+            "${deploy[@]}"
           else
             secrets="$(mktemp "$RUNNER_TEMP/secrets.XXXXXX")"
             trap 'rm -f "$secrets"' EXIT
             node -e 'const { SECRETS_KEY, SECRETS_KEY_PREVIOUS } = process.env;
               process.stdout.write(JSON.stringify(SECRETS_KEY_PREVIOUS ? { SECRETS_KEY, SECRETS_KEY_PREVIOUS } : { SECRETS_KEY }))' > "$secrets"
-            npx wrangler deploy --env "$DEPLOY_ENV" --var "GATEWAY_PUBLIC_KEY:$GATEWAY_PUBLIC_KEY" \
-              --var "SECRETS_KEY_SLOT:$CURRENT_SLOT" --secrets-file "$secrets"
-            # --secrets-file never deletes, so the previous key of a finished rotation is deleted
-            # here. A failed lookup fails the deploy: a leaked key must not quietly stay.
-            if [ -z "$SECRETS_KEY_PREVIOUS" ]; then
-              names="$(npx wrangler secret list --env "$DEPLOY_ENV" --format json)"
-              if jq --exit-status 'any(.[]; .name == "SECRETS_KEY_PREVIOUS")' <<<"$names" > /dev/null; then
-                npx wrangler secret delete SECRETS_KEY_PREVIOUS --env "$DEPLOY_ENV"
-              fi
+            "${deploy[@]}" --secrets-file "$secrets"
+          fi
+          # Neither deploy deletes a secret, so the previous key of a finished rotation is deleted
+          # here, with or without a current key. A failed lookup fails the deploy: a leaked key must
+          # not quietly stay.
+          if [ -z "$SECRETS_KEY_PREVIOUS" ]; then
+            names="$(npx wrangler secret list --env "$DEPLOY_ENV" --format json)"
+            if jq --exit-status 'any(.[]; .name == "SECRETS_KEY_PREVIOUS")' <<<"$names" > /dev/null; then
+              npx wrangler secret delete SECRETS_KEY_PREVIOUS --env "$DEPLOY_ENV"
             fi
           fi
         working-directory: apps/api

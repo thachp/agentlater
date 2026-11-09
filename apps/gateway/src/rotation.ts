@@ -15,7 +15,10 @@ export interface SweepState {
   /** The GitHub slot the deploy took the current key from (`SECRETS_KEY_SLOT`). */
   slot: string | null;
   cursor: string;
+  /** Resealed in this pass; a pass that reseals nothing completes the rotation. */
   resealed: number;
+  /** Resealed over the whole rotation, every pass: what the rotation actually moved. */
+  total: number;
   unreadable: number;
   /** When a full pass resealed nothing: the previous key is no longer needed. */
   completedAt: number | null;
@@ -28,6 +31,7 @@ export const FRESH: SweepState = {
   slot: null,
   cursor: "",
   resealed: 0,
+  total: 0,
   unreadable: 0,
   completedAt: null,
   checkedAt: null,
@@ -86,6 +90,7 @@ export async function sweep(
         ...state,
         cursor: page.length > 0 ? projectId : state.cursor,
         resealed: state.resealed + r.resealed,
+        total: state.total + r.resealed,
         unreadable: state.unreadable + r.unreadable,
         checkedAt: now,
       };
@@ -93,11 +98,11 @@ export async function sweep(
     if (page.length < limit) {
       // End of a pass: complete if it resealed nothing (values no key opens can't be helped by
       // keeping the old one), else go round again to confirm.
-      const { rotation, slot, unreadable } = state;
+      const { rotation, slot, total, unreadable } = state;
       state =
         state.resealed === 0
-          ? { ...FRESH, rotation, slot, unreadable, completedAt: now, checkedAt: now }
-          : { ...FRESH, rotation, slot };
+          ? { ...FRESH, rotation, slot, total, unreadable, completedAt: now, checkedAt: now }
+          : { ...FRESH, rotation, slot, total };
     }
     return state;
   } finally {
@@ -110,12 +115,13 @@ export function d1SweepStore(db: D1Database): SweepStore {
   return {
     async load() {
       const row = await db
-        .prepare("SELECT rotation, slot, cursor, resealed, unreadable, completed_at, checked_at FROM secrets_rotation WHERE id = 1")
+        .prepare("SELECT rotation, slot, cursor, resealed, resealed_total, unreadable, completed_at, checked_at FROM secrets_rotation WHERE id = 1")
         .first<{
           rotation: string | null;
           slot: string | null;
           cursor: string;
           resealed: number;
+          resealed_total: number;
           unreadable: number;
           completed_at: number | null;
           checked_at: number | null;
@@ -126,6 +132,7 @@ export function d1SweepStore(db: D1Database): SweepStore {
             slot: row.slot,
             cursor: row.cursor,
             resealed: row.resealed,
+            total: row.resealed_total,
             unreadable: row.unreadable,
             completedAt: row.completed_at,
             checkedAt: row.checked_at,
@@ -135,12 +142,13 @@ export function d1SweepStore(db: D1Database): SweepStore {
     async save(s) {
       await db
         .prepare(
-          "INSERT INTO secrets_rotation (id, rotation, slot, cursor, resealed, unreadable, completed_at, checked_at) " +
-            "VALUES (1, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET rotation = excluded.rotation, " +
+          "INSERT INTO secrets_rotation (id, rotation, slot, cursor, resealed, resealed_total, unreadable, completed_at, checked_at) " +
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET rotation = excluded.rotation, " +
             "slot = excluded.slot, cursor = excluded.cursor, resealed = excluded.resealed, " +
+            "resealed_total = excluded.resealed_total, " +
             "unreadable = excluded.unreadable, completed_at = excluded.completed_at, checked_at = excluded.checked_at",
         )
-        .bind(s.rotation, s.slot, s.cursor, s.resealed, s.unreadable, s.completedAt, s.checkedAt)
+        .bind(s.rotation, s.slot, s.cursor, s.resealed, s.total, s.unreadable, s.completedAt, s.checkedAt)
         .run();
     },
     async projects(after, limit) {

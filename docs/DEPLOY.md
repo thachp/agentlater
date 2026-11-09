@@ -254,13 +254,15 @@ environment, `staging` first:
    complete once a full pass reseals nothing. From `apps/gateway`:
 
    ```bash
-   npx wrangler d1 execute DB --env production --remote --command "SELECT * FROM secrets_rotation"
+   CLOUDFLARE_ACCOUNT_ID=<account id> npx wrangler d1 execute DB --env production --remote --command "SELECT * FROM secrets_rotation"
    ```
 
-   `completed_at` set, with `slot` the current slot, means done. `unreadable` counts values no key opens
-   (already broken before the rotation); keeping the old key doesn't help them.
+   `completed_at` set, with `slot` the current slot, means done. `resealed_total` is how many values the
+   rotation moved to the new key. `unreadable` counts values no key opens (already broken before the
+   rotation); keeping the old key doesn't help them. Wrangler needs `CLOUDFLARE_ACCOUNT_ID` whenever your
+   login reaches more than one account; it's the `CLOUDFLARE_ACCOUNT_ID` the deploy uses.
 3. **Wait an hour more**, for attempts claimed with old ciphertext to finish.
-4. **Finish.** `node scripts/rotate-secrets-key.mjs --env production finish` (needs wrangler logged in)
+4. **Finish.** `CLOUDFLARE_ACCOUNT_ID=<account id> node scripts/rotate-secrets-key.mjs --env production finish` (needs wrangler logged in)
    sets `SECRETS_KEY_ROTATING=false` and deletes the old slot. It refuses unless that row shows a pass
    completed more than an hour ago, for the current slot, and checked since the slot variables last
    changed: finishing early would delete the only key some values open with. Deploy; the deploy deletes
