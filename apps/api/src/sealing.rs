@@ -231,12 +231,23 @@ mod tests {
         assert!(SealingKey::parse(&format!(" {KEY}\n")).is_some());
     }
 
+    /// A nonce that differs on every call and every run, as a real one must; the std hasher's
+    /// per-process random seed is enough for a test.
+    fn fresh_nonce() -> [u8; NONCE_BYTES] {
+        use std::hash::{BuildHasher, RandomState};
+        let state = RandomState::new();
+        let mut nonce = [0u8; NONCE_BYTES];
+        nonce[..8].copy_from_slice(&state.hash_one(0u8).to_le_bytes());
+        nonce[8..].copy_from_slice(&state.hash_one(1u8).to_le_bytes()[..4]);
+        nonce
+    }
+
     #[test]
     fn a_keyring_opens_under_either_key_and_reseals_under_the_current_one() {
         let old = || SealingKey::parse(KEY).unwrap();
         let new = || SealingKey::parse(&KEY.replace("00", "ee")).unwrap();
-        let sealed_old = old().seal("p", "N", "v", [1; NONCE_BYTES]);
-        let sealed_new = new().seal("p", "N", "v", [2; NONCE_BYTES]);
+        let sealed_old = old().seal("p", "N", "v", fresh_nonce());
+        let sealed_new = new().seal("p", "N", "v", fresh_nonce());
 
         let rotating = Keyring::new(new(), Some(old()));
         let rotation = rotating.rotation().unwrap();
@@ -250,11 +261,10 @@ mod tests {
         assert_eq!(rotating.open("p", "N", &sealed_old).as_deref(), Some("v"));
         assert_eq!(rotating.open("p", "N", &sealed_new).as_deref(), Some("v"));
         assert_eq!(
-            rotating.reseal("p", "N", &sealed_new, [3; NONCE_BYTES]),
+            rotating.reseal("p", "N", &sealed_new, fresh_nonce()),
             Resealed::Current
         );
-        let Resealed::Again(again) = rotating.reseal("p", "N", &sealed_old, [3; NONCE_BYTES])
-        else {
+        let Resealed::Again(again) = rotating.reseal("p", "N", &sealed_old, fresh_nonce()) else {
             panic!("expected a reseal");
         };
         assert_eq!(
@@ -263,12 +273,12 @@ mod tests {
             "now under the new key"
         );
         assert_eq!(
-            rotating.reseal("q", "N", &sealed_old, [3; NONCE_BYTES]),
+            rotating.reseal("q", "N", &sealed_old, fresh_nonce()),
             Resealed::Unreadable
         );
         assert_eq!(
             new()
-                .open("p", "N", &rotating.seal("p", "N", "w", [4; NONCE_BYTES]))
+                .open("p", "N", &rotating.seal("p", "N", "w", fresh_nonce()))
                 .as_deref(),
             Some("w"),
             "seals under the new key"
@@ -278,7 +288,7 @@ mod tests {
         assert_eq!(settled.rotation(), None);
         assert_eq!(settled.open("p", "N", &sealed_old), None, "old key dropped");
         assert_eq!(
-            settled.reseal("p", "N", &sealed_old, [3; NONCE_BYTES]),
+            settled.reseal("p", "N", &sealed_old, fresh_nonce()),
             Resealed::Unreadable
         );
     }
