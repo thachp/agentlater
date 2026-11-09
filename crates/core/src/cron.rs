@@ -212,11 +212,10 @@ impl Report {
 }
 
 /// How a cron's runs have been going.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Health {
     /// No run has finished yet.
-    #[default]
     Pending,
     /// The last run that finished succeeded.
     Healthy,
@@ -229,7 +228,24 @@ pub enum Health {
 pub struct HealthChange {
     pub health: Health,
     /// The alert to send, if the cron just turned failing or recovered.
-    pub alert: Option<&'static str>,
+    pub alert: Option<HealthAlert>,
+}
+
+/// A change in health worth telling the cron's alert URL about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HealthAlert {
+    Failing,
+    Recovered,
+}
+
+impl HealthAlert {
+    /// The `event` field of the alert.
+    pub fn event(self) -> &'static str {
+        match self {
+            Self::Failing => "cron.failing",
+            Self::Recovered => "cron.recovered",
+        }
+    }
 }
 
 impl Health {
@@ -240,10 +256,10 @@ impl Health {
             return None;
         }
         let (health, alert) = match (succeeded, self) {
-            (true, Health::Failing) => (Health::Healthy, Some("cron.recovered")),
+            (true, Health::Failing) => (Health::Healthy, Some(HealthAlert::Recovered)),
             (true, _) => (Health::Healthy, None),
             (false, Health::Failing) => (Health::Failing, None),
-            (false, _) => (Health::Failing, Some("cron.failing")),
+            (false, _) => (Health::Failing, Some(HealthAlert::Failing)),
         };
         Some(HealthChange { health, alert })
     }
@@ -386,14 +402,14 @@ mod tests {
         let fail = Health::Pending.after(None, 10, false).unwrap();
         assert_eq!(
             (fail.health, fail.alert),
-            (Health::Failing, Some("cron.failing"))
+            (Health::Failing, Some(HealthAlert::Failing))
         );
         let again = Health::Failing.after(Some(10), 20, false).unwrap();
         assert_eq!((again.health, again.alert), (Health::Failing, None));
         let back = Health::Failing.after(Some(20), 30, true).unwrap();
         assert_eq!(
             (back.health, back.alert),
-            (Health::Healthy, Some("cron.recovered"))
+            (Health::Healthy, Some(HealthAlert::Recovered))
         );
         let fine = Health::Pending.after(None, 10, true).unwrap();
         assert_eq!((fine.health, fine.alert), (Health::Healthy, None));
@@ -402,7 +418,12 @@ mod tests {
     #[test]
     fn older_news_does_not_change_health() {
         assert_eq!(Health::Failing.after(Some(20), 10, true), None);
-        assert!(Health::Healthy.after(Some(20), 20, false).is_some());
+        // News for the same slot still counts.
+        let same = Health::Healthy.after(Some(20), 20, false).unwrap();
+        assert_eq!(
+            (same.health, same.alert),
+            (Health::Failing, Some(HealthAlert::Failing))
+        );
     }
 
     fn next(s: &str, after: i64) -> i64 {

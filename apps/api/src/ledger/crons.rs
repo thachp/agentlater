@@ -3,6 +3,7 @@
 //! stopped by expiry; it never reads the table itself.
 
 use super::*;
+use runlater_core::HealthAlert;
 
 /// Header values and the body are never echoed back, as for tasks.
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -70,6 +71,15 @@ const CRON_COLUMNS: &str = "name, schedule, method, url, headers, body, max_atte
     last_success_ms, failing_since_ms, health_run_at_ms, created_ms, updated_ms";
 
 impl CronRow {
+    /// Stored as text; anything unexpected reads as pending, as it always has.
+    fn health(&self) -> Health {
+        match self.health.as_str() {
+            "healthy" => Health::Healthy,
+            "failing" => Health::Failing,
+            _ => Health::Pending,
+        }
+    }
+
     fn headers(&self) -> Result<Vec<(String, String)>, DbError> {
         serde_json::from_str(&self.headers).map_err(|e| DbError(e.to_string()))
     }
@@ -88,7 +98,7 @@ impl CronRow {
             report: parse(&self.report)?,
             capture: self.capture != 0,
             next_run_ms: self.next_run_ms,
-            health: parse(&self.health)?,
+            health: self.health(),
             health_reason: self.health_reason.clone(),
             last_run_task_id: self.last_run_task_id.clone(),
             last_run_ms: self.last_run_ms,
@@ -223,7 +233,7 @@ impl<D: Db> Ledger<'_, D> {
                     "UPDATE crons SET next_run_ms = NULL, updated_ms = ? WHERE name = ?",
                     vec![now.into(), cron.name.as_str().into()],
                 )?;
-                self.cron_failing(&cron.name, "trial_expired", None, now, now)?;
+                self.health_news(cron, Some("trial_expired"), None, now, now)?;
                 continue;
             }
             let schedule = Schedule::parse(&cron.schedule).map_err(|e| DbError(e.to_string()))?;
@@ -240,7 +250,7 @@ impl<D: Db> Ledger<'_, D> {
                 if e.status >= 500 {
                     return Err(DbError(e.message));
                 }
-                self.cron_failing(&cron.name, e.code, None, slot, now)?;
+                self.health_news(cron, Some(e.code), None, slot, now)?;
                 continue;
             }
             let id = derived_id(&format!("cron/{}/{slot}", cron.name));
@@ -301,21 +311,6 @@ impl<D: Db> Ledger<'_, D> {
         }
     }
 
-    /// Marks the cron failing because of the run (or missed run) for slot `at`.
-    fn cron_failing(
-        &self,
-        name: &str,
-        reason: &str,
-        task_id: Option<&str>,
-        at: i64,
-        now: i64,
-    ) -> Result<(), DbError> {
-        let Some(cron) = self.cron_row(name)? else {
-            return Ok(());
-        };
-        self.health_news(&cron, Some(reason), task_id, at, now)
-    }
-
     /// Records news about the run for `slot`: it succeeded (`failure` None) or failed for
     /// that reason. Alerts once when the cron turns failing and once when it recovers.
     fn health_news(
@@ -326,13 +321,15 @@ impl<D: Db> Ledger<'_, D> {
         slot: i64,
         now: i64,
     ) -> Result<(), DbError> {
-        let health: Health = parse(&cron.health)?;
-        let Some(change) = health.after(cron.health_run_at_ms, slot, failure.is_none()) else {
+        let Some(change) = cron
+            .health()
+            .after(cron.health_run_at_ms, slot, failure.is_none())
+        else {
             return Ok(());
         };
         let name = cron.name.as_str();
-        match failure {
-            None => self.db.exec(
+        match (failure, change.alert) {
+            (None, _) => self.db.exec(
                 "UPDATE crons SET health = ?, health_reason = NULL, failing_since_ms = NULL, \
                  last_success_ms = ?, health_run_at_ms = ?, updated_ms = ? WHERE name = ?",
                 vec![
@@ -343,7 +340,7 @@ impl<D: Db> Ledger<'_, D> {
                     name.into(),
                 ],
             )?,
-            Some(reason) if change.alert.is_some() => self.db.exec(
+            (Some(reason), Some(HealthAlert::Failing)) => self.db.exec(
                 "UPDATE crons SET health = ?, health_reason = ?, failing_since_ms = ?, \
                  health_run_at_ms = ?, updated_ms = ? WHERE name = ?",
                 vec![
@@ -355,14 +352,15 @@ impl<D: Db> Ledger<'_, D> {
                     name.into(),
                 ],
             )?,
-            Some(reason) => self.db.exec(
+            (Some(reason), _) => self.db.exec(
                 "UPDATE crons SET health_reason = ?, health_run_at_ms = ?, updated_ms = ? \
                  WHERE name = ?",
                 vec![reason.into(), slot.into(), now.into(), name.into()],
             )?,
         }
         match change.alert {
-            Some(event) => self.queue_alert(name, event, failure, task_id, now),
+            // queue_alert reads the cron again, so the alert shows the health just set.
+            Some(alert) => self.queue_alert(name, alert.event(), failure, task_id, now),
             None => Ok(()),
         }
     }
