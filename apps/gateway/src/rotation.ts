@@ -84,7 +84,8 @@ export async function sweep(
       if (!sameKeys(r)) {
         // Keys changed mid-pass: start over from the first project next run.
         if (state.cursor !== "") return (state = restart(r));
-        state = { ...state, rotation: r.rotation, slot: r.slot };
+        // At the start of a pass: carry on, but nothing found under the old keys counts toward these.
+        state = restart(r);
       }
       state = {
         ...state,

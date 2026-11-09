@@ -73,6 +73,8 @@ jobs:
           # not quietly stay.
           if [ -z "$SECRETS_KEY_PREVIOUS" ]; then
             names="$(npx wrangler secret list --env "$DEPLOY_ENV" --format json)"
+            jq --exit-status 'type == "array"' <<<"$names" > /dev/null \
+              || { echo "::error::wrangler secret list didn't return a list; SECRETS_KEY_PREVIOUS may still be set"; exit 1; }
             if jq --exit-status 'any(.[]; .name == "SECRETS_KEY_PREVIOUS")' <<<"$names" > /dev/null; then
               npx wrangler secret delete SECRETS_KEY_PREVIOUS --env "$DEPLOY_ENV"
             fi

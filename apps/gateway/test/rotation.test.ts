@@ -87,6 +87,13 @@ describe("SECRETS_KEY reseal sweep", () => {
     expect(await sweep(store, fake.reseal, 2, NOW)).toEqual(started("r3", "1"));
   });
 
+  it("counts a new rotation from 0, even when the keys change between passes", async () => {
+    // r1's first pass resealed 3 and went round again; then an undo was deployed.
+    const fake = api("r2", { p1: 1 });
+    const store = memoryStore(["p1", "p2"], { ...started("r1"), total: 3 });
+    expect(await sweep(store, fake.reseal, 5, NOW)).toEqual({ ...started("r2"), total: 1 });
+  });
+
   it("checks the end of a pass against the keys deployed now, even on an empty last page", async () => {
     // The last run ended exactly on a full page; the keys changed before the next one.
     const fake = api("r2");

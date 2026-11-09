@@ -28,7 +28,7 @@ if (!["staging", "production"].includes(env ?? "") || !step || !args.includes("-
   process.exit(2);
 }
 if (step === "finish" && !process.env.CLOUDFLARE_ACCOUNT_ID) {
-  console.error("finish reads the gateway's D1: set CLOUDFLARE_ACCOUNT_ID to the Cloudflare account the Workers run in");
+  console.error("finish reads the gateway's D1: set CLOUDFLARE_ACCOUNT_ID to the Cloudflare account the Workers run in (npx wrangler whoami lists them)");
   process.exit(2);
 }
 
@@ -73,7 +73,9 @@ if (step === "start") {
   const row = JSON.parse(out)[0]?.results?.[0];
   if (!row || row.rotation === null || row.completed_at === null) fail("the sweep hasn't completed a pass yet");
   // The slot stands in for the keys: the fingerprint can't be checked here, since the keys can't be
-  // read back, and a slot only gets a new key from `start`, which also moves SECRETS_KEY_SLOT to it.
+  // read back. That holds while keys change only through this script and deploys only through CI:
+  // `start` is the only step that puts a new key in a slot, and it moves SECRETS_KEY_SLOT to it.
+  // Setting a slot's secret by hand, or deploying from a laptop, changes keys this can't see.
   if (row.slot !== String(current)) fail(`the sweep last saw slot ${row.slot}, not ${current}: deploy, then wait for a new pass`);
   if (row.checked_at <= changedAt) fail("the sweep hasn't checked the keys since the last change; deploy, then wait an hour");
   if (Date.now() - row.completed_at < HOUR) fail("the pass completed less than an hour ago; wait for attempts in flight");

@@ -258,9 +258,10 @@ environment, `staging` first:
    ```
 
    `completed_at` set, with `slot` the current slot, means done. `resealed_total` is how many values the
-   rotation moved to the new key. `unreadable` counts values no key opens (already broken before the
-   rotation); keeping the old key doesn't help them. Wrangler needs `CLOUDFLARE_ACCOUNT_ID` whenever your
-   login reaches more than one account; it's the `CLOUDFLARE_ACCOUNT_ID` the deploy uses.
+   rotation resealed under the current key (after an `undo`, that's the old one again). `unreadable` counts values no key opens (already broken before the
+   rotation); keeping the old key doesn't help them. Set `CLOUDFLARE_ACCOUNT_ID` to the account the Workers
+   run in (`npx wrangler whoami` lists your accounts and their ids): wrangler won't choose one when
+   your login reaches several, and `finish` always requires it.
 3. **Wait an hour more**, for attempts claimed with old ciphertext to finish.
 4. **Finish.** `CLOUDFLARE_ACCOUNT_ID=<account id> node scripts/rotate-secrets-key.mjs --env production finish` (needs wrangler logged in)
    sets `SECRETS_KEY_ROTATING=false` and deletes the old slot. It refuses unless that row shows a pass
