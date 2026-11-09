@@ -571,7 +571,6 @@ impl<D: Db> Ledger<'_, D> {
                 ],
             )?;
         }
-        let seq = self.next_inbox_seq()?;
         let event = serde_json::json!({
             "event": "hook.received",
             "hook": hook.name,
@@ -585,12 +584,11 @@ impl<D: Db> Ledger<'_, D> {
                 "truncated": r.truncated,
             },
         });
-        self.add_to_inbox(seq, &event, now)?;
         self.db.exec(
             "UPDATE hooks SET received = received + 1, last_received_ms = ? WHERE name = ?",
             vec![now.into(), hook.name.as_str().into()],
         )?;
-        self.wake_soon(now)?;
+        let seq = self.post(now, |_| Ok(event))?;
         Ok(HookOutcome::Accepted(seq))
     }
 }
@@ -953,8 +951,7 @@ mod tests {
         verified_hook(&l, "h", TOKEN);
         let fill = |event: &str, n: i64| {
             for _ in 0..n {
-                let seq = l.next_inbox_seq().unwrap();
-                l.add_to_inbox(seq, &serde_json::json!({ "event": event }), T0)
+                l.post(T0, |_| Ok(serde_json::json!({ "event": event })))
                     .unwrap();
             }
         };

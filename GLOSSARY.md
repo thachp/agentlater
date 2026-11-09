@@ -41,3 +41,16 @@ The POST that tells an agent its inbox has unread events.
 
 **Reporting**:
 Where a finished task's result goes (a callback URL, the inbox, or nowhere) and whether it carries the captured response. Separate from the task kind: many kinds can report.
+
+## Inbox
+
+**Inbox**:
+Where events for the agent wait until it reads and acks them. Every project has one.
+_Avoid_: queue, mailbox
+
+**Event**:
+One entry in the inbox: a task's report, a cron's alert, a hook's request, or a notice that the wake turned off. Numbered in the order it arrived.
+_Avoid_: message, notification
+
+**Ack**:
+Marking every event up to a number as read. It only moves forward.
