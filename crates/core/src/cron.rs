@@ -211,6 +211,60 @@ impl Report {
     }
 }
 
+/// How a cron's runs have been going.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Health {
+    /// No run has finished yet.
+    Pending,
+    /// The last run that finished succeeded.
+    Healthy,
+    /// A run failed, or one could not be started.
+    Failing,
+}
+
+/// What news about one slot does to a cron's health.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HealthChange {
+    pub health: Health,
+    /// The alert to send, if the cron just turned failing or recovered.
+    pub alert: Option<HealthAlert>,
+}
+
+/// A change in health worth telling the cron's alert URL about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HealthAlert {
+    Failing,
+    Recovered,
+}
+
+impl HealthAlert {
+    /// The `event` field of the alert.
+    pub fn event(self) -> &'static str {
+        match self {
+            Self::Failing => "cron.failing",
+            Self::Recovered => "cron.recovered",
+        }
+    }
+}
+
+impl Health {
+    /// The health after news that the run for `slot` succeeded or failed (or could not start),
+    /// given the slot whose news last set it. Older news changes nothing (`None`).
+    pub fn after(self, set_by: Option<i64>, slot: i64, succeeded: bool) -> Option<HealthChange> {
+        if set_by.is_some_and(|t| t > slot) {
+            return None;
+        }
+        let (health, alert) = match (succeeded, self) {
+            (true, Health::Failing) => (Health::Healthy, Some(HealthAlert::Recovered)),
+            (true, _) => (Health::Healthy, None),
+            (false, Health::Failing) => (Health::Failing, None),
+            (false, _) => (Health::Failing, Some(HealthAlert::Failing)),
+        };
+        Some(HealthChange { health, alert })
+    }
+}
+
 /// A validated cron, ready to store.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CronSpec {
@@ -342,6 +396,35 @@ mod tests {
 
     /// 2026-01-01T00:00:00Z, a Thursday.
     const T0: i64 = 1_767_225_600_000;
+
+    #[test]
+    fn health_turns_failing_and_recovers_with_one_alert_each() {
+        let fail = Health::Pending.after(None, 10, false).unwrap();
+        assert_eq!(
+            (fail.health, fail.alert),
+            (Health::Failing, Some(HealthAlert::Failing))
+        );
+        let again = Health::Failing.after(Some(10), 20, false).unwrap();
+        assert_eq!((again.health, again.alert), (Health::Failing, None));
+        let back = Health::Failing.after(Some(20), 30, true).unwrap();
+        assert_eq!(
+            (back.health, back.alert),
+            (Health::Healthy, Some(HealthAlert::Recovered))
+        );
+        let fine = Health::Pending.after(None, 10, true).unwrap();
+        assert_eq!((fine.health, fine.alert), (Health::Healthy, None));
+    }
+
+    #[test]
+    fn older_news_does_not_change_health() {
+        assert_eq!(Health::Failing.after(Some(20), 10, true), None);
+        // News for the same slot still counts.
+        let same = Health::Healthy.after(Some(20), 20, false).unwrap();
+        assert_eq!(
+            (same.health, same.alert),
+            (Health::Failing, Some(HealthAlert::Failing))
+        );
+    }
 
     fn next(s: &str, after: i64) -> i64 {
         Schedule::parse(s).unwrap().next_after(after).unwrap()

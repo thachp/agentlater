@@ -15,7 +15,8 @@ mod wake;
 mod watch;
 
 pub use cron::{
-    valid_cron_name, CronError, CronRequest, CronRequestError, CronSpec, Report, Schedule,
+    valid_cron_name, CronError, CronRequest, CronRequestError, CronSpec, Health, HealthAlert,
+    HealthChange, Report, Schedule,
 };
 pub use hook::{
     accepts, check_keep, cut, delivery_id, kept_headers, verify, AcceptRule, HookError, HookPatch,
