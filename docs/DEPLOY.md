@@ -204,8 +204,12 @@ on 2026-10-28/29; everything after was scanners. The `harimu-*` Workers in the s
   receiver. Each run leaves one agent, two trial projects (Agent Auth and hosted MCP) and one OAuth
   client and grant in production.
 
-A failed run is the alert: GitHub emails whoever last changed the workflow. GitHub pauses scheduled
-workflows after 60 days without repository activity; re-enable it under Actions if that happens.
+A failed scheduled check opens a `Monitor: <check> is failing` issue (label `monitor`), which notifies
+everyone watching the repository, GitHub mobile included. The next run of that check that passes
+closes it; runs in between add nothing, so an outage is one notification per check. Manual runs
+don't open issues. Each scheduled run also re-enables the workflow, so GitHub's 60-day pause for
+inactive repositories never stops it. If the monitor itself can't run (GitHub Actions down), nothing
+alerts: that is the gap left.
 
 The API, gateway and web Workers have Workers Logs on (`observability` in each `wrangler.jsonc`), so
 request logs and exceptions are searchable in the Cloudflare dashboard.

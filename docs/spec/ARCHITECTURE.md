@@ -227,7 +227,7 @@ One `wrangler.jsonc` per app with `env.staging` and `env.production` (the receiv
 
 - **`ci.yml`** on every PR and on `main`: `cargo fmt`, `clippy` (native and wasm), `cargo test`; `typecheck`, `test`; then `wrangler deploy --dry-run` per Worker and both e2e suites.
 - **`deploy.yml`** after CI passes on `main`, if `DEPLOY_ENABLED`: staging, then production behind the environment's required reviewer. Order within an environment: API, D1 migrations, gateway, web, receiver (staging only), health check, journey (staging only). A failed journey stops production.
-- **`monitor.yml`**: health, the main, pay and legal pages, and billing configuration every 15 minutes, the journey against production daily. A failed run emails whoever last changed the workflow, and that is the only alert. Workers Logs are on for the API, gateway and web Workers.
+- **`monitor.yml`**: health, the main, pay and legal pages, and billing configuration every 15 minutes, the journey against production daily. A failed scheduled check opens a `Monitor: <check> is failing` issue for the repository's watchers, and the next passing run of that check closes it; each run also re-enables the workflow so GitHub's 60-day inactivity pause can't stop it. Workers Logs are on for the API, gateway and web Workers.
 - **Numbers**: the API writes a row to Workers Analytics Engine for each attempt (project id, real or probe, lateness) and each new payment, with no URLs or contents. `scripts/stats.mjs` reports them; the data lasts about three months.
 
 ## Risks
@@ -235,7 +235,7 @@ One `wrangler.jsonc` per app with `env.staging` and `env.production` (the receiv
 | Risk | Notes |
 | --- | --- |
 | Agent Auth maturity | Server packages are at 0.6.x and the bridge at 0.5.1, and the protocol may change. Hosted MCP doesn't depend on it, and it is kept to `src/auth.ts`, `store.ts` and the routes in `index.ts`. |
-| Thin alerting | One GitHub email, from a workflow GitHub pauses after 60 days without repository activity. |
+| Thin alerting | One GitHub issue per failing check, from one workflow. Nothing alerts if GitHub Actions itself can't run it. |
 | `AuthStore` is a single Durable Object | Every Agent Auth call goes through it for replay checks, so it is a throughput ceiling and a shared point of failure for that path. Hosted MCP doesn't use it. Fine at today's traffic; untested at scale. |
 | `SECRETS_KEY` is never rotated | One per environment. Losing it loses every sealed secret and hook verify secret; leaking it exposes them if the ledgers leak too. |
 | Concentration in `ledger.rs` | About 5,300 lines including tests, and every feature passes through it. Hooks, the inbox and wake, crons, watches, task kinds and the attempt budget have their own modules; what is left is the task lifecycle itself. |
