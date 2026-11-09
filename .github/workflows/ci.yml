@@ -44,7 +44,21 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-      - run: cargo install worker-build --version 0.8.7 --locked
+      # worker-build, and the wasm-bindgen, wasm-opt and esbuild it downloads from GitHub releases on
+      # first use, are cached so an outage there doesn't fail the build. The tools' versions follow
+      # Cargo.lock; an older cache still holds the ones that didn't change.
+      - id: worker-build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/worker-build
+          key: worker-build-0.8.7-${{ runner.os }}-${{ runner.arch }}
+      - if: steps.worker-build.outputs.cache-hit != 'true'
+        run: cargo install worker-build --version 0.8.7 --locked
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/worker-build
+          key: worker-build-tools-0.8.7-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: worker-build-tools-0.8.7-${{ runner.os }}-${{ runner.arch }}-
       - run: npm ci
       - run: npx wrangler deploy --dry-run --outdir dist
         working-directory: apps/api
