@@ -113,12 +113,7 @@ impl<D: Db> Ledger<'_, D> {
     /// wake not yet sent is canceled; if the inbox has unread events, a new one is queued.
     pub fn set_wake(&self, request: WakeRequest, now: i64) -> Result<WakeView, ApiError> {
         self.project_row()?.ok_or_else(no_project)?;
-        let spec = request
-            .validate(now)
-            .map_err(|e: WakeRequestError| ApiError {
-                field: Some(e.field()),
-                ..ApiError::bad_request(e.to_string())
-            })?;
+        let spec = request.validate(now).map_err(ApiError::invalid)?;
         self.check_secrets(&spec.request.headers, spec.request.destination.host())?;
         let headers =
             serde_json::to_string(&spec.request.headers).map_err(|e| DbError(e.to_string()))?;
@@ -301,21 +296,16 @@ impl<D: Db> Ledger<'_, D> {
     ) -> Result<InboxPage, ApiError> {
         let project = self.project_row()?.ok_or_else(no_project)?;
         if after.is_some_and(|a| a < 0) {
-            return Err(ApiError {
-                field: Some("after"),
-                ..ApiError::bad_request("after must not be negative")
-            });
+            return Err(ApiError::bad_request("after must not be negative").in_field("after"));
         }
         // Acking up to the last event returned would also ack the unread ones skipped over.
         if ack && after.is_some_and(|a| a > project.inbox_acked_seq) {
-            return Err(ApiError {
-                field: Some("after"),
-                ..ApiError::bad_request(format!(
-                    "with ack, after must not be past the acked cursor ({}); \
-                     read without ack, or call ack_inbox",
-                    project.inbox_acked_seq
-                ))
-            });
+            return Err(ApiError::bad_request(format!(
+                "with ack, after must not be past the acked cursor ({}); \
+                 read without ack, or call ack_inbox",
+                project.inbox_acked_seq
+            ))
+            .in_field("after"));
         }
         let limit = limit.unwrap_or(INBOX_DEFAULT_PAGE).clamp(1, INBOX_MAX_PAGE);
         let rows: Vec<InboxRow> = self.db.query(
@@ -349,23 +339,18 @@ impl<D: Db> Ledger<'_, D> {
     pub fn ack_inbox(&self, up_to: i64) -> Result<InboxCursor, ApiError> {
         let project = self.project_row()?.ok_or_else(no_project)?;
         if up_to < 0 {
-            return Err(ApiError {
-                field: Some("up_to"),
-                ..ApiError::bad_request("up_to must not be negative")
-            });
+            return Err(ApiError::bad_request("up_to must not be negative").in_field("up_to"));
         }
         if up_to > project.inbox_last_seq {
-            return Err(ApiError {
-                field: Some("up_to"),
-                ..ApiError::new(
-                    400,
-                    "ack_beyond_inbox",
-                    format!(
-                        "up_to is past the newest event ({}); ack only events you have read",
-                        project.inbox_last_seq
-                    ),
-                )
-            });
+            return Err(ApiError::new(
+                400,
+                "ack_beyond_inbox",
+                format!(
+                    "up_to is past the newest event ({}); ack only events you have read",
+                    project.inbox_last_seq
+                ),
+            )
+            .in_field("up_to"));
         }
         Ok(self.move_cursor(&project, up_to)?)
     }

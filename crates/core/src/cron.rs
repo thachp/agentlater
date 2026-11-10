@@ -6,7 +6,9 @@
 //! day field starting with `*` (like `*/2`) makes both fields apply together instead.
 
 use crate::limits::{DAY_MS, MAX_LANE_BYTES, MINUTE_MS, MIN_CRON_INTERVAL_MS};
-use crate::request::{valid_lane, Callback, Method, ScheduleRequest, TaskSpec, ValidationError};
+use crate::request::{
+    valid_lane, Callback, FieldError, Method, ScheduleRequest, TaskSpec, ValidationError,
+};
 use runlater_egress::DestinationError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -289,8 +291,8 @@ pub enum CronRequestError {
     Request(ValidationError),
 }
 
-impl CronRequestError {
-    pub fn field(&self) -> &'static str {
+impl FieldError for CronRequestError {
+    fn field(&self) -> &'static str {
         match self {
             Self::Name => "name",
             Self::Schedule(_) | Self::TooFrequent | Self::Never => "schedule",

@@ -409,10 +409,7 @@ impl TaskLedger {
             Route::DeleteWake => ledger.delete_wake(t).map(|v| json(&v, 200)),
             Route::PutSecret => match body::<SecretRequest>(req).await {
                 Ok(r) => match r.validate() {
-                    Err(e) => Err(ApiError {
-                        field: Some(e.field()),
-                        ..ApiError::bad_request(e.to_string())
-                    }),
+                    Err(e) => Err(ApiError::invalid(e)),
                     Ok(spec) => ledger.put_secret(&spec, t).map(|(v, c)| created(&v, c)),
                 },
                 Err(e) => Err(e),
@@ -420,10 +417,7 @@ impl TaskLedger {
             Route::ListSecrets => ledger.secrets().map(|s| json(&s, 200)),
             Route::PutHook => match body::<HookRequest>(req).await {
                 Ok(r) => match r.validate() {
-                    Err(e) => Err(ApiError {
-                        field: Some(e.field()),
-                        ..ApiError::bad_request(e.to_string())
-                    }),
+                    Err(e) => Err(ApiError::invalid(e)),
                     Ok(spec) => {
                         let token = format!("hk_{}", hex::encode(random_bytes(32)?));
                         ledger
@@ -447,10 +441,7 @@ impl TaskLedger {
             Route::DeleteHook(name) => ledger.delete_hook(name).map(|v| json(&v, 200)),
             Route::UpdateHook(name) => match body::<HookUpdate>(req).await {
                 Ok(u) => match u.validate() {
-                    Err(e) => Err(ApiError {
-                        field: Some(e.field()),
-                        ..ApiError::bad_request(e.to_string())
-                    }),
+                    Err(e) => Err(ApiError::invalid(e)),
                     Ok(patch) => ledger.update_hook(name, patch).map(|v| json(&v, 200)),
                 },
                 Err(e) => Err(e),

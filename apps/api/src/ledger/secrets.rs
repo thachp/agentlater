@@ -312,10 +312,7 @@ impl<D: Db> Ledger<'_, D> {
         headers: &[(String, String)],
         host: &str,
     ) -> Result<(), ApiError> {
-        let in_headers = |e: ApiError| ApiError {
-            field: Some("headers"),
-            ..e
-        };
+        let in_headers = |e: ApiError| e.in_field("headers");
         let names =
             header_references(headers).map_err(|e| in_headers(ApiError::bad_request(e.0)))?;
         let Err(refused) = self.secrets_for(headers, names, host)? else {
@@ -329,17 +326,15 @@ impl<D: Db> Ledger<'_, D> {
                     "headers refer to {{{{secret:{name}}}}}, but this project has no secret {name}"
                 ),
             )),
-            Refused::Host { name, allows } => ApiError {
-                field: Some("url"),
-                ..ApiError::new(
-                    400,
-                    "secret_host_not_allowed",
-                    format!(
-                        "secret {name} may not be sent to {host}; it allows {}",
-                        allows.join(", ")
-                    ),
-                )
-            },
+            Refused::Host { name, allows } => ApiError::new(
+                400,
+                "secret_host_not_allowed",
+                format!(
+                    "secret {name} may not be sent to {host}; it allows {}",
+                    allows.join(", ")
+                ),
+            )
+            .in_field("url"),
             Refused::TooLarge => in_headers(ApiError::bad_request(format!(
                 "headers exceed {MAX_HEADER_BYTES} bytes once their secrets are filled in"
             ))),

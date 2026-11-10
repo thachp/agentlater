@@ -16,9 +16,8 @@ use runlater_core::limits::{
 };
 use runlater_core::{
     fill, header_references, host_allowed, judge, next_poll, valid_lane, Attempt, CancelError,
-    ClaimError, CronRequest, CronRequestError, Method, Outcome, Poll, PollBody, RedriveError,
-    Report, Schedule, ScheduleRequest, Status, Task, Until, ValidationError, WakeRequest,
-    WakeRequestError, Watch, WatchRequest, WatchRequestError, INBOX,
+    ClaimError, CronRequest, FieldError, Method, Outcome, Poll, PollBody, RedriveError, Report,
+    Schedule, ScheduleRequest, Status, Task, Until, WakeRequest, Watch, WatchRequest, INBOX,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -285,24 +284,16 @@ impl ApiError {
         }
     }
 
-    pub fn invalid_cron(e: CronRequestError) -> Self {
-        Self {
-            field: Some(e.field()),
-            ..Self::new(400, "invalid_request", e.to_string())
-        }
+    /// A request that failed validation, naming the field at fault.
+    pub fn invalid(e: impl FieldError) -> Self {
+        Self::bad_request(e.to_string()).in_field(e.field())
     }
 
-    pub fn invalid_watch(e: WatchRequestError) -> Self {
+    /// The same error, naming the request field at fault.
+    pub fn in_field(self, field: &'static str) -> Self {
         Self {
-            field: Some(e.field()),
-            ..Self::new(400, "invalid_request", e.to_string())
-        }
-    }
-
-    pub fn invalid(e: ValidationError) -> Self {
-        Self {
-            field: Some(e.field()),
-            ..Self::new(400, "invalid_request", e.to_string())
+            field: Some(field),
+            ..self
         }
     }
 
@@ -818,16 +809,16 @@ impl<'a, D: Db> Ledger<'a, D> {
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'_')
         {
-            return Err(ApiError {
-                field: Some("payment_id"),
-                ..ApiError::bad_request("payment_id is not a valid payment id")
-            });
+            return Err(
+                ApiError::bad_request("payment_id is not a valid payment id")
+                    .in_field("payment_id"),
+            );
         }
         if !(1..=MAX_CREDIT_ATTEMPTS).contains(&attempts) {
-            return Err(ApiError {
-                field: Some("attempts"),
-                ..ApiError::bad_request(format!("attempts must be 1-{MAX_CREDIT_ATTEMPTS}"))
-            });
+            return Err(
+                ApiError::bad_request(format!("attempts must be 1-{MAX_CREDIT_ATTEMPTS}"))
+                    .in_field("attempts"),
+            );
         }
         let project = self.project_row()?.ok_or_else(no_project)?;
         let applied: Vec<Counts> = self.db.query(
@@ -883,10 +874,10 @@ impl<'a, D: Db> Ledger<'a, D> {
         let reports_to = spec.callback.as_ref().map(|c| c.as_str());
         self.admit(&project, Cost::task(reports_to), now)?;
         if spec.run_at_ms >= project.expires_ms {
-            return Err(ApiError {
-                field: Some(when_field),
-                ..ApiError::bad_request(format!("{when_field} is after this project's trial ends"))
-            });
+            return Err(ApiError::bad_request(format!(
+                "{when_field} is after this project's trial ends"
+            ))
+            .in_field(when_field));
         }
 
         self.insert(
