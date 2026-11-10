@@ -126,14 +126,11 @@ impl<D: Db> Ledger<'_, D> {
         now: i64,
     ) -> Result<(TaskView, bool), ApiError> {
         let project = self.project_row()?.ok_or_else(no_project)?;
-        let spec = request.validate(now).map_err(ApiError::invalid_watch)?;
+        let spec = request.validate(now).map_err(ApiError::invalid)?;
         self.check_secrets(&spec.request.headers, spec.request.destination.host())?;
         if let Some(action) = &spec.on_match {
             self.check_secrets(&action.headers, action.destination.host())
-                .map_err(|e| ApiError {
-                    field: Some("on_match"),
-                    ..e
-                })?;
+                .map_err(|e| e.in_field("on_match"))?;
         }
         let request = spec.request;
         if let Some(existing) =
@@ -142,10 +139,10 @@ impl<D: Db> Ledger<'_, D> {
             return Ok((existing, false));
         }
         if spec.watch.deadline_ms >= project.expires_ms {
-            return Err(ApiError {
-                field: Some("deadline"),
-                ..ApiError::bad_request("deadline is after this project's trial ends")
-            });
+            return Err(
+                ApiError::bad_request("deadline is after this project's trial ends")
+                    .in_field("deadline"),
+            );
         }
         // The action, and its callback, are reserved now: a watch that matches always gets to
         // send it, and one that can't afford it is refused here rather than hours later.

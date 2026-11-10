@@ -5,6 +5,7 @@
 //! This module checks what callers send, matches hosts, and finds and fills references.
 
 use crate::limits::{MAX_ALLOWED_HOSTS, MAX_SECRET_BYTES, MAX_SECRET_NAME_BYTES, MIN_SECRET_BYTES};
+use crate::request::FieldError;
 use runlater_egress::Destination;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -60,8 +61,8 @@ pub enum SecretError {
     Host(String),
 }
 
-impl SecretError {
-    pub fn field(&self) -> &'static str {
+impl FieldError for SecretError {
+    fn field(&self) -> &'static str {
         match self {
             Self::Name => "name",
             Self::Value | Self::ValueTooShort | Self::ValueTooLarge => "value",

@@ -9,6 +9,7 @@ use crate::cron::valid_cron_name;
 use crate::limits::{
     HOOK_SIGNATURE_TOLERANCE_MS, MAX_HOOK_SECRET_BYTES, MAX_KEEP_HEADERS, MIN_HOOK_SECRET_BYTES,
 };
+use crate::request::FieldError;
 use crate::watch::Until;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
@@ -239,8 +240,8 @@ pub enum HookError {
     Accept(String),
 }
 
-impl HookError {
-    pub fn field(&self) -> &'static str {
+impl FieldError for HookError {
+    fn field(&self) -> &'static str {
         match self {
             Self::Name => "name",
             Self::SecretLength

@@ -5,7 +5,7 @@
 //! finished tasks starts the agent once.
 
 use crate::limits::{DEFAULT_WAKE_DEBOUNCE, MAX_WAKE_DEBOUNCE_MS, MINUTE_MS, MIN_WAKE_DEBOUNCE_MS};
-use crate::request::{parse_delay, Method, ScheduleRequest, TaskSpec, ValidationError};
+use crate::request::{parse_delay, FieldError, Method, ScheduleRequest, TaskSpec, ValidationError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -39,8 +39,8 @@ pub enum WakeRequestError {
     Request(ValidationError),
 }
 
-impl WakeRequestError {
-    pub fn field(&self) -> &'static str {
+impl FieldError for WakeRequestError {
+    fn field(&self) -> &'static str {
         match self {
             Self::Debounce | Self::DebounceRange => "debounce",
             Self::Request(e) => e.field(),

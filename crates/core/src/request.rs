@@ -137,9 +137,13 @@ pub enum ValidationError {
     SecretOutsideHeaders(&'static str),
 }
 
-impl ValidationError {
-    /// The request field at fault, for error responses.
-    pub fn field(&self) -> &'static str {
+/// A validation error that names the request field at fault, for error responses.
+pub trait FieldError: fmt::Display {
+    fn field(&self) -> &'static str;
+}
+
+impl FieldError for ValidationError {
+    fn field(&self) -> &'static str {
         match self {
             Self::Destination(_) => "url",
             Self::Header(_) | Self::DuplicateHeader(_) | Self::TooManyHeaders => "headers",

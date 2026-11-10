@@ -136,7 +136,7 @@ impl<D: Db> Ledger<'_, D> {
                 "this project's attempts have expired",
             ));
         }
-        let spec = request.validate(now).map_err(ApiError::invalid_cron)?;
+        let spec = request.validate(now).map_err(ApiError::invalid)?;
         self.check_secrets(&spec.request.headers, spec.request.destination.host())?;
         let existing = self.cron_row(&spec.name)?;
         if existing.is_none() {

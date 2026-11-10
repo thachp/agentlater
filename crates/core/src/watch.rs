@@ -8,7 +8,9 @@
 use crate::limits::{
     MAX_POLL_ERRORS, MAX_SCHEDULE_AHEAD_MS, MAX_WATCH_INTERVAL_MS, MINUTE_MS, MIN_WATCH_INTERVAL_MS,
 };
-use crate::request::{parse_delay, Callback, Method, ScheduleRequest, TaskSpec, ValidationError};
+use crate::request::{
+    parse_delay, Callback, FieldError, Method, ScheduleRequest, TaskSpec, ValidationError,
+};
 use crate::retry::{classify, Outcome, Verdict};
 use runlater_egress::Destination;
 use serde::{Deserialize, Serialize};
@@ -115,8 +117,8 @@ pub enum WatchRequestError {
     OnMatch(ValidationError),
 }
 
-impl WatchRequestError {
-    pub fn field(&self) -> &'static str {
+impl FieldError for WatchRequestError {
+    fn field(&self) -> &'static str {
         match self {
             Self::Every | Self::EveryRange => "every",
             Self::Deadline | Self::DeadlineRange => "deadline",

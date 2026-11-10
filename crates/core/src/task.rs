@@ -15,7 +15,7 @@
 //! - `fence` changes on every claim, so a late result from an earlier attempt is ignored
 //!   by [`Task::finish`].
 
-use crate::limits::{LEASE_MS, RETENTION_MS};
+use crate::limits::LEASE_MS;
 use crate::retry::{backoff_ms, classify, Outcome, Verdict};
 use serde::{Deserialize, Serialize};
 
@@ -241,11 +241,6 @@ impl Task {
         true
     }
 
-    /// When a terminal task may be purged.
-    pub fn purge_after_ms(&self) -> Option<i64> {
-        self.terminal_ms.map(|t| t.saturating_add(RETENTION_MS))
-    }
-
     fn settle(&mut self, outcome: Outcome, now_ms: i64, jitter: f64) {
         self.lease_until_ms = None;
         let verdict = classify(&outcome);
@@ -311,7 +306,6 @@ mod tests {
             Ok(Status::Succeeded)
         );
         assert_eq!(t.terminal_ms, Some(T0 + 50));
-        assert_eq!(t.purge_after_ms(), Some(T0 + 50 + RETENTION_MS));
     }
 
     #[test]

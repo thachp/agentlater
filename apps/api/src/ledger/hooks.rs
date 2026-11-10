@@ -299,10 +299,7 @@ impl<D: Db> Ledger<'_, D> {
             verify.as_ref(),
             patch.keep_headers.unwrap_or(row.keep_headers()?),
         )
-        .map_err(|e| ApiError {
-            field: Some(e.field()),
-            ..ApiError::bad_request(e.to_string())
-        })?;
+        .map_err(ApiError::invalid)?;
         let accept = match patch.accept {
             None => row.accept()?,
             Some(a) => a,

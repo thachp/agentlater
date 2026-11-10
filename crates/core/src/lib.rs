@@ -23,7 +23,7 @@ pub use hook::{
     HookRequest, HookSpec, HookUpdate, Scheme, VerifyError, VerifyRequest, VerifySpec,
 };
 pub use request::{
-    valid_lane, Callback, Method, ScheduleRequest, TaskSpec, ValidationError, INBOX,
+    valid_lane, Callback, FieldError, Method, ScheduleRequest, TaskSpec, ValidationError, INBOX,
 };
 pub use retry::{backoff_ms, classify, Outcome, Verdict};
 pub use secret::{
