@@ -260,8 +260,8 @@ impl<D: Db> Ledger<'_, D> {
         for (select, sealed_as, update) in tables {
             for row in self.db.query::<Sealed>(select, vec![])? {
                 let name = sealed_as(&row.name);
-                let nonce = sealer.fresh_nonce()?;
-                match sealer.keys.reseal(&project.id, &name, &row.sealed, nonce) {
+                let nonce = || sealer.fresh_nonce();
+                match sealer.keys.reseal(&project.id, &name, &row.sealed, nonce)? {
                     Resealed::Current => {}
                     Resealed::Unreadable => count.unreadable += 1,
                     Resealed::Again(again) => {

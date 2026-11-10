@@ -147,25 +147,27 @@ impl Keyring {
             .or_else(|| self.previous.as_ref()?.open(project_id, name, sealed))
     }
 
-    /// Seals again under the current key a value only the previous key opens.
-    pub fn reseal(
+    /// Seals again under the current key a value only the previous key opens. `nonce` is asked
+    /// for only then.
+    pub fn reseal<E>(
         &self,
         project_id: &str,
         name: &str,
         sealed: &str,
-        nonce: [u8; NONCE_BYTES],
-    ) -> Resealed {
+        nonce: impl FnOnce() -> Result<[u8; NONCE_BYTES], E>,
+    ) -> Result<Resealed, E> {
         if self.current.open(project_id, name, sealed).is_some() {
-            return Resealed::Current;
+            return Ok(Resealed::Current);
         }
-        match self
-            .previous
-            .as_ref()
-            .and_then(|p| p.open(project_id, name, sealed))
-        {
-            Some(value) => Resealed::Again(self.current.seal(project_id, name, &value, nonce)),
-            None => Resealed::Unreadable,
-        }
+        let previous = self.previous.as_ref();
+        Ok(
+            match previous.and_then(|p| p.open(project_id, name, sealed)) {
+                Some(value) => {
+                    Resealed::Again(self.current.seal(project_id, name, &value, nonce()?))
+                }
+                None => Resealed::Unreadable,
+            },
+        )
     }
 }
 
@@ -261,11 +263,15 @@ mod tests {
         assert!(!rotation.contains(&KEY[..16]));
         assert_eq!(rotating.open("p", "N", &sealed_old).as_deref(), Some("v"));
         assert_eq!(rotating.open("p", "N", &sealed_new).as_deref(), Some("v"));
+        let never = || Err::<[u8; NONCE_BYTES], _>("asked for a nonce");
         assert_eq!(
-            rotating.reseal("p", "N", &sealed_new, fresh_nonce()),
-            Resealed::Current
+            rotating.reseal("p", "N", &sealed_new, never),
+            Ok(Resealed::Current),
+            "without asking for a nonce"
         );
-        let Resealed::Again(again) = rotating.reseal("p", "N", &sealed_old, fresh_nonce()) else {
+        assert!(rotating.reseal("p", "N", &sealed_old, never).is_err());
+        let fresh = || Ok::<_, &str>(fresh_nonce());
+        let Ok(Resealed::Again(again)) = rotating.reseal("p", "N", &sealed_old, fresh) else {
             panic!("expected a reseal");
         };
         assert_eq!(
@@ -274,8 +280,8 @@ mod tests {
             "now under the new key"
         );
         assert_eq!(
-            rotating.reseal("q", "N", &sealed_old, fresh_nonce()),
-            Resealed::Unreadable
+            rotating.reseal("q", "N", &sealed_old, never),
+            Ok(Resealed::Unreadable)
         );
         assert_eq!(
             new()
@@ -289,8 +295,8 @@ mod tests {
         assert_eq!(settled.rotation(), None);
         assert_eq!(settled.open("p", "N", &sealed_old), None, "old key dropped");
         assert_eq!(
-            settled.reseal("p", "N", &sealed_old, fresh_nonce()),
-            Resealed::Unreadable
+            settled.reseal("p", "N", &sealed_old, never),
+            Ok(Resealed::Unreadable)
         );
     }
 }
