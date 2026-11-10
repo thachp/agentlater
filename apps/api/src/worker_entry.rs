@@ -309,6 +309,11 @@ impl TaskLedger {
         Sql(self.state.storage().sql())
     }
 
+    /// The ledger, with the deployment's keys: the same for a request and for the alarm.
+    fn ledger<'a>(&self, sql: &'a Sql) -> std::result::Result<Ledger<'a, Sql>, DbError> {
+        Ok(Ledger::open(sql)?.with_sealer(sealer(&self.env)))
+    }
+
     /// Points the alarm at the next thing the ledger needs to do.
     async fn arm(&self, ledger: &Ledger<'_, Sql>) -> Result<()> {
         let storage = self.state.storage();
@@ -530,8 +535,8 @@ impl DurableObject for TaskLedger {
 
     async fn fetch(&self, mut req: Request) -> Result<Response> {
         let sql = self.sql();
-        let ledger = match Ledger::open(&sql) {
-            Ok(l) => l.with_sealer(sealer(&self.env)),
+        let ledger = match self.ledger(&sql) {
+            Ok(l) => l,
             Err(e) => return error(e.into()),
         };
         let response = self.route(&mut req, &ledger).await?;
@@ -541,7 +546,9 @@ impl DurableObject for TaskLedger {
 
     async fn alarm(&self) -> Result<Response> {
         let sql = self.sql();
-        let ledger = Ledger::open(&sql).map_err(|e| Error::RustError(e.to_string()))?;
+        let ledger = self
+            .ledger(&sql)
+            .map_err(|e| Error::RustError(e.to_string()))?;
         let tick = ledger
             .tick(now(), jitter)
             .map_err(|e| Error::RustError(e.to_string()))?;
