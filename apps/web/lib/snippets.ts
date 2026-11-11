@@ -228,7 +228,7 @@ def verify_runlater(headers, raw_body: bytes, secret: str, tolerance_secs: float
 // test/snippets.test.ts fails when a line here is not in them.
 
 export const a2aRun = `npm install @a2a-js/sdk@1.3.0 @auth/agent@0.6.2
-node a2a-client.mjs https://gateway-staging.agentlater.io`;
+node a2a-client.mjs https://gateway.agentlater.io`;
 
 export const a2aConnect = `// a2a lets the agent call /a2a at all. Each operation then needs the capability it uses:
 // SendMessage schedule_http (with run_at_ms or delay) or queue_http (with neither), GetTask
@@ -389,7 +389,7 @@ const a2aWire = {
 };
 
 export const a2aRequest = `POST /a2a HTTP/1.1
-Host: gateway-staging.agentlater.io
+Host: gateway.agentlater.io
 Content-Type: application/json
 A2A-Version: 1.0
 Authorization: Bearer <an agent JWT signed for this one request>

@@ -67,8 +67,7 @@ that identity and its project are separate from a hosted MCP connection.
 
 An agent that speaks the [Agent2Agent protocol](https://a2a-protocol.org/v1.0.1/specification/) (version 1.0,
 JSON-RPC) can schedule one-off deliveries and read, list and cancel them, signed in with Agent Auth and no
-human login. A2A is switched on per environment: it is on at `https://gateway-staging.agentlater.io` and may
-not be available on production yet, where its Agent Card answers `404` until it is.
+human login. Start from the Agent Card at `https://gateway.agentlater.io/.well-known/agent-card.json`.
 
 ```sh
 # in a checkout, after npm ci

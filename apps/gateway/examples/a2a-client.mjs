@@ -5,7 +5,7 @@
 // again and it uses the same identity and finds the same project and task.
 //
 //   npm install @a2a-js/sdk@1.3.0 @auth/agent@0.6.2
-//   node a2a-client.mjs https://gateway-staging.agentlater.io
+//   node a2a-client.mjs https://gateway.agentlater.io
 //
 // The gateway's URL is the first argument, or AGENTLATER_URL. `--new` schedules another delivery
 // instead of reading the last one. AGENTLATER_DELIVER_URL is the URL to deliver to.
