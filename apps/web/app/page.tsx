@@ -5,7 +5,7 @@ import { Code } from "../components/Code";
 import { CopyButton } from "../components/CopyButton";
 import { Icon } from "../components/Icon";
 import { Tabs } from "../components/Tabs";
-import { GATEWAY_URL, MAX_ATTEMPTS, REPO_URL, TRIAL_ATTEMPTS, TRIAL_DAYS } from "../lib/site";
+import { GATEWAY_URL, MAX_ATTEMPTS, TRIAL_ATTEMPTS, TRIAL_DAYS } from "../lib/site";
 import { mcpClaudeCode, mcpCodex, mcpRemoteConfig, sdkShort } from "../lib/snippets";
 
 const MCP_URL = `${GATEWAY_URL}/mcp`;
@@ -46,14 +46,27 @@ const EXAMPLES = [
   },
 ];
 
-const A2A_STEPS = [
-  ["Discover", "A public Agent Card will describe supported delivery skills."],
+const AGENT_CARD_URL = `${GATEWAY_URL}/.well-known/agent-card.json`;
+
+const A2A_STEPS: [string, ReactNode][] = [
   [
-    "Authenticate",
-    "Agent Auth will let compatible runtimes register autonomously, without an owner clicking Connect.",
+    "Discover",
+    <>
+      The Agent Card at{" "}
+      <a href={AGENT_CARD_URL}>
+        <code>/.well-known/agent-card.json</code>
+      </a>{" "}
+      describes the delivery skill and where to register.
+    </>,
   ],
-  ["Delegate & check", "Send a structured delivery request, then retrieve its status or request cancellation."],
-] as const;
+  ["Authenticate", "Agent Auth lets a compatible runtime register on its own, without an owner clicking Connect."],
+  [
+    "Delegate & check",
+    <>
+      Send one delivery request to <code>/a2a</code>, then read its status or cancel it.
+    </>,
+  ],
+];
 
 // Each provider's steps are the ones the quickstart documents.
 const PROVIDERS: { label: string; detail: string; app: ReactNode; command?: [string, string]; auth: ReactNode }[] = [
@@ -282,15 +295,16 @@ export default function Home() {
           <div>
             <p className="eyebrow">Built for agents</p>
             <h2>
-              MCP today.
+              MCP for clients.
               <br />
-              <em>A2A is next.</em>
+              <em>A2A for agents.</em>
             </h2>
-            <p className="status">Coming soon · Not available yet</p>
+            <p className="status">A2A 1.0 · JSON-RPC</p>
           </div>
           <div>
             <p className="a2a-intro">
-              An agent-to-agent path for handing off delayed HTTP requests, alongside the MCP tools you can use today.
+              An agent that speaks the Agent2Agent protocol can hand AgentLater an HTTP request to deliver, now or
+              later, and read back what happened. No person signs in.
             </p>
             <ol className="a2a-steps">
               {A2A_STEPS.map(([title, body]) => (
@@ -301,13 +315,12 @@ export default function Home() {
               ))}
             </ol>
             <p className="fine">
-              Planned initial scope: one-shot immediate or scheduled HTTP delivery. A2A streaming, push notifications,
-              cron and watch configuration are not part of this first adapter. A compatible A2A client must also
-              implement Agent Auth.
+              One message is one HTTP delivery, immediate or scheduled. Streaming, push notifications, crons and
+              watches are not part of A2A; they stay with the MCP tools. An A2A client must also implement Agent Auth.
             </p>
-            <a className="textlink" href={`${REPO_URL}/issues/209`}>
-              Read the A2A implementation plan <Icon name="arrowUpRight" size={16} />
-            </a>
+            <Link className="textlink" href="/docs/a2a">
+              Read the A2A guide <Icon name="arrowUpRight" size={16} />
+            </Link>
           </div>
         </div>
       </section>
