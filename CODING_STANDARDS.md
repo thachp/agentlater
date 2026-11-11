@@ -23,7 +23,8 @@ enforces; domain words are defined in [GLOSSARY.md](GLOSSARY.md).
 
 ## Enforcement
 
-CI fails on any of these, so fix the code instead of silencing the check.
+CI fails on any of these, so fix the code instead of silencing the check. Before pushing, run
+`npm run verify` (`scripts/check.mjs`): every check CI runs, in one command.
 
 - `[workspace.lints]` in `Cargo.toml`, run by `cargo clippy -- -D warnings`:
   `unreachable_pub`, `unused_qualifications`, `unused_lifetimes`, `unused_macro_rules`,

@@ -13,7 +13,8 @@
     "test": "npm run test --workspaces --if-present",
     "knip": "knip",
     "build": "npm run build --workspaces --if-present",
-    "check": "npm run check --workspaces --if-present"
+    "check": "npm run check --workspaces --if-present",
+    "verify": "node scripts/check.mjs"
   },
   "devDependencies": {
     "knip": "6.44.1",
