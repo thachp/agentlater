@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { Code } from "../../../components/Code";
-import { LIMITS } from "../../../lib/site";
+import { LIMITS, RETRIES } from "../../../lib/site";
 import { deliveryHeaders, rotateSigningSecret, verifyNode, verifyPython } from "../../../lib/snippets";
 
 export const metadata: Metadata = { title: "Delivery & signatures" };
@@ -12,13 +12,6 @@ const STATES: [string, string][] = [
   ["succeeded", "The destination returned 2xx."],
   ["failed", "Gave up: a permanent error, or no attempts left. Can be redriven."],
   ["canceled", "Canceled before it was delivered."],
-];
-
-const RETRIES: [string, string][] = [
-  ["after attempt 1", "5–10 s"],
-  ["after attempt 2", "10–20 s"],
-  ["after attempt 3", "20–40 s"],
-  ["after attempt 4", "40–80 s"],
 ];
 
 export default function Delivery() {
