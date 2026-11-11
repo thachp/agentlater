@@ -72,13 +72,13 @@ The start-of-session inbox check only works if agents know about it, so it's sai
 | Pay | `apps/web/app/pay` | Say what's being bought and for which project, then Stripe's form |
 | Legal, 404 | `apps/web/app/{terms,privacy,not-found}` | Plain text in the same frame |
 
-The consent page belongs to the gateway Worker and has a strict CSP (`default-src 'none'`), so it can't load the site's stylesheet, fonts or images. Its styles are inline, with the icon as inline SVG. Its colors are a copy of the tokens below, so any brand change has to be copied there by hand.
+The consent page belongs to the gateway Worker and has a strict CSP (`default-src 'none'`), so it can't load the site's stylesheet, fonts or images. Its styles are inline, with the icon as inline SVG. Its colors are a hand-made copy of the site's tokens, so any brand change has to be copied there by hand (it still has the previous palette: see Known gaps).
 
 ### Moments that matter
 
 - **Consent is where trust is won or lost.** It names the client and where the person will return to, warns that a loopback redirect could be any local program, and says plainly that there's no account and the connection is the project's only key.
 - **Pay has to work for someone with no context.** It says what's being bought, that it goes to "the agent that sent you this link", that leftovers carry over, and what to do if the link has expired. Each failure state tells the person to go back to their agent.
-- **The first screen answers "what is this?"** The headline is the outcome ("Your agent's session ends. The work doesn't."), and under it a timeline shows one request from the call that schedules it to the session that reads the result: who is running when, and what happens in between.
+- **The first screen answers "what is this?"** The headline is the offer ("Hand off the waiting."), and beside it one request goes from the agent to AgentLater to a saved result, with the agent free to disconnect in between. The strip below says the same thing as one sentence a person might type.
 
 ### Voice
 
@@ -98,71 +98,79 @@ Terms are used consistently: *delivery attempt*, *task*, *project*, *inbox*, *wa
 
 ### Visual language
 
-Warm paper, near-black ink and one terracotta accent: closer to a printed manual than to a developer-tool gradient. A serif display face carries the headlines, and dark code blocks and the hero timeline carry the rest, because the product is a set of calls that play out over time. Sections change shape as you scroll (tabs, linked tool cards, a dark band, price cards) rather than repeating one card. Source: [`apps/web/app/globals.css`](../../apps/web/app/globals.css).
+A dark header and hero over warm paper, near-black ink and one orange accent. One sans face carries everything; headlines are large, tight and heavy, with the accent on the word that matters. Sections alternate between the page and a soft band and change shape as you scroll (a strip, numbered steps, feature columns, tabs, a provider rail, prices, questions) rather than repeating one card. Source: [`apps/web/app/globals.css`](../../apps/web/app/globals.css).
 
-**Color tokens.** Both themes follow `prefers-color-scheme`; there's no toggle.
+**Color tokens.** Both themes follow `prefers-color-scheme`; there's no toggle. The header, hero, closing call to action and footer carry the class `.dark`, which sets the dark column's values in both themes.
 
 | Token | Light | Dark | Use |
 | --- | --- | --- | --- |
-| `--paper` | `#f5f3ee` | `#161816` | Page background |
-| `--card` | `#fffefa` | `#1e211e` | Cards, callouts |
-| `--ink` | `#20231f` | `#ecebe4` | Text, primary button |
-| `--muted` | `#5d635a` | `#a3a99f` | Secondary text |
-| `--line` | `#dedfd6` | `#2f332e` | Borders, rules |
-| `--accent` | `#bf4325` | `#e3693f` | Emphasis, eyebrows, step numbers, focus ring. Sparingly. |
-| `--soft` | `#fce7dd` | `#3a2219` | Inline code, current nav item, the prompt panel |
-| `--code-bg` | `#1f2220` | `#101210` | Code blocks, dark in both themes |
-| `--code-ink` | `#ecebe4` | same | Code text |
-| `--code-muted` | `#9aa094` | same | Code labels |
-| `--code-accent` | `#e3693f` | same | Accent on dark panels: failed status, AgentLater's lane, retry dots |
-| `--code-ok` | `#8fcfa6` | same | Success on dark panels: `200`, `inbox +1`, the last retry dot |
-| `--accent-ink` | `#fffefa` | `#161816` | Text on an accent fill: the closing call to action |
-| `--selection`, `--selection-ink` | `#f9c6b3`, `#20231f` | same | Selected text |
+| `--bg` | `#fcf9f5` | `#18191b` | Page background |
+| `--bg-soft` | `#f2eee7` | `#202225` | Alternating bands, the provider rail, callouts |
+| `--bg-raise` | `#f0e9df` | `#24262a` | The Connect section |
+| `--card` | `#fffdf9` | `#1b1d20` | The setup sheet, capability cards |
+| `--chip` | `#fffdf9` | `#303236` | Secondary button, the hero's speech bubble |
+| `--ink` | `#202020` | `#f5f2ee` | Text |
+| `--ink-2` | `#45413d` | `#dbd7d2` | Ledes and instructions |
+| `--muted` | `#64615d` | `#b9b7b3` | Secondary text, eyebrows |
+| `--line`, `--line-strong` | `#ddd7ce`, `#bfb6aa` | `#44464b`, `#5b5e64` | Rules; borders of boxes |
+| `--accent` | `#ea5827` | `#ff8a52` | Primary button fill, accent words in headlines, focus ring |
+| `--on-accent` | `#21150e` | same | Text on an accent fill |
+| `--accent-text` | `#ab401c` | `#ffb28a` | Small accent text: links, labels, icons, the selected tab |
+| `--accent-soft`, `--accent-line` | `#fce4d4`, `#efbfa3` | `#34271f`, `#70513b` | Trial banner, status badge, selected provider, inline code |
+| `--number` | `#2d3d31` | `#ff8a52` | Step numbers |
+| `--ok`, `--ok-soft`, `--ok-line` | `#3e7754`, `#eff5eb`, `#b9d3bf` | `#8edda9`, `#22392e`, `#577f66` | Check marks, the hero's saved result |
+| `--code-bg`, `--code-line` | `#232323`, none | `#141517`, `#55585f` | Code blocks, dark in both themes |
+| `--code-ink`, `--code-muted` | `#f4f0eb`, `#b4ada6` | same | Code text and labels |
+| `--selection`, `--selection-ink` | `#f9c6b3`, `#202020` | same | Selected text |
 
-**Contrast, computed from the tokens.** All pass WCAG AA for normal text (4.5:1):
+**Contrast, computed from the tokens.** All but the last pass WCAG AA for normal text (4.5:1):
 
 | Pair | Light | Dark |
 | --- | --- | --- |
-| `--ink` on `--paper` | 14.33 | 14.94 |
-| `--muted` on `--paper` | 5.57 | 7.42 |
-| `--muted` on `--soft` | 5.18 | 6.14 |
-| `--accent` on `--paper` | 4.68 | 5.41 |
-| `--accent` on `--card` | 5.14 | 4.92 |
-| `--code-muted` on `--code-bg` | 5.99 | 7.02 |
-| `--code-accent` on `--code-bg` | 4.86 | 5.7 |
-| `--code-ok` on `--code-bg` | 8.9 | 10.43 |
-| `--accent-ink` on `--accent` | 5.14 | 5.41 |
-| `#161816` on `--code-accent` (lane label) | 5.41 | same |
+| `--ink` on `--bg` | 15.52 | 15.76 |
+| `--ink-2` on `--bg` | 9.64 | 12.28 |
+| `--muted` on `--bg` | 5.87 | 8.79 |
+| `--muted` on `--bg-soft` | 5.33 | 7.96 |
+| `--muted` on `--bg-raise` | 5.11 | 7.57 |
+| `--accent-text` on `--bg` | 5.75 | 10.04 |
+| `--accent-text` on `--bg-soft` | 5.22 | 9.1 |
+| `--accent-text` on `--accent-soft` | 4.94 | 8.23 |
+| `--on-accent` on `--accent` | 5.03 | 7.65 |
+| `--ok` on `--bg` | 5.04 | 10.95 |
+| `--code-muted` on `--code-bg` | 7.09 | 8.24 |
+| `--accent` on `--bg` (large headline words and the focus ring only) | 3.38 | 7.55 |
 
-**Type.** Fraunces (`h1`, `h2`, big numbers) and Inter (prose) are self-hosted through `next/font`, so no reader's browser calls Google; the fallbacks are Georgia and the system sans. The mono stack is for code, eyebrows, labels and tool names.
+**Type.** DM Sans is self-hosted through `next/font`, so no reader's browser calls Google; the fallback is the system sans. The mono stack is for code and tool names.
 
 | Role | Size | Notes |
 | --- | --- | --- |
-| Hero `h1` | `clamp(40px, 7.3vw, 84px)` | Fraunces 500, `-0.02em`; the second sentence is italic accent on its own line |
-| Section `h2` | `clamp(30px, 4vw, 46px)` | Fraunces 500. The problem statement and closing band go to 60px |
-| Card `h3` | 18px | |
-| Lede | 19px (landing), 18px (docs) | Muted |
-| Body | 16px / 1.6 | Card text 15px, muted |
-| Eyebrow | 12.5px mono, uppercase, `0.06em` | Accent |
-| Code | 13.5px mono / 1.6 | 12.5px in cards |
+| Hero `h1` | `clamp(60px, 6.8vw, 94px)` | 650, `-0.045em`; the last word is accent on its own line |
+| Section `h2` | `clamp(36px, 4.2vw, 58px)` | 650, `-0.035em` |
+| Section `h3` | 23px | |
+| Lede | 21px (hero), 19px (section intros), 18px (docs) | |
+| Body | 16px / 1.6 | Fine print 13px, muted |
+| Eyebrow | 12px, 650, uppercase, `0.2em` | Muted |
+| Code | 13.5px mono / 1.6 | 12.5px in the setup sheet |
 
-**Layout.** `--wrap` is 1120px wide with a 16px gutter each side; sections have 88px of padding either side of a hairline rule (56px on phones); prose is at most 760px wide. Breakpoints are 900px (grids collapse, docs nav moves to the top) and 560px (one column, nav shortens). Corners: 14px for cards and code, 10px for buttons, 999px for the pill.
+**Layout.** `.wrap` is at most 1320px wide with a 50px gutter each side (30px below 1000px, 24px below 700px); sections have 88px of padding (60px on phones); prose is at most 760px wide. Breakpoints are 1000px (tighter grids, docs nav moves to the top), 850px, 700px (one column, the header's links go behind a menu button) and 600px (the provider rail becomes a scrolling row). Corners: 16px for panels, 10px for code, 9px for buttons.
 
 **Components.**
 
 | Component | Class | Notes |
 | --- | --- | --- |
-| Button | `.button.primary`, `.secondary` | Ink fill or outline. Hover drops opacity. The accent is never a button fill; on the accent band, the primary button inverts to `--accent-ink`. |
-| Card | `.card` | Hairline border, no shadow. Nothing in the system uses shadows. |
-| Hero timeline | `.timeline` | Two lanes over five stops, on one set of columns; below 900px it becomes a rail, solid while the agent runs and dashed while it's gone |
-| Tabs | `<Tabs>` | One panel at a time for long alternatives, with arrow-key support. Every panel is in the HTML; without JavaScript they all show |
-| URL bar | `.url-bar`, `<CopyButton>` | The one value a person has to copy |
-| Tool card | `.tool-card` | The whole card links to that tool on the capabilities page; the accent border is its hover state |
-| Compare | `.compare` | Without and with, one pair per rule |
-| Dark band | `.band-dark` | At most one per page |
-| Plan | `.plan`, `.plan-paid` | Price cards; the paid one has an accent border |
-| Code | `<Code>`, `.code` | Scrolls sideways and is focusable, with an optional mono label |
-| Pill | `.pill` | One per page at most, with an accent dot |
+| Button | `.button.primary`, `.secondary`, `.outline` | Accent fill with dark text, a chip, or an outline. Hover lifts it 2px. |
+| Text link | `.textlink` | Bold, underlined by a rule, usually with an arrow |
+| Site nav | `<SiteNav>` | Section links and Connect; a menu button on phones. Without JavaScript the links stay in view |
+| Hero story | `.story` | A request, AgentLater, "your agent can disconnect", the saved result, joined by dotted paths |
+| Band | `.band`, `.band-raise` | A soft or raised background across the page |
+| Steps | `.steps`, `.trial` | Three numbered steps, then the trial banner |
+| Features | `.features` | Four columns, each an icon, a title and a sentence |
+| Tabs | `<Tabs>` | One panel at a time for long alternatives, with arrow-key support. Every panel is in the HTML; without JavaScript they all show. `rail` puts the tabs in a column beside the panel: the Connect section |
+| Setup sheet | `.sheet`, `.copyfield`, `<CopyButton>` | Per provider: the one value a person has to copy, where to paste it, and a command where there is one |
+| Prices | `.prices`, `.explainer` | Two columns under a rule, then what counts as an attempt |
+| Questions | `.faq` | `<details>`, one per question |
+| Icon | `<Icon>` | Line icons that take the text color |
+| Code | `<Code>`, `.code` | Scrolls sideways and is focusable, with an optional label |
 | Eyebrow | `.eyebrow` | Above each section heading |
 | Callout | `.callout` | Accent left rule. Also carries payment states. |
 | Capability | `.capability` | One per tool on the reference page; the name is mono |
@@ -170,7 +178,7 @@ Warm paper, near-black ink and one terracotta accent: closer to a printed manual
 
 **Icon.** A clockwise arrow around clock hands, white on terracotta (`apps/web/app/icon.svg`). The plugin's listing icon is rendered from it.
 
-**Motion.** Almost none: smooth scrolling to anchors, and the hero timeline arriving in order, once, on load. Both are off under `prefers-reduced-motion`.
+**Motion.** Little: smooth scrolling to anchors, buttons lifting on hover, and a dot travelling down the hero story once, on load. All are off under `prefers-reduced-motion`.
 
 ### Accessibility baseline
 
@@ -190,7 +198,8 @@ Found while writing this down, from reading the code and computing contrast. The
 
 | Gap | Where | Why it matters | Suggested fix |
 | --- | --- | --- | --- |
-| **Icon and accent are different oranges:** `#db4b27` and `#bf4325` | `icon.svg`, `globals.css:7` | Minor drift. The icon's white on orange is 4.12:1, fine for a graphic. | Decide whether it's deliberate |
+| **Icon and accent are different oranges:** `#db4b27` and `#ea5827` | `icon.svg`, `globals.css` | Minor drift. The icon's white on orange is 4.12:1, fine for a graphic. | Decide whether it's deliberate |
+| **The consent page still has the previous palette** | `apps/gateway/src/consent.ts` | It copies the site's tokens by hand, and the site's changed. | Copy the tokens above into it |
 | **`/llms.txt` lacks the start-of-session inbox check** | `apps/gateway/src/discovery.ts` | An agent that only reads this page misses the habit. | Add the sentence |
 | **`watch_http`'s description has no untrusted-data warning** | `packages/contracts/src/capabilities.ts` | It returns up to 16 KiB of someone else's response body. | Add the sentence |
 | **No social preview** | `layout.tsx` metadata | Links shared in chat show no image or card. | Add Open Graph metadata and an image |
