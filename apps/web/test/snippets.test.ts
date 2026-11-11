@@ -139,6 +139,9 @@ describe("stated limits", () => {
     expect(constant("MAX_WAKE_DEBOUNCE_MS")).toBe("DAY_MS");
     expect(limitsRs).toContain('pub const DEFAULT_WAKE_DEBOUNCE: &str = "15m";');
     expect(constant("MAX_WAKE_FAILURES")).toBe("3");
+    expect(limitsRs).toContain('pub const DEFAULT_ROTATION_OVERLAP: &str = "24h";');
+    expect(constant("MAX_ROTATION_OVERLAP_MS")).toBe("7 * DAY_MS");
+    expect(stated["Signing secret rotation"]).toBe("Overlap of 0 seconds to 7 days (default 24 hours)");
     expect(constant("MAX_SECRETS")).toBe("50");
     expect(constant("MAX_SECRET_BYTES")).toBe("4 * 1024");
     expect(constant("MAX_ALLOWED_HOSTS")).toBe("20");

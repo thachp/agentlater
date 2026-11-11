@@ -1169,7 +1169,7 @@ mod tests {
             Some(Status::Failed),
             "no retries past the budget"
         );
-        assert_eq!(l.project().unwrap().attempts_remaining, 0);
+        assert_eq!(l.project(T0).unwrap().attempts_remaining, 0);
 
         // Near the retained-task cap a callback needs a second row.
         db.0.execute(
@@ -1360,7 +1360,7 @@ mod tests {
             .unwrap();
         assert_eq!(l.task(&cb_id).unwrap().status, Status::Succeeded);
         assert_eq!(l.next_wake().unwrap(), Some(T0 + 5 + RETENTION_MS));
-        assert_eq!(l.project().unwrap().attempts_used, 2);
+        assert_eq!(l.project(T0).unwrap().attempts_used, 2);
     }
 
     #[test]

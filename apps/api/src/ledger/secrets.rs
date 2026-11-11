@@ -648,7 +648,7 @@ mod tests {
         )
         .unwrap();
         l.delete_secret("GH").unwrap();
-        let used = l.project().unwrap().attempts_used;
+        let used = l.project(T0).unwrap().attempts_used;
         let due = l.publish_due(P, T0).unwrap();
         let find = |id: &str| due.iter().find(|d| d.task_id == id).unwrap().clone();
         let d = find("gone");
@@ -661,7 +661,7 @@ mod tests {
             (t.status, t.failure.as_deref(), t.attempt_count),
             (Status::Failed, Some("secret_missing"), 0)
         );
-        assert_eq!(l.project().unwrap().attempts_used, used, "costs nothing");
+        assert_eq!(l.project(T0).unwrap().attempts_used, used, "costs nothing");
         assert_eq!(
             inbox(&l).events[0]["task"]["failure"],
             "secret_missing",
@@ -730,7 +730,7 @@ mod tests {
         let l = Ledger::open(&db).unwrap();
         let due = l.publish_due(P, T0).unwrap();
         let find = |id: &str| due.iter().find(|d| d.task_id == id).unwrap().clone();
-        let used = l.project().unwrap().attempts_used;
+        let used = l.project(T0).unwrap().attempts_used;
         let d = find("t1");
         assert_eq!(
             l.claim(&d.task_id, d.generation, T0).unwrap(),
@@ -740,7 +740,7 @@ mod tests {
             l.task("t1").unwrap().failure.as_deref(),
             Some("secret_unavailable")
         );
-        assert_eq!(l.project().unwrap().attempts_used, used);
+        assert_eq!(l.project(T0).unwrap().attempts_used, used);
         let d = find("plain");
         assert!(
             matches!(

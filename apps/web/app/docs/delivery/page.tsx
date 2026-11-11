@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Code } from "../../../components/Code";
 import { LIMITS } from "../../../lib/site";
-import { deliveryHeaders, verifyNode, verifyPython } from "../../../lib/snippets";
+import { deliveryHeaders, rotateSigningSecret, verifyNode, verifyPython } from "../../../lib/snippets";
 
 export const metadata: Metadata = { title: "Delivery & signatures" };
 
@@ -66,20 +66,59 @@ export default function Delivery() {
         <li>
           <code>RunLater-Signature</code> is <code>v1=</code> followed by the hex HMAC-SHA256 of{" "}
           <code>{"{timestamp}.{task_id}.{attempt}."}</code> and then the raw body, keyed with the project's{" "}
-          <code>signing_secret</code>. Only <code>create_project</code> returns it; call it again to get the same
-          secret back.
+          <code>signing_secret</code>. <code>create_project</code> returns it; call it again to get the secret
+          back.
         </li>
       </ul>
 
       <h2 id="verify">Verifying a delivery</h2>
       <p>
         Compute the HMAC over the raw body exactly as received, before any JSON parsing, and compare in constant time.
-        Reject timestamps more than five minutes from your clock. While a secret is being rotated, the header holds one{" "}
-        <code>v1=</code> entry per active secret; accept a match on any of them.
+        Reject timestamps more than five minutes from your clock. The header can hold several comma-separated{" "}
+        <code>v1=</code> entries, one per signing secret during a <a href="#rotate">rotation</a>; accept a match on any
+        of them.
       </p>
       <Code label="Node.js">{verifyNode}</Code>
       <Code label="Python">{verifyPython}</Code>
       <p className="muted">Both samples are run in AgentLater's test suite against a fixed signature.</p>
+
+      <h2 id="rotate">Rotating the signing secret</h2>
+      <p>
+        If the signing secret may have been exposed (pasted into a chat, written to a log, committed in a config
+        file), replace it with one call, <code>rotate_signing_secret</code>. It returns the new secret, and{" "}
+        <code>create_project</code> returns the new one from then on.
+      </p>
+      <Code label="rotate_signing_secret">{rotateSigningSecret}</Code>
+      <ul>
+        <li>
+          <strong>Leaked secret:</strong> pass <code>overlap: &quot;0s&quot;</code> and put the new secret in your
+          destination straight away. AgentLater stops signing with the old one from the next attempt (an attempt
+          already in flight may still carry it for a few seconds), but anyone holding it can forge requests until your
+          destination stops accepting it, so the leak is closed when the destination checks against the new secret
+          only. Deliveries that arrive before then fail your check; if your destination answers
+          them <code>401</code> they fail without a retry, and <code>redrive_task</code> sends them again.
+        </li>
+        <li>
+          <strong>Routine rotation:</strong> for the <code>overlap</code> (default 24 hours, at most 7 days) every
+          delivery, callback and wake carries two <code>v1=</code> entries, one made with each secret. A destination
+          that accepts a match on any entry, as the samples above do, keeps verifying with the old secret, so nothing
+          is rejected while you deploy the new one. Do that before <code>previous_valid_until_ms</code>: attempts
+          made after it are signed with the new secret only.
+        </li>
+        <li>
+          <code>get_project</code> shows that deadline as <code>signing_secret_previous_until_ms</code> while an
+          overlap is running, and never shows either secret.
+        </li>
+        <li>
+          At most two signing secrets sign at a time. Rotating again during an overlap stops the oldest one from the
+          next attempt.
+        </li>
+        <li>
+          Nothing else changes: the signed content and header names are the same, the budget and everything scheduled
+          stay as they are, and tasks already waiting or retrying are signed with the new secret from their next
+          attempt.
+        </li>
+      </ul>
 
       <h2 id="callbacks">Callbacks</h2>
       <p>

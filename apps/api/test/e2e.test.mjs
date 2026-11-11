@@ -304,6 +304,48 @@ describe("api", () => {
     assert.equal((await api("GET", "/v1/projects/self", { project })).json.wake, null);
   });
 
+  test("rotates the signing secret: both sign during the overlap, then only the new one", async () => {
+    const project = "proj_rotate";
+    assert.equal((await api("POST", "/v1/projects/self/signing_secret/rotate", { project, body: {} })).json.error.code, "project_not_found");
+    const old = (await api("POST", "/v1/projects", { project })).json.signing_secret;
+    assert.equal((await api("POST", "/v1/projects/self/signing_secret/rotate", { project, body: {}, scope: "read" })).status, 403);
+    const bad = await api("POST", "/v1/projects/self/signing_secret/rotate", { project, body: { overlap: "8d" } });
+    assert.deepEqual([bad.status, bad.json.error.field], [400, "overlap"]);
+
+    /** Delivers to `path` and returns the signature each of `secrets` makes, and the header sent. */
+    const deliver = async (path, ...secrets) => {
+      const { json } = await api("POST", "/v1/tasks", { project, body: { url: `https://receiver.example.com${path}`, body: "hi" } });
+      await settled(project, json.id, ["succeeded"]);
+      const sent = received.find((r) => r.headers["runlater-task-id"] === json.id);
+      const signed = `${sent.headers["runlater-timestamp"]}.${json.id}.1.hi`;
+      return {
+        header: sent.headers["runlater-signature"],
+        macs: secrets.map((s) => `v1=${createHmac("sha256", s).update(signed).digest("hex")}`),
+      };
+    };
+
+    const before = Date.now();
+    const rotated = await api("POST", "/v1/projects/self/signing_secret/rotate", { project, body: { overlap: "1h" } });
+    assert.equal(rotated.status, 200);
+    const fresh = rotated.json.signing_secret;
+    assert.match(fresh, /^rls_[0-9a-f]{64}$/);
+    assert.notEqual(fresh, old);
+    assert.ok(rotated.json.previous_valid_until_ms >= before + 3_600_000);
+    assert.equal((await api("POST", "/v1/projects", { project })).json.signing_secret, fresh);
+    const read = (await api("GET", "/v1/projects/self", { project })).json;
+    assert.equal(read.signing_secret_previous_until_ms, rotated.json.previous_valid_until_ms);
+    assert.equal("signing_secret" in read, false);
+
+    const during = await deliver("/rotating", fresh, old);
+    assert.equal(during.header, during.macs.join(","), "one v1= entry per secret, the new one first");
+
+    const last = await api("POST", "/v1/projects/self/signing_secret/rotate", { project, body: { overlap: "0s" } });
+    assert.equal(last.json.previous_valid_until_ms, null);
+    assert.equal((await api("GET", "/v1/projects/self", { project })).json.signing_secret_previous_until_ms, null);
+    const after = await deliver("/rotated", last.json.signing_secret);
+    assert.equal(after.header, after.macs[0], "the secrets it replaced stopped at once");
+  });
+
   test("fills a secret in only when sending, only to its host, and redacts it from the capture", async () => {
     const project = "proj_secrets";
     await api("POST", "/v1/projects", { project });

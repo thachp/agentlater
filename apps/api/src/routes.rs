@@ -15,6 +15,7 @@ pub enum Verb {
 pub enum Route<'p> {
     CreateProject,
     GetProject,
+    RotateSigningSecret,
     AddCredit,
     Schedule,
     ListTasks,
@@ -52,6 +53,9 @@ impl<'p> Route<'p> {
         Some(match (verb, path) {
             (Post, ["v1", "projects"]) => Route::CreateProject,
             (Get, ["v1", "projects", "self"]) => Route::GetProject,
+            (Post, ["v1", "projects", "self", "signing_secret", "rotate"]) => {
+                Route::RotateSigningSecret
+            }
             (Post, ["v1", "projects", "self", "credits"]) => Route::AddCredit,
             (Post, ["v1", "tasks"]) => Route::Schedule,
             (Get, ["v1", "tasks"]) => Route::ListTasks,
@@ -87,7 +91,7 @@ impl<'p> Route<'p> {
     /// which the entry Worker never forwards.
     pub fn scope(self) -> Option<Scope> {
         Some(match self {
-            Route::CreateProject => Scope::Project,
+            Route::CreateProject | Route::RotateSigningSecret => Scope::Project,
             Route::AddCredit => Scope::Billing,
             Route::Schedule
             | Route::RedriveTask(_)
@@ -134,6 +138,11 @@ mod tests {
         let table = [
             (Post, "/v1/projects", Scope::Project),
             (Get, "/v1/projects/self", Scope::Read),
+            (
+                Post,
+                "/v1/projects/self/signing_secret/rotate",
+                Scope::Project,
+            ),
             (Post, "/v1/projects/self/credits", Scope::Billing),
             (Post, "/v1/tasks", Scope::Schedule),
             (Get, "/v1/tasks", Scope::Read),
@@ -221,6 +230,6 @@ mod tests {
             }
         }
         // Every route with a scope is in the contract, once.
-        assert_eq!(seen.len(), 26);
+        assert_eq!(seen.len(), 27);
     }
 }

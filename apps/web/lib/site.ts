@@ -20,6 +20,7 @@ export const LIMITS: [string, string][] = [
   ["Attempt timeout", "10 seconds; redirects are not followed"],
   ["Tasks held", "1,000 per project (20,000 once paid), finished ones included until purged"],
   ["Retention", "Tasks and attempts are kept 30 days after they finish"],
+  ["Signing secret rotation", "Overlap of 0 seconds to 7 days (default 24 hours)"],
   ["Crons", "10 per project, each running at most once an hour"],
   ["Watches", "A poll every 5 minutes to 24 hours, for up to 7 days"],
   ["Captured responses", "First 16 KiB and 4 headers, kept 7 days after the task finishes"],

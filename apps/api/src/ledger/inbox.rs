@@ -594,8 +594,8 @@ mod tests {
             (None, Some(1)),
             "no callback task"
         );
-        assert_eq!(l.project().unwrap().inbox_unread, 1);
-        assert_eq!(l.project().unwrap().attempts_used, 1);
+        assert_eq!(l.project(T0).unwrap().inbox_unread, 1);
+        assert_eq!(l.project(T0).unwrap().attempts_used, 1);
 
         let page = inbox(&l);
         assert_eq!((page.acked_seq, page.unread, page.dropped), (0, 1, 0));
@@ -624,7 +624,7 @@ mod tests {
             }
         );
         assert_eq!(inbox(&l).events.len(), 0);
-        assert_eq!(l.project().unwrap().inbox_unread, 0);
+        assert_eq!(l.project(T0).unwrap().inbox_unread, 0);
         // Acked events can still be replayed for a while.
         assert_eq!(l.read_inbox(Some(0), None, false).unwrap().events.len(), 1);
     }
@@ -847,7 +847,10 @@ mod tests {
     }
 
     fn wake_id(l: &Ledger<'_, Memory>) -> Option<String> {
-        l.project().unwrap().wake.and_then(|w| w.last_wake_task_id)
+        l.project(T0)
+            .unwrap()
+            .wake
+            .and_then(|w| w.last_wake_task_id)
     }
 
     /// When the pending wake is due.
@@ -880,7 +883,7 @@ mod tests {
         let l = setup(&db);
         finish_to_inbox(&l, "t1", T0);
         assert_eq!(wake_tasks(&db), 0);
-        assert_eq!(l.project().unwrap().wake, None);
+        assert_eq!(l.project(T0).unwrap().wake, None);
         assert_eq!(l.delete_wake(T0).unwrap_err().code, "wake_not_set");
     }
 
@@ -909,7 +912,22 @@ mod tests {
         assert!(t.wake_call);
         assert_eq!(t.status, Status::Succeeded);
         assert_eq!(t.header_names, ["Authorization"], "values are never echoed");
-        assert_eq!(l.project().unwrap().wake.unwrap().consecutive_failures, 0);
+        assert_eq!(l.project(T0).unwrap().wake.unwrap().consecutive_failures, 0);
+    }
+
+    #[test]
+    fn a_wake_is_signed_like_any_delivery_while_the_signing_secret_is_rotated() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.set_wake(waking(serde_json::json!({})), T0).unwrap();
+        l.rotate_signing_secret("s2", Some("1h"), T0).unwrap();
+        finish_to_inbox(&l, "t1", T0 + 5);
+        assert_eq!(
+            send_wake(&l, 202, T0 + 5).signing_secrets(),
+            ["s2", "secret"]
+        );
+        finish_to_inbox(&l, "t2", T0 + DAY);
+        assert_eq!(send_wake(&l, 202, T0 + DAY).signing_secrets(), ["s2"]);
     }
 
     #[test]
@@ -947,13 +965,13 @@ mod tests {
             .into_iter()
             .find(|d| d.task_id == id)
             .unwrap();
-        let used = l.project().unwrap().attempts_used;
+        let used = l.project(T0).unwrap().attempts_used;
         assert_eq!(
             l.claim(&d.task_id, d.generation, due).unwrap(),
             Claimed::Skip("inbox_read")
         );
         assert_eq!(l.task(&id).unwrap().status, Status::Canceled);
-        assert_eq!(l.project().unwrap().attempts_used, used, "costs nothing");
+        assert_eq!(l.project(T0).unwrap().attempts_used, used, "costs nothing");
     }
 
     #[test]
@@ -1000,13 +1018,13 @@ mod tests {
             // A 404 fails at once, without retries.
             send_wake(&l, 404, now);
             assert_eq!(l.task(&id).unwrap().status, Status::Failed);
-            let w = l.project().unwrap().wake.unwrap();
+            let w = l.project(T0).unwrap().wake.unwrap();
             assert_eq!(w.consecutive_failures, failures);
             if let Some(due) = wake_due(&l) {
                 now = due;
             }
         }
-        let w = l.project().unwrap().wake.unwrap();
+        let w = l.project(T0).unwrap().wake.unwrap();
         assert_eq!(
             (w.state.as_str(), w.disabled_reason.as_deref()),
             ("disabled", Some("wake_failing"))
@@ -1039,7 +1057,7 @@ mod tests {
         let gone = l.delete_wake(T0 + 2).unwrap();
         assert_eq!(gone.url, "https://agents.example.com/trigger");
         assert_eq!(l.task(&pending).unwrap().status, Status::Canceled);
-        assert_eq!(l.project().unwrap().wake, None);
+        assert_eq!(l.project(T0).unwrap().wake, None);
         finish_to_inbox(&l, "t3", T0 + 3);
         assert_eq!(wake_tasks(&db), 2);
     }
@@ -1052,7 +1070,7 @@ mod tests {
         db.0.execute("UPDATE project SET attempt_budget = 1", [])
             .unwrap();
         finish_to_inbox(&l, "t1", T0);
-        assert_eq!(l.project().unwrap().attempts_remaining, 0);
+        assert_eq!(l.project(T0).unwrap().attempts_remaining, 0);
         let id = wake_id(&l).unwrap();
         let d = l
             .publish_due(P, T0)
@@ -1177,7 +1195,7 @@ mod tests {
         );
         assert_eq!(l.task(&id).unwrap().status, Status::Canceled);
         assert_eq!(
-            l.project().unwrap().wake.unwrap().consecutive_failures,
+            l.project(T0).unwrap().wake.unwrap().consecutive_failures,
             0,
             "not a failure"
         );

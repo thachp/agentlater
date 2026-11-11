@@ -28,7 +28,7 @@ const receiverDir = fileURLToPath(new URL("../../receiver/", import.meta.url));
 const RECEIVER_HOST = "receiver.example.com";
 const receiverToken = randomBytes(16).toString("hex");
 const CAPABILITIES = [
-  "create_project", "get_project", "get_payment_link", "schedule_http", "queue_http", "get_task", "list_tasks", "cancel_task", "redrive_task",
+  "create_project", "get_project", "rotate_signing_secret", "get_payment_link", "schedule_http", "queue_http", "get_task", "list_tasks", "cancel_task", "redrive_task",
   "create_cron", "get_cron", "list_crons", "delete_cron", "watch_http", "read_inbox", "ack_inbox", "set_wake", "delete_wake",
   "set_secret", "list_secrets", "delete_secret",
   "create_hook", "list_hooks", "update_hook", "delete_hook",
@@ -286,6 +286,21 @@ describe("agent journey through the gateway", () => {
     const mac = createHmac("sha256", project.signing_secret).update(`${ts}.${task.id}.1.${body}`).digest("hex");
     assert.equal(delivery.headers["runlater-signature"], `v1=${mac}`);
     assert.equal(delivery.body, body);
+  });
+
+  test("rotate_signing_secret returns the new secret, and get_project only when the old one stops", async () => {
+    const run = async (capability, args = {}) => data(await client.executeCapability({ agentId, capability, arguments: args }));
+    const rotated = await run("rotate_signing_secret", { overlap: "1h" });
+    assert.match(rotated.signing_secret, /^rls_[0-9a-f]{64}$/);
+    assert.notEqual(rotated.signing_secret, project.signing_secret);
+    assert.ok(rotated.previous_valid_until_ms > Date.now());
+    const read = await run("get_project");
+    assert.equal("signing_secret" in read, false, "get_project still leaves the signing secret out");
+    assert.equal(read.signing_secret_previous_until_ms, rotated.previous_valid_until_ms);
+    await assert.rejects(run("rotate_signing_secret", { overlap: "never" }), { code: "invalid_request", status: 400 });
+    // Later tests verify deliveries with the secret they hold.
+    project = await run("create_project");
+    assert.equal(project.signing_secret, rotated.signing_secret);
   });
 
   test("API validation errors reach the agent with the field", async () => {
@@ -646,6 +661,11 @@ describe("hosted MCP at /mcp", () => {
     const read = value(await again.callTool({ name: "get_project", arguments: {} }));
     assert.equal(read.id, project.id);
     assert.equal("signing_secret" in read, false, "the get_project tool leaves the signing secret out");
+    const rotated = value(await again.callTool({ name: "rotate_signing_secret", arguments: { overlap: "0s" } }));
+    assert.match(rotated.signing_secret, /^rls_[0-9a-f]{64}$/);
+    assert.equal(rotated.previous_valid_until_ms, null);
+    const after = value(await again.callTool({ name: "get_project", arguments: {} }));
+    assert.deepEqual(["signing_secret" in after, after.signing_secret_previous_until_ms], [false, null]);
     await again.close();
 
     // A second connection is a separate owner with its own project.
@@ -988,8 +1008,8 @@ describe("staging journey, run against the local stack", () => {
       timeoutMs: 60_000,
     });
     // ok + flaky (2) + gone + behind + delayed + its callback + one poll + its on_match action
-    // + the captured task + its wake + the secret's delivery = 12 attempts; canceled tasks, the
-    // deleted cron, the inbox and the refused leak use none.
-    assert.equal(result.attemptsUsed, 12);
+    // + the captured task + its wake + the secret's delivery + the delivery after the rotation
+    // = 13 attempts; canceled tasks, the deleted cron, the inbox and the refused leak use none.
+    assert.equal(result.attemptsUsed, 13);
   });
 });

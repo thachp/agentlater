@@ -115,8 +115,9 @@ fn prepare(d: &Delivery, values: &[(String, String)], now_s: i64) -> Option<Outg
     // addresses after DNS resolution.
     let destination = Destination::parse(&d.url).ok()?;
     let body = d.body.clone().unwrap_or_default();
+    let signing_secrets: Vec<&[u8]> = d.signing_secrets().into_iter().map(str::as_bytes).collect();
     let signature = sign(
-        &[d.signing_secret.as_bytes()],
+        &signing_secrets,
         &d.task_id,
         d.attempt,
         now_s,
@@ -252,6 +253,7 @@ mod tests {
             headers: vec![("X-Plain".into(), "yes".into())],
             body: Some("{}".into()),
             signing_secret: "whsec".into(),
+            signing_secret_previous: None,
             read_body: false,
             capture: false,
             secrets: vec![],
@@ -291,6 +293,52 @@ mod tests {
         assert_eq!(names.len(), 6, "four signature headers follow: {names:?}");
         assert_eq!(sent[0].read, ReadPlan::Status);
         assert_eq!(sent[0].body.as_deref(), Some("{}"));
+    }
+
+    /// The `RunLater-Signature` a delivery is sent with.
+    fn signature(d: &Delivery) -> String {
+        let script = Script::answering(OK, None);
+        run(attempt(d, None, 1_700_000_000, &script));
+        let sent = script.sent.borrow();
+        let header = sent[0]
+            .headers
+            .iter()
+            .find(|(k, _)| k == "RunLater-Signature");
+        header.expect("a signed request").1.clone()
+    }
+
+    /// During a deploy the ledger and the consumer can be one version apart. What a ledger from
+    /// before rotation hands over, and a field this consumer does not know, must both parse.
+    #[test]
+    fn a_delivery_from_a_ledger_without_rotation_parses_and_signs_with_one_secret() {
+        let handed_over = serde_json::json!({
+            "task_id": "t1", "attempt": 1, "fence": 1, "method": "POST",
+            "url": "https://api.example.com/hook", "headers": [["X-Plain", "yes"]],
+            "body": "{}", "signing_secret": "whsec", "a_later_field": 1,
+        });
+        let d: Delivery = serde_json::from_value(handed_over).unwrap();
+        assert_eq!(d, delivery());
+        let signed = signature(&d);
+        assert!(
+            signed.starts_with("v1=") && !signed.contains(','),
+            "{signed}"
+        );
+    }
+
+    /// The other direction: outside an overlap the ledger hands over exactly what a consumer from
+    /// before rotation reads. In one, the previous secret signs second.
+    #[test]
+    fn a_delivery_with_no_previous_secret_has_no_new_key() {
+        let json = serde_json::to_value(delivery()).unwrap();
+        assert_eq!(json["signing_secret"], "whsec");
+        assert!(json.get("signing_secret_previous").is_none());
+
+        let mut rotating = delivery();
+        rotating.signing_secret_previous = Some("older".into());
+        let signed = signature(&rotating);
+        let entries: Vec<&str> = signed.split(',').collect();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], signature(&delivery()), "the current one first");
     }
 
     #[test]

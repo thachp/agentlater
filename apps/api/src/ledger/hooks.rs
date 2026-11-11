@@ -710,7 +710,7 @@ mod tests {
         assert_eq!(e["request"]["body"], r#"{"action":"completed"}"#);
         assert_eq!(e["request"]["truncated"], false);
         assert_eq!(e["request"]["headers"]["content-type"], "application/json");
-        assert_eq!(l.project().unwrap().inbox_unread, 1);
+        assert_eq!(l.project(T0).unwrap().inbox_unread, 1);
         let h = &l.hooks().unwrap().hooks[0];
         assert_eq!((h.received, h.last_received_ms), (1, Some(T0)));
         let wakes: Vec<IdRow> = db
