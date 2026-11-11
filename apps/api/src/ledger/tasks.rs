@@ -11,8 +11,8 @@
 
 use super::*;
 
-pub const DEFAULT_PAGE: usize = 20;
-pub const MAX_PAGE: usize = 100;
+const DEFAULT_PAGE: usize = 20;
+const MAX_PAGE: usize = 100;
 
 /// Who made a task, with what that maker stored on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

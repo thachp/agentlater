@@ -11,7 +11,7 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    pub(super) fn new(status: u16, code: &'static str, message: impl Into<String>) -> Self {
+    pub fn new(status: u16, code: &'static str, message: impl Into<String>) -> Self {
         Self {
             status,
             code,

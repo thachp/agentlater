@@ -4,9 +4,9 @@
 use super::*;
 
 /// A published task that has not been claimed after this long is published again.
-pub const REPUBLISH_MS: i64 = 60_000;
+pub(super) const REPUBLISH_MS: i64 = 60_000;
 /// Most tasks published per alarm; the alarm re-arms immediately if more are due.
-pub const PUBLISH_BATCH: usize = 100;
+const PUBLISH_BATCH: usize = 100;
 
 /// SQL condition, over `tasks t`: the task may run now as far as its lane is concerned.
 /// A lane runs one task at a time. A task that has started (delivering, or retrying after a
@@ -71,14 +71,6 @@ pub struct ResponseRead<'a> {
     /// Response headers the consumer kept: [`CAPTURED_HEADERS`], `content-length` and
     /// `content-encoding`.
     pub headers: &'a [(String, String)],
-}
-
-/// What `recover` did: how many expired leases it settled, and the rows it could not read
-/// (failed where they stood).
-#[derive(Debug, Default)]
-pub(super) struct Recovery {
-    recovered: usize,
-    pub(super) unreadable: Vec<DbError>,
 }
 
 impl<D: Db> Ledger<'_, D> {
@@ -315,12 +307,13 @@ impl<D: Db> Ledger<'_, D> {
     }
 
     /// Settles attempts whose consumer vanished. A row that can't be read is failed on its
-    /// own, so it can't hold up the others (or wake the ledger again every time).
+    /// own, so it can't hold up the others (or wake the ledger again every time); returns
+    /// why each such row could not be read.
     pub(super) fn recover(
         &self,
         now: i64,
         mut jitter: impl FnMut() -> f64,
-    ) -> Result<Recovery, DbError> {
+    ) -> Result<Vec<DbError>, DbError> {
         let rows: Vec<TaskRow> = self.db.query(
             &format!(
                 "SELECT {TASK_COLUMNS} FROM tasks \
@@ -328,19 +321,18 @@ impl<D: Db> Ledger<'_, D> {
             ),
             vec![now.into()],
         )?;
-        let mut recovery = Recovery::default();
+        let mut unreadable = vec![];
         for row in &rows {
             let (mut task, kind) = match row.task().and_then(|t| Ok((t, row.kind()?))) {
                 Ok(read) => read,
                 Err(e) => {
-                    recovery.unreadable.push(e);
+                    unreadable.push(e);
                     if let Err(e) = self.fail_unreadable(row, now) {
-                        recovery.unreadable.push(e);
+                        unreadable.push(e);
                     }
                     continue;
                 }
             };
-            recovery.recovered += 1;
             let fence = task.fence;
             if kind.is_watch() {
                 self.finish_poll(row, fence, Outcome::LeaseExpired, None, now)?;
@@ -351,7 +343,7 @@ impl<D: Db> Ledger<'_, D> {
                 self.save_row(row, &task, now)?;
             }
         }
-        Ok(recovery)
+        Ok(unreadable)
     }
 
     /// Fails a delivering row whose columns don't make a task (`failure: unreadable`). Its
@@ -548,8 +540,9 @@ mod tests {
         deliver(&l, &due[0], T0);
         assert_eq!(l.next_wake().unwrap(), Some(T0 + LEASE_MS));
 
-        assert_eq!(l.recover(T0 + LEASE_MS - 1, || 0.0).unwrap().recovered, 0);
-        assert_eq!(l.recover(T0 + LEASE_MS, || 0.0).unwrap().recovered, 1);
+        assert!(l.recover(T0 + LEASE_MS - 1, || 0.0).unwrap().is_empty());
+        assert_eq!(l.task("t1").unwrap().status, Status::Delivering);
+        assert!(l.recover(T0 + LEASE_MS, || 0.0).unwrap().is_empty());
         let t = l.task("t1").unwrap();
         assert_eq!(t.status, Status::Retrying);
         assert_eq!(
@@ -583,9 +576,8 @@ mod tests {
         )
         .unwrap();
 
-        let recovery = l.recover(T0 + LEASE_MS, || 0.0).unwrap();
-        assert_eq!(recovery.recovered, 1);
-        assert_eq!(recovery.unreadable.len(), 1);
+        let unreadable = l.recover(T0 + LEASE_MS, || 0.0).unwrap();
+        assert_eq!(unreadable.len(), 1);
         assert_eq!(l.task("t2").unwrap().status, Status::Retrying);
         let rows: Vec<IdRow> = db
             .query(

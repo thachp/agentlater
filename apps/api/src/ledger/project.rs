@@ -149,11 +149,11 @@ impl<D: Db> Ledger<'_, D> {
             );
         }
         let project = self.project_row()?.ok_or_else(no_project)?;
-        let applied: Vec<Counts> = self.db.query(
-            "SELECT COUNT(*) AS total, 0 AS waiting FROM payments WHERE id = ?",
+        let applied = self.count(
+            "SELECT COUNT(*) AS total FROM payments WHERE id = ?",
             vec![payment_id.into()],
         )?;
-        if applied.first().map_or(0, |c| c.total) > 0 {
+        if applied > 0 {
             return Ok((self.project()?, false));
         }
         let left = if now < project.expires_ms {

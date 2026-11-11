@@ -41,6 +41,7 @@ before(async () => {
     durableObjects: { LEDGER: { className: "TaskLedger", useSQLite: true } },
     queueProducers: { READY: { queueName: "runlater-ready" } },
     queueConsumers: { "runlater-ready": { maxBatchTimeout: 1 } },
+    analyticsEngineDatasets: { STATS: { dataset: "runlater_stats" } },
     bindings: { GATEWAY_PUBLIC_KEY: publicHex, SECRETS_KEY: randomBytes(32).toString("hex") },
     outboundService: async (req) => {
       const url = new URL(req.url);

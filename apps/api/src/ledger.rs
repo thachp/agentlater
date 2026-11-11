@@ -34,8 +34,8 @@ mod schema;
 mod secrets;
 mod tasks;
 mod watches;
-use attempts::{excerpt, LANE_CLEAR};
-pub use attempts::{Claimed, Delivery, Dispatch, ResponseRead, PUBLISH_BATCH, REPUBLISH_MS};
+use attempts::{excerpt, LANE_CLEAR, REPUBLISH_MS};
+pub use attempts::{Claimed, Delivery, Dispatch, ResponseRead};
 use budget::{verdict, Cost, Standing, Verdict};
 pub use crons::{CronList, CronView};
 pub use error::ApiError;
@@ -50,7 +50,7 @@ pub use runlater_core::Health;
 use schema::{MIGRATIONS, SCHEMA};
 pub use secrets::{ResealCount, SealedSecret, Sealer, SecretList, SecretView};
 use tasks::{derived_id, Kind, NewTask, Reporting, TaskRow, TASK_COLUMNS};
-pub use tasks::{AttemptView, CapturedResponse, TaskPage, TaskView, DEFAULT_PAGE, MAX_PAGE};
+pub use tasks::{AttemptView, CapturedResponse, TaskPage, TaskView};
 pub use watches::{OnMatchView, WatchView};
 
 /// Durable Object SQL bindings pass through JavaScript numbers.
@@ -147,7 +147,7 @@ impl<'a, D: Db> Ledger<'a, D> {
     /// what is due (so a run started here is dispatched here). The caller queues the
     /// dispatches and sets the alarm to [`Self::next_wake`].
     pub fn tick(&self, now: i64, jitter: impl FnMut() -> f64) -> Result<Tick, DbError> {
-        let unreadable = self.recover(now, jitter)?.unreadable;
+        let unreadable = self.recover(now, jitter)?;
         self.purge(now)?;
         self.fire_crons(now)?;
         let dispatches = match self.project_row()? {
@@ -191,6 +191,12 @@ impl<'a, D: Db> Ledger<'a, D> {
             .chain(crons)
             .min())
     }
+
+    /// The number a `SELECT ... AS total` comes to.
+    fn count(&self, sql: &str, params: Vec<Param>) -> Result<i64, DbError> {
+        let rows: Vec<Count> = self.db.query(sql, params)?;
+        Ok(rows.first().map_or(0, |c| c.total))
+    }
 }
 
 #[derive(Deserialize)]
@@ -199,9 +205,8 @@ struct MetaRow {
 }
 
 #[derive(Deserialize)]
-struct Counts {
+struct Count {
     total: i64,
-    waiting: i64,
 }
 
 #[derive(Deserialize)]
