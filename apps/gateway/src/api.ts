@@ -73,7 +73,7 @@ export class ApiClient {
     private readonly api: Fetcher,
     private readonly key: CryptoKey,
     private readonly projectId: string,
-    private readonly via?: Via,
+    readonly via?: Via,
   ) {}
 
   async call<T>(method: "GET" | "POST", path: string, scope: Scope, body?: unknown): Promise<T> {

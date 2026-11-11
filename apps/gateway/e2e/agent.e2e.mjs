@@ -1456,6 +1456,10 @@ describe("A2A at /a2a", () => {
     const overAgentAuth = await run(agent, "list_tasks");
     assert.deepEqual(ids(overAgentAuth.tasks), [working.id, other.id, sent.id, dropped.id, waiting.id]);
     assert.equal("total" in overAgentAuth, false);
+    // And takes what list_tasks advertises, as before: what ListTasks adds to a list is A2A's alone.
+    for (const args of [{ status: "delivering,retrying" }, { updated_since_ms: 0 }, { cursor: "1800000000000.42" }]) {
+      await assert.rejects(run(agent, "list_tasks", args), { code: "invalid_request", status: 400 }, JSON.stringify(args));
+    }
     // Without the list_tasks grant nothing is listed.
     const reader = await register(["a2a", "get_task"], agent.client);
     for (const params of [{}, { status: "TASK_STATE_REJECTED" }]) assert.equal((await rpcAs(reader, "ListTasks", params)).status, 403);

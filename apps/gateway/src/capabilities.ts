@@ -3,7 +3,7 @@
 
 import { capabilities, LANE_PATTERN, STATUSES } from "@runlater/contracts/capabilities";
 import type { ApiBinding, CapabilityDefinition } from "@runlater/contracts/capabilities";
-import type { ApiClient, Scope } from "./api";
+import type { ApiClient, Scope, Via } from "./api";
 
 export { capabilities, capabilityNames } from "@runlater/contracts/capabilities";
 
@@ -28,15 +28,24 @@ function only(args: Args, allowed: string[]): void {
 }
 
 /**
- * The query of a list. Beyond what list_tasks advertises it takes what the A2A interface's ListTasks
- * needs: several statuses separated by commas, updated_since_ms, and the two-part cursor of a list by change.
+ * What a list made through A2A asks for, which is its ListTasks': several statuses separated by
+ * commas, the two-part cursor of a list by change, and a time to list from. Only the A2A adapter
+ * writes these, having checked what its caller sent under the caller's own names, and the ledger
+ * checks them again; so they are not checked a third time here.
  */
-function listQuery(args: Args): string {
-  only(args, ["status", "queue", "lane", "cursor", "limit", "updated_since_ms"]);
+const A2A_LIST = ["status", "cursor", "limit", "updated_since_ms"];
+
+/** The query of a list: list_tasks' arguments as it advertises them, or A2A's for a call made through A2A. */
+function listQuery(args: Args, via?: Via): URLSearchParams {
+  if (via) {
+    only(args, A2A_LIST);
+    return new URLSearchParams(A2A_LIST.filter((name) => args[name] !== undefined).map((name) => [name, String(args[name])]));
+  }
+  only(args, ["status", "queue", "lane", "cursor", "limit"]);
   if (args.queue != null && args.lane != null) throw new ArgumentError("pass queue or lane, not both", "queue");
   const q = new URLSearchParams();
   if (args.status !== undefined) {
-    if (typeof args.status !== "string" || !args.status.split(",").every((s) => STATUSES.includes(s))) throw new ArgumentError("unknown status", "status");
+    if (typeof args.status !== "string" || !STATUSES.includes(args.status)) throw new ArgumentError("unknown status", "status");
     q.set("status", args.status);
   }
   const field = args.queue != null ? "queue" : "lane";
@@ -46,7 +55,7 @@ function listQuery(args: Args): string {
     q.set("lane", value);
   }
   if (args.cursor !== undefined) {
-    if (typeof args.cursor !== "string" || !/^[0-9]{1,16}(\.[0-9]{1,16})?$/.test(args.cursor)) throw new ArgumentError("invalid cursor", "cursor");
+    if (typeof args.cursor !== "string" || !/^[0-9]{1,16}$/.test(args.cursor)) throw new ArgumentError("invalid cursor", "cursor");
     q.set("cursor", args.cursor);
   }
   if (args.limit !== undefined) {
@@ -55,12 +64,7 @@ function listQuery(args: Args): string {
     }
     q.set("limit", String(args.limit));
   }
-  if (args.updated_since_ms !== undefined) {
-    if (!Number.isSafeInteger(args.updated_since_ms) || (args.updated_since_ms as number) < 0) throw new ArgumentError("updated_since_ms must be a time in unix ms", "updated_since_ms");
-    q.set("updated_since_ms", String(args.updated_since_ms));
-  }
-  const s = q.toString();
-  return s ? `?${s}` : "";
+  return q;
 }
 
 type Call = { method: "GET" | "POST"; path: string; scope: Scope; body?: unknown };
@@ -78,7 +82,7 @@ function pathArg(capability: CapabilityDefinition, field: string, value: unknown
 }
 
 /** Capabilities whose arguments the API's request doesn't take as they are. */
-const prepare: Record<string, (api: ApiBinding, args: Args) => Call> = {
+const prepare: Record<string, (api: ApiBinding, args: Args, via?: Via) => Call> = {
   queue_http(api, args) {
     // A queue is a lane to the API, which validates the rest of the request.
     const { run_at_ms, delay, queue, ...request } = args;
@@ -93,22 +97,24 @@ const prepare: Record<string, (api: ApiBinding, args: Args) => Call> = {
     call.body = { ...request, lane: queue };
     return call;
   },
-  list_tasks(api, args) {
-    return { method: api.method, path: `${api.path}${listQuery(args)}`, scope: api.scope };
+  list_tasks(api, args, via) {
+    const query = listQuery(args, via).toString();
+    return { method: api.method, path: query ? `${api.path}?${query}` : api.path, scope: api.scope };
   },
 };
 
 /**
  * The API call a capability makes, from its definition's binding. The API validates request
  * bodies fully and names the failing field; arguments that end up in a path are checked here.
- * Project allocation and get_payment_link are handled by the caller.
+ * Project allocation and get_payment_link are handled by the caller. `via` is set for a call made
+ * through A2A, which may ask of a capability what no other interface may.
  */
-export function route(capability: string, args: Args): Call {
+export function route(capability: string, args: Args, via?: Via): Call {
   const definition = definitions.get(capability);
   const api = definition?.api;
   if (!definition || !api) throw new ArgumentError(`unknown capability ${capability}`);
   const custom = prepare[capability];
-  if (custom) return custom(api, args);
+  if (custom) return custom(api, args, via);
   const fields = [...api.path.matchAll(/\{(\w+)\}/g)].map((m) => m[1]!);
   if (api.body !== "args" && api.body !== "rest") only(args, fields);
   let path = api.path;
@@ -124,6 +130,6 @@ export function route(capability: string, args: Args): Call {
 }
 
 export async function execute(client: ApiClient, capability: string, args: Args): Promise<unknown> {
-  const r = route(capability, args);
+  const r = route(capability, args, client.via);
   return client.call(r.method, r.path, r.scope, r.body);
 }

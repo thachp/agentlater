@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ApiClient, ApiError, importSigningKey, signAssertion } from "../src/api";
+import { ArgumentError, execute } from "../src/capabilities";
 
 const SEED = "07".repeat(32);
 
@@ -79,6 +80,16 @@ describe("ApiClient", () => {
     const claims = seen.map((r) => decode(r.headers.get("RunLater-Assertion")!.split(".")[0]!));
     expect(claims.map((c) => c.via)).toEqual([undefined, "a2a"]);
     expect(Object.keys(claims[0])).toEqual(["aud", "sub", "scope", "iat", "exp"]);
+  });
+
+  it("lets a capability take what is A2A's alone only when the call is made for A2A", async () => {
+    const seen: Request[] = [];
+    const key = await importSigningKey(SEED);
+    const args = { status: "delivering,retrying", updated_since_ms: 0, cursor: "1800000000000.42" };
+    await execute(new ApiClient(fetcher(200, {}, seen), key, "prj_1", "a2a"), "list_tasks", args);
+    expect(new URL(seen[0]!.url).search).toBe("?status=delivering%2Cretrying&cursor=1800000000000.42&updated_since_ms=0");
+    await expect(execute(new ApiClient(fetcher(200, {}, seen), key, "prj_1"), "list_tasks", args)).rejects.toBeInstanceOf(ArgumentError);
+    expect(seen).toHaveLength(1);
   });
 
   it("passes API errors through", async () => {
