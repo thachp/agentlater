@@ -28,17 +28,17 @@ function page(title: string, body: string, headers: Headers = new Headers(), sta
   // Colors copy the site's tokens (apps/web/app/globals.css); this page can't load its stylesheet.
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${escape(title)} · AgentLater</title><style>
-:root{color-scheme:light dark;--paper:#f5f3ee;--card:#fffefa;--ink:#20231f;--muted:#5d635a;--line:#dedfd6;--accent:#bf4325;--soft:#fce7dd}
-@media (prefers-color-scheme:dark){:root{--paper:#161816;--card:#1e211e;--ink:#ecebe4;--muted:#a3a99f;--line:#2f332e;--accent:#e3693f;--soft:#3a2219}}
-body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;display:grid;place-items:center;min-height:100vh;padding:16px;box-sizing:border-box}
+:root{color-scheme:light dark;--bg:#fcf9f5;--card:#fffdf9;--ink:#202020;--muted:#64615d;--line:#ddd7ce;--line-strong:#bfb6aa;--accent:#ea5827;--on-accent:#21150e;--accent-soft:#fce4d4}
+@media (prefers-color-scheme:dark){:root{--bg:#18191b;--card:#1b1d20;--ink:#f5f2ee;--muted:#b9b7b3;--line:#44464b;--line-strong:#5b5e64;--accent:#ff8a52;--accent-soft:#34271f}}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;display:grid;place-items:center;min-height:100vh;padding:16px;box-sizing:border-box}
 .shell{max-width:440px;width:100%}
-.brand{display:flex;align-items:center;gap:10px;font-weight:650;font-size:17px;margin:0 0 16px}.brand svg{width:28px;height:28px;flex:none}
-main{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:28px;box-sizing:border-box}
-h1{font-size:22px;line-height:1.15;font-weight:600;letter-spacing:-0.02em;margin:0 0 14px;overflow-wrap:anywhere}p{margin:0 0 12px}.muted{color:var(--muted);font-size:14px}
-code{font:0.9em ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--soft);padding:0.1em 0.35em;border-radius:5px;overflow-wrap:anywhere}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:20px;letter-spacing:-0.03em;margin:0 0 16px}.brand svg{width:28px;height:28px;flex:none}
+main{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:28px;box-sizing:border-box}
+h1{font-size:22px;line-height:1.15;font-weight:650;letter-spacing:-0.02em;margin:0 0 14px;overflow-wrap:anywhere}p{margin:0 0 12px}.muted{color:var(--muted);font-size:14px}
+code{font:0.9em ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--accent-soft);padding:0.1em 0.35em;border-radius:5px;overflow-wrap:anywhere}
 .warn{border-left:3px solid var(--accent);padding:6px 12px;font-size:14px}
-.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}button{font:inherit;font-weight:600;border-radius:10px;padding:9px 16px;cursor:pointer;border:1px solid var(--ink);background:transparent;color:var(--ink)}
-button.primary{background:var(--ink);color:var(--paper)}button:hover{opacity:0.88}button:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
+.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}button{font:inherit;font-weight:650;border-radius:9px;padding:10px 18px;cursor:pointer;border:1px solid var(--line-strong);background:transparent;color:var(--ink)}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}button:hover{filter:brightness(1.08)}button:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
 </style></head><body><div class="shell"><p class="brand">${ICON}AgentLater</p><main>${body}</main></div></body></html>`;
   return new Response(html, { status, headers });
 }
@@ -68,7 +68,7 @@ export async function handleAuthorize(request: Request, env: ConsentEnv): Promis
       return page(
         "Connect",
         `<h1>Connect ${escape(name)} to AgentLater?</h1>
-<p>It will be able to schedule HTTP requests, crons and watches, and read their results. They run from a new AgentLater project with a free trial: 100 delivery attempts over 7 days.</p>
+<p>It will be able to schedule HTTP requests, crons and watches, and read their results. They run from a new AgentLater project with a free trial: 1,000 delivery attempts over 7 days.</p>
 <p class="muted">There's no account. This connection is the project's only key: if it is removed, so is access to the project.</p>
 <p class="muted">You'll return to <code>${escape(about.redirectHost)}</code>.</p>${local}
 <form method="post"><input type="hidden" name="handle" value="${escape(handle)}">

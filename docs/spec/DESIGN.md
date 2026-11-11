@@ -72,7 +72,7 @@ The start-of-session inbox check only works if agents know about it, so it's sai
 | Pay | `apps/web/app/pay` | Say what's being bought and for which project, then Stripe's form |
 | Legal, 404 | `apps/web/app/{terms,privacy,not-found}` | Plain text in the same frame |
 
-The consent page belongs to the gateway Worker and has a strict CSP (`default-src 'none'`), so it can't load the site's stylesheet, fonts or images. Its styles are inline, with the icon as inline SVG. Its colors are a hand-made copy of the site's tokens, so any brand change has to be copied there by hand (it still has the previous palette: see Known gaps).
+The consent page belongs to the gateway Worker and has a strict CSP (`default-src 'none'`), so it can't load the site's stylesheet, fonts or images. Its styles are inline, with the icon as inline SVG. Its colors are a hand-made copy of the site's tokens, so any brand change has to be copied there by hand.
 
 ### Moments that matter
 
@@ -199,7 +199,6 @@ Found while writing this down, from reading the code and computing contrast. The
 | Gap | Where | Why it matters | Suggested fix |
 | --- | --- | --- | --- |
 | **Icon and accent are different oranges:** `#db4b27` and `#ea5827` | `icon.svg`, `globals.css` | Minor drift. The icon's white on orange is 4.12:1, fine for a graphic. | Decide whether it's deliberate |
-| **The consent page still has the previous palette** | `apps/gateway/src/consent.ts` | It copies the site's tokens by hand, and the site's changed. | Copy the tokens above into it |
 | **`/llms.txt` lacks the start-of-session inbox check** | `apps/gateway/src/discovery.ts` | An agent that only reads this page misses the habit. | Add the sentence |
 | **`watch_http`'s description has no untrusted-data warning** | `packages/contracts/src/capabilities.ts` | It returns up to 16 KiB of someone else's response body. | Add the sentence |
 | **No social preview** | `layout.tsx` metadata | Links shared in chat show no image or card. | Add Open Graph metadata and an image |
