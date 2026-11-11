@@ -1,8 +1,11 @@
 // The A2A interface (https://a2a-protocol.org/v1.0.1/specification/): a public Agent Card, the
-// JSON Schema of the request it takes, and a JSON-RPC endpoint at /a2a, all served only when
-// A2A_ENABLED is "true". /a2a is an adapter: SendMessage runs schedule_http or queue_http, GetTask
-// get_task, ListTasks list_tasks and CancelTask cancel_task, so validation, budget, rate limit and
-// idempotency are the capabilities'.
+// JSON Schema of the request it takes, and a JSON-RPC endpoint at /a2a, all served by `serveA2a`
+// and only when A2A_ENABLED is "true". /a2a is an adapter: SendMessage runs schedule_http or
+// queue_http, GetTask get_task, ListTasks list_tasks and CancelTask cancel_task, so validation,
+// budget, rate limit and idempotency are the capabilities'.
+//
+// In this order: what is published (the payload schema and the card), who calls, a delivery task
+// as an A2A task, the operations, and the HTTP transport.
 
 import { A2A_VERSION_HEADER, AgentCard, Task, TaskState, type ListTasksRequest, type ListTasksResponse, type SendMessageRequest } from "@a2a-js/sdk";
 import {
@@ -35,8 +38,10 @@ export const a2aUrl = (env: { PUBLIC_URL: string }) => `${env.PUBLIC_URL}/a2a`;
 /** Where an agent registers before it can call /a2a. */
 const discoveryUrl = (env: A2aEnv) => `${env.PUBLIC_URL}/.well-known/agent-configuration`;
 
+// ---- Published: the payload schema and the Agent Card
+
 /** Where the schema of the data part is served. A change that breaks a caller gets a new version beside it. */
-export const PAYLOAD_SCHEMA_PATH = "/a2a/schemas/deliver-http/v1.json";
+const PAYLOAD_SCHEMA_PATH = "/a2a/schemas/deliver-http/v1.json";
 const payloadSchemaUrl = (env: A2aEnv) => `${env.PUBLIC_URL}${PAYLOAD_SCHEMA_PATH}`;
 
 /** What the data part may hold, of what schedule_http takes: no callback and no lane in this version. */
@@ -58,7 +63,7 @@ const EXAMPLE = JSON.stringify({ url: "https://example.com/hook", method: "POST"
  * The JSON Schema of the one data part SendMessage takes. Each field's rules are schedule_http's
  * own, so the two cannot drift; the API, not this schema, is what validates a request.
  */
-export const payloadSchema = (env: A2aEnv) => ({
+const payloadSchema = (env: A2aEnv) => ({
   $schema: "https://json-schema.org/draft/2020-12/schema",
   $id: payloadSchemaUrl(env),
   title: "AgentLater A2A delivery request, version 1",
@@ -149,8 +154,7 @@ function card(env: A2aEnv): AgentCard {
   });
 }
 
-/** The Agent Card as served at /.well-known/agent-card.json. */
-export const agentCard = (env: A2aEnv) => AgentCard.toJSON(card(env));
+// ---- Who calls
 
 /**
  * Who is calling, once the token is verified: the Agent Auth host the agent belongs to, which owns
@@ -195,6 +199,8 @@ const noStreaming = unsupported("streaming");
 const noPush = () => {
   throw new PushNotificationNotSupportedError();
 };
+
+// ---- A delivery task as an A2A task
 
 /** Runs a capability for a host, as `runCapability` does, marked as a call made through A2A. */
 type Run = (hostId: string, capability: string, args: Record<string, unknown>) => Promise<unknown>;
@@ -259,6 +265,8 @@ function a2aTask(view: TaskView, { note, artifacts = true }: { note?: string; ar
       : [],
   });
 }
+
+// ---- The operations
 
 /** Where the payload sits in a SendMessage request, for naming one of its fields. */
 const PAYLOAD = "message.parts[0].data";
@@ -367,7 +375,7 @@ function operationsFor(env: A2aEnv, caller: Caller, run: Run) {
   }
 
   const operations: A2ARequestHandler = {
-    // Part of the SDK's interface, but its JSON-RPC handler never asks; agentCard() serves the card.
+    // Part of the SDK's interface, but its JSON-RPC handler never asks; serveA2a serves the card.
     getAgentCard: unsupported("this operation"),
     getAuthenticatedExtendedAgentCard: unsupported("the extended Agent Card"),
     sendMessage,
@@ -388,6 +396,8 @@ function operationsFor(env: A2aEnv, caller: Caller, run: Run) {
   return { operations, refused: () => refused };
 }
 
+// ---- The HTTP transport
+
 /** The same limit as the gateway's other JSON endpoints. */
 const MAX_BODY_BYTES = 192 * 1024;
 
@@ -403,7 +413,7 @@ const rpcError = (error: unknown) => rpcResponse({ jsonrpc: "2.0", id: null, err
  * Answers a request to /a2a: the protocol version first (a header, so nothing is read for a caller
  * that speaks another version), then credentials, refused with HTTP 401 or 403, and only then JSON-RPC.
  */
-export async function handleA2a(request: Request, env: A2aEnv, verify: Verify, run: Run): Promise<Response> {
+async function handleA2a(request: Request, env: A2aEnv, verify: Verify, run: Run): Promise<Response> {
   if (request.method !== "POST") {
     return Response.json({ error: "method_not_allowed", message: "POST a JSON-RPC request" }, { status: 405, headers: { Allow: "POST" } });
   }
@@ -446,4 +456,22 @@ export async function handleA2a(request: Request, env: A2aEnv, verify: Verify, r
     answer.error.message = "AgentLater could not complete this request; try again";
   }
   return rpcResponse(answer);
+}
+
+/** What the card and the schema are served with: both are public, and a browser may read them. */
+const PUBLIC = { "Cache-Control": "public, max-age=300", "Access-Control-Allow-Origin": "*" };
+
+/**
+ * The A2A interface's answer to a request, or null when the request is not for it: A2A is switched
+ * off here, or the path is not the card's, the schema's or /a2a. `verify` says who is calling /a2a,
+ * and `run` runs a capability for that caller.
+ */
+export function serveA2a(request: Request, env: A2aEnv, verify: Verify, run: Run): Promise<Response> | Response | null {
+  if (!a2aEnabled(env)) return null;
+  const { pathname } = new URL(request.url);
+  if (pathname === "/a2a") return handleA2a(request, env, verify, run);
+  if (request.method !== "GET") return null;
+  if (pathname === "/.well-known/agent-card.json") return Response.json(AgentCard.toJSON(card(env)), { headers: PUBLIC });
+  if (pathname === PAYLOAD_SCHEMA_PATH) return Response.json(payloadSchema(env), { headers: { "Content-Type": "application/schema+json", ...PUBLIC } });
+  return null;
 }

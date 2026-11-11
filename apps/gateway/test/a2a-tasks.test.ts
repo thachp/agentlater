@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { capabilities } from "@runlater/contracts/capabilities";
 import { describe, expect, it } from "vitest";
-import { Caller, handleA2a } from "../src/a2a";
+import { Caller, serveA2a } from "../src/a2a";
 import { ApiError } from "../src/api";
 import { ArgumentError } from "../src/capabilities";
 import worker, { type Env } from "../src/index";
@@ -63,7 +63,7 @@ function adapter(grants = ALL, answer: (capability: string, args: Json) => unkno
       headers: { "A2A-Version": "1.0", Authorization: "Bearer verified" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 7, method, params }),
     });
-    const res = await handleA2a(
+    const res = (await serveA2a(
       request,
       on,
       async () => new Caller("host_1", new Set(grants)),
@@ -72,7 +72,7 @@ function adapter(grants = ALL, answer: (capability: string, args: Json) => unkno
         ran.push([capability, args]);
         return answer(capability, args);
       },
-    );
+    ))!;
     return { status: res.status, body: (await res.json()) as Json };
   };
   return { ran, send };

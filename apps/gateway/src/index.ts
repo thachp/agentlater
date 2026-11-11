@@ -4,7 +4,7 @@
 // A2A_ENABLED is on, the A2A Agent Card and /a2a.
 
 import { OAuthProvider, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
-import { a2aEnabled, agentCard, handleA2a, PAYLOAD_SCHEMA_PATH, payloadSchema, type A2aEnv } from "./a2a";
+import { a2aEnabled, serveA2a, type A2aEnv } from "./a2a";
 import { importSigningKey } from "./api";
 import { BASE_PATH, createAuth, malformedCredential, replayed, type AuthEnv } from "./auth";
 import { handleStripeWebhook, type BillingEnv } from "./billing";
@@ -96,23 +96,14 @@ const gateway = {
       });
     }
 
-    if (a2aEnabled(env) && request.method === "GET" && url.pathname === "/.well-known/agent-card.json") {
-      return Response.json(agentCard(env), { headers: { "Cache-Control": "public, max-age=300", "Access-Control-Allow-Origin": "*" } });
-    }
-    if (a2aEnabled(env) && request.method === "GET" && url.pathname === PAYLOAD_SCHEMA_PATH) {
-      return Response.json(payloadSchema(env), {
-        headers: { "Content-Type": "application/schema+json", "Cache-Control": "public, max-age=300", "Access-Control-Allow-Origin": "*" },
-      });
-    }
-    if (a2aEnabled(env) && url.pathname === "/a2a") {
-      return handleA2a(
-        request,
-        env,
-        async (r) => createAuth(env, ctx, await signingKey(env)).a2aCaller(r),
-        // The only place a call is marked as made through A2A.
-        async (hostId, capability, args) => runCapability(env, await signingKey(env), hostId, capability, args, "a2a"),
-      );
-    }
+    const a2a = serveA2a(
+      request,
+      env,
+      async (r) => createAuth(env, ctx, await signingKey(env)).a2aCaller(r),
+      // The only place a call is marked as made through A2A.
+      async (hostId, capability, args) => runCapability(env, await signingKey(env), hostId, capability, args, "a2a"),
+    );
+    if (a2a) return a2a;
 
     if (request.method === "GET" && url.pathname === "/health") {
       const api = await env.API.fetch("https://api.internal/health");

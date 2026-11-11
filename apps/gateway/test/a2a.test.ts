@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { Caller, handleA2a, type Refusal } from "../src/a2a";
+import { Caller, serveA2a, type Refusal } from "../src/a2a";
 import worker, { type Env } from "../src/index";
+
+/** /a2a itself, without the rest of the gateway: the verifier and the capabilities are the test's. */
+const handleA2a = async (...args: Parameters<typeof serveA2a>) => (await serveA2a(...args))!;
 
 const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
 const SECRETS = { ASSERTION_PRIVATE_KEY: "07".repeat(32), BETTER_AUTH_SECRET: "better-auth-secret-value", STRIPE_SECRET_KEY: "sk_test_value" };
