@@ -5,8 +5,7 @@
 export const MAX_BODY_BYTES = 192 * 1024;
 
 /** A JSON answer, never cached. */
-export const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
-  Response.json(body, { status, headers: { "Cache-Control": "no-store", ...headers } });
+export const json = (body: unknown, status = 200, headers?: Record<string, string>) => Response.json(body, { status, headers: { "Cache-Control": "no-store", ...headers } });
 export const error = (status: number, code: string, message: string, headers?: Record<string, string>) => json({ error: code, message }, status, headers);
 export const tooLarge = () => error(413, "too_large", "request body is too large");
 

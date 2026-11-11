@@ -3,9 +3,6 @@
 // and only when A2A_ENABLED is "true". /a2a is an adapter: SendMessage runs schedule_http or
 // queue_http, GetTask get_task, ListTasks list_tasks and CancelTask cancel_task, so validation,
 // budget, rate limit and idempotency are the capabilities'.
-//
-// In this order: what is published (the payload schema and the card), who calls, a delivery task
-// as an A2A task, the operations, and the HTTP transport.
 
 import { A2A_VERSION_HEADER, AgentCard, Task, TaskState, type ListTasksRequest, type ListTasksResponse, type SendMessageRequest } from "@a2a-js/sdk";
 import {
@@ -185,35 +182,15 @@ export interface Refusal {
 }
 
 /** The refusal of an agent that does not hold a capability it needs: a2a itself, or the one an operation runs. */
-export const notGranted = (capability: string): Refusal => ({
-  status: 403,
-  code: "capability_not_granted",
-  message: `this agent does not hold the ${capability} capability; request it, or register an agent with it`,
-});
+export const notGranted = (capability: string): Refusal =>
+  ({ status: 403, code: "capability_not_granted", message: `this agent does not hold the ${capability} capability; request it, or register an agent with it` });
 
 /** Says who a request's bearer credential belongs to, or why it is refused. */
 type Verify = (request: Request) => Promise<Caller | Refusal>;
-
-/** A refusal as HTTP. A 401 carries the Agent Auth challenge (its specification, 5.14), so a caller can find where to register. */
-function refuse(env: A2aEnv, { status, code, message, retryAfter }: Refusal): Response {
-  return error(status, code, message, {
-    ...(status === 401 ? { "WWW-Authenticate": `AgentAuth discovery="${discoveryUrl(env)}"` } : {}),
-    ...(retryAfter ? { "Retry-After": retryAfter } : {}),
-  });
-}
-
-const unsupported = (what: string) => () => {
-  throw new UnsupportedOperationError(`${what} is not supported`);
-};
-const noStreaming = unsupported("streaming");
-const noPush = () => {
-  throw new PushNotificationNotSupportedError();
-};
-
-// ---- A delivery task as an A2A task
-
 /** Runs a capability for a host, as `runCapability` does, marked as a call made through A2A. */
 type Run = (hostId: string, capability: string, args: Record<string, unknown>) => Promise<unknown>;
+
+// ---- A delivery task as an A2A task
 
 /** What the adapter reads of a task as get_task returns it. */
 type TaskView = { id: string; status: string; updated_ms: number; capture: boolean; response: unknown } & Record<string, unknown>;
@@ -295,10 +272,17 @@ async function keyFor(messageId: string): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+const unsupported = (what: string) => () => {
+  throw new UnsupportedOperationError(`${what} is not supported`);
+};
+const noStreaming = unsupported("streaming");
+const noPush = () => {
+  throw new PushNotificationNotSupportedError();
+};
+
 /**
  * What each A2A operation does for one caller. An operation that uses a capability the agent does
- * not hold runs nothing and stops at `refused`, which takes the refusal and does not return: the
- * answer to it is HTTP's, not JSON-RPC's.
+ * not hold runs nothing and stops at `refused`, which takes the refusal and does not return.
  */
 function operationsFor(env: A2aEnv, caller: Caller, run: Run, refused: (refusal: Refusal) => never): A2ARequestHandler {
   /** Stops an operation that uses a capability the agent does not hold. */
@@ -407,13 +391,21 @@ function operationsFor(env: A2aEnv, caller: Caller, run: Run, refused: (refusal:
 /** The same limit as the gateway's other JSON endpoints. */
 const MAX_BODY_BYTES = 192 * 1024;
 
+/** A refusal as HTTP. A 401 carries the Agent Auth challenge (its specification, 5.14), so a caller can find where to register. */
+function refuse(env: A2aEnv, { status, code, message, retryAfter }: Refusal): Response {
+  return error(status, code, message, {
+    ...(status === 401 ? { "WWW-Authenticate": `AgentAuth discovery="${discoveryUrl(env)}"` } : {}),
+    ...(retryAfter ? { "Retry-After": retryAfter } : {}),
+  });
+}
+
 /** A single JSON-RPC 2.0 request; batches are not part of the A2A binding. */
 const isRpcRequest = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value) && "jsonrpc" in value && value.jsonrpc === "2.0" && "method" in value && typeof value.method === "string";
 
 /** A JSON-RPC answer, as far as the transport reads one. Protocol errors travel in the body, so the HTTP status is 200. */
 type RpcAnswer = { error?: { code: number; message: string } };
-const rpcError = (problem: { code: number; message: string }): RpcAnswer => ({ jsonrpc: "2.0", id: null, error: problem }) as RpcAnswer;
+const rpcError = (problem: { code: number; message: string }) => ({ jsonrpc: "2.0", id: null, error: problem });
 
 /** What a log line may carry of something a caller or a library chose: a short plain word, such as a method name, a code or a ray id. A token, a URL or a sentence is not one. */
 const word = (value: unknown) => (typeof value === "string" && /^[\w-]{1,64}$/.test(value) ? value : null);
@@ -467,17 +459,17 @@ async function handleA2a(request: Request, env: A2aEnv, verify: Verify, run: Run
   // The SDK's handler answers both of these with -32602; the specification (9.5) gives each its own code.
   if (!isRpcRequest(rpc)) return answered(rpcError({ code: A2A_ERROR_CODE.INVALID_REQUEST, message: "Request payload validation error" }));
   method = word(rpc.method);
-  // The SDK's dispatcher answers whatever an operation throws as a JSON-RPC error. A refusal is
-  // HTTP's to answer, so an operation hands it over here before it stops.
-  let refusal: Refusal | undefined;
-  const operations = operationsFor(env, caller, run, (refused) => {
-    refusal = refused;
-    throw new Error(refused.message);
-  });
   // The SDK's dispatcher: method names, parameter and result codecs, and error codes. Always one
-  // answer, never a stream: both streaming methods throw before a stream exists.
+  // answer, never a stream: both streaming methods throw before a stream exists. It answers
+  // whatever an operation throws as a JSON-RPC error, so a refusal, which is HTTP's to answer, is
+  // handed over here before the operation stops.
+  let stopped: Refusal | undefined;
+  const operations = operationsFor(env, caller, run, (refusal) => {
+    stopped = refusal;
+    throw new Error(refusal.message);
+  });
   const answer = (await new JsonRpcTransportHandler(operations).handle(rpc, new ServerCallContext({ requestedVersion, user: caller }))) as RpcAnswer;
-  if (refusal) return refused(refusal);
+  if (stopped) return refused(stopped);
   if (answer.error?.code === A2A_ERROR_CODE.INTERNAL_ERROR) {
     // The SDK passes on the message of whatever was thrown, which may describe AgentLater's insides.
     console.error("a2a operation failed", rpc.method, answer.error.message);
