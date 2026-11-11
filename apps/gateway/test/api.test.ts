@@ -21,7 +21,7 @@ const bytes = (s: string) =>
 describe("assertions", () => {
   it("signs claims the API accepts", async () => {
     const key = await importSigningKey(SEED);
-    const token = await signAssertion(key, "prj_1", ["read", "schedule"], 1_000);
+    const token = await signAssertion(key, "prj_1", ["read", "schedule"], { nowSecs: 1_000 });
     const [payload, sig] = token.split(".");
     expect(decode(payload!)).toEqual({
       aud: "runlater-api",
@@ -41,7 +41,7 @@ describe("assertions", () => {
 
   it("produces the exact token the Rust API's tests verify", async () => {
     // Pinned in apps/api/src/assertion.rs (accepts_a_token_signed_by_the_gateway).
-    const token = await signAssertion(await importSigningKey(SEED), "prj_1", ["read", "schedule"], 1_767_225_600);
+    const token = await signAssertion(await importSigningKey(SEED), "prj_1", ["read", "schedule"], { nowSecs: 1_767_225_600 });
     expect(token).toBe(
       "eyJhdWQiOiJydW5sYXRlci1hcGkiLCJzdWIiOiJwcmpfMSIsInNjb3BlIjoicmVhZCBzY2hlZHVsZSIsImlhdCI6MTc2NzIyNTYwMCwiZXhwIjoxNzY3MjI1NjYwfQ.M-yCfOuEo_oLgifHXheOnecRoRyAjPf8bOIvfB40Nn5gBX1nYyubLruWjKOqCQSJXjcv81ogOT6yvv0MbHNECQ",
     );

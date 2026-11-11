@@ -156,20 +156,15 @@ fn gateway_key(env: &Env) -> Option<assertion::VerifyingKey> {
     assertion::parse_public_key(&setting(env, "GATEWAY_PUBLIC_KEY")?)
 }
 
-/// A request to a project's ledger, naming the project its sender vouches for, and whether the
-/// call came through A2A.
+/// A request to a project's ledger, naming the project its sender vouches for.
 fn ledger_request(
     project_id: &str,
-    a2a: bool,
     method: Method,
     url: &str,
     body: Option<JsValue>,
 ) -> Result<Request> {
     let headers = Headers::new();
     headers.set(PROJECT_HEADER, project_id)?;
-    if a2a {
-        headers.set(VIA_HEADER, "a2a")?;
-    }
     headers.set("Content-Type", "application/json")?;
     let mut init = RequestInit::new();
     init.with_method(method)
@@ -210,7 +205,10 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         Method::Post => Some(req.bytes().await?.into()),
         _ => None,
     };
-    let forwarded = ledger_request(&claims.project_id, claims.a2a, method, url.as_str(), body)?;
+    let mut forwarded = ledger_request(&claims.project_id, method, url.as_str(), body)?;
+    if claims.a2a {
+        forwarded.headers_mut()?.set(VIA_HEADER, "a2a")?;
+    }
     env.durable_object("LEDGER")?
         .get_by_name(&claims.project_id)?
         .fetch_with_request(forwarded)
@@ -539,9 +537,10 @@ impl DurableObject for TaskLedger {
 
     async fn fetch(&self, mut req: Request) -> Result<Response> {
         let sql = self.sql();
-        let a2a = req.headers().get(VIA_HEADER)?.as_deref() == Some("a2a");
+        let through_a2a = req.headers().get(VIA_HEADER)?.as_deref() == Some("a2a");
         let ledger = match self.ledger(&sql) {
-            Ok(l) => l.through_a2a(a2a),
+            Ok(l) if through_a2a => l.through_a2a(),
+            Ok(l) => l,
             Err(e) => return error(e.into()),
         };
         let response = self.route(&mut req, &ledger).await?;
@@ -581,7 +580,7 @@ async fn call<T: DeserializeOwned>(
 ) -> Result<T> {
     let body = serde_json::to_string(payload)?.into();
     let url = format!("https://ledger{path}");
-    let req = ledger_request(project_id, false, Method::Post, &url, Some(body))?;
+    let req = ledger_request(project_id, Method::Post, &url, Some(body))?;
     let mut res = stub.fetch_with_request(req).await?;
     if res.status_code() != 200 {
         return Err(Error::RustError(format!(

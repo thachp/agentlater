@@ -117,9 +117,9 @@ impl<'a, D: Db> Ledger<'a, D> {
         })
     }
 
-    /// The ledger as a request that came through A2A sees it, or not.
-    pub fn through_a2a(self, a2a: bool) -> Self {
-        Self { a2a, ..self }
+    /// The ledger as a request that came through A2A sees it.
+    pub fn through_a2a(self) -> Self {
+        Self { a2a: true, ..self }
     }
 
     /// The ledger for a deployment that has keys to seal secrets with.
@@ -361,7 +361,7 @@ mod tests {
             drive(&l, "old", http(200), None, T0).1,
             Some(Status::Succeeded)
         );
-        let a2a = Ledger::open(&db).unwrap().through_a2a(true);
+        let a2a = Ledger::open(&db).unwrap().through_a2a();
         assert_eq!(a2a.task("old").unwrap_err().code, "task_not_found");
         a2a.schedule(req("https://a.example.com/"), "new", T0)
             .unwrap();
@@ -413,7 +413,7 @@ mod tests {
     fn through_a2a_a_purged_task_reads_like_one_that_never_was_or_was_made_another_way() {
         let db = Memory::new();
         let l = setup(&db);
-        let a2a = Ledger::open(&db).unwrap().through_a2a(true);
+        let a2a = Ledger::open(&db).unwrap().through_a2a();
         a2a.schedule(req("https://a.example.com/"), "t1", T0)
             .unwrap();
         drive(&a2a, "t1", http(200), None, T0);

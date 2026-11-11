@@ -10,7 +10,7 @@ export type Scope = ApiScope;
  * scheduled by such a call, and finds only marked tasks for one. Only code here sets it: no
  * capability argument reaches the assertion.
  */
-export type Via = "a2a" | undefined;
+export type Via = "a2a";
 
 const AUDIENCE = "runlater-api";
 const LIFETIME_SECS = 60;
@@ -43,8 +43,7 @@ export async function signAssertion(
   key: CryptoKey,
   projectId: string,
   scopes: Scope[],
-  nowSecs = Math.floor(Date.now() / 1000),
-  via?: Via,
+  { nowSecs = Math.floor(Date.now() / 1000), via }: { nowSecs?: number; via?: Via } = {},
 ): Promise<string> {
   const claims = {
     aud: AUDIENCE,
@@ -82,7 +81,7 @@ export class ApiClient {
       method,
       headers: {
         "Content-Type": "application/json",
-        "RunLater-Assertion": await signAssertion(this.key, this.projectId, [scope], undefined, this.via),
+        "RunLater-Assertion": await signAssertion(this.key, this.projectId, [scope], { via: this.via }),
       },
       body: body === undefined ? null : JSON.stringify(body),
     });

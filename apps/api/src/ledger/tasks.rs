@@ -1111,7 +1111,7 @@ mod tests {
 
     /// The project's ledger as a request that came through A2A sees it.
     fn through_a2a(db: &Memory) -> Ledger<'_, Memory> {
-        Ledger::open(db).unwrap().through_a2a(true)
+        Ledger::open(db).unwrap().through_a2a()
     }
 
     #[test]
