@@ -130,8 +130,8 @@ The bridge keeps the agent's keys in `~/.agent-auth`. Losing them loses access t
 
 | Capability | Input | Output |
 | --- | --- | --- |
-| `create_project` | — | project id, trial budget, expiry |
-| `get_project` | — | budget used/remaining, expiry, `paid`, signing secret, `inbox_unread`, `wake` |
+| `create_project` | — | project id, trial budget, expiry, signing secret (again on every repeat call) |
+| `get_project` | — | budget used/remaining, expiry, `paid`, `inbox_unread`, `wake`; never the signing secret |
 | `get_payment_link` | — | `payment_url` for a person to buy a pack, `mpp_url` for the agent to buy one over MPP, expiries, price |
 | `schedule_http` | `url`, `method?`, `headers?`, `body?`, `run_at_ms?` or `delay?`, `idempotency_key?`, `max_attempts?`, `callback_url?`, `capture?`, `lane?` | `task_id`, `status` |
 | `queue_http` | `url`, `method?`, `headers?`, `body?`, `idempotency_key?`, `max_attempts?`, `callback_url?`, `capture?`, `queue?` | `task_id`, `status` |
@@ -163,7 +163,7 @@ services, not a public product in v1.
 
 - **Destinations:** `https://` on the default port to a public DNS name. No IP literals, credentials in the URL, fragments, or non-public names (`localhost`, `*.local`, `*.internal`, `*.test`, …). Checked when the task is accepted and again before every attempt. Resolved addresses are restricted to the public internet by Cloudflare (`global_fetch_strictly_public`).
 - **Methods and headers:** `GET`, `POST` (default), `PUT`, `PATCH`, `DELETE`. Callers may set any header except hop-by-hop/framing headers (`Host`, `Content-Length`, `Transfer-Encoding`, …) and the `RunLater-*`, `CF-*`, `X-Forwarded-*` and `Proxy-*` families. `GET` cannot have a body.
-- **Signing:** every outbound request carries `RunLater-Task-Id`, `RunLater-Attempt`, `RunLater-Timestamp` (unix seconds) and `RunLater-Signature: v1=<hex>`, an HMAC-SHA256 with the project's signing secret over `"{timestamp}.{task_id}.{attempt}."` followed by the raw body. While a secret is being rotated, the header carries one comma-separated `v1=` entry per active secret. Receivers should reject timestamps more than 5 minutes off.
+- **Signing:** every outbound request carries `RunLater-Task-Id`, `RunLater-Attempt`, `RunLater-Timestamp` (unix seconds) and `RunLater-Signature: v1=<hex>`, an HMAC-SHA256 with the project's signing secret over `"{timestamp}.{task_id}.{attempt}."` followed by the raw body. While a secret is being rotated, the header carries one comma-separated `v1=` entry per active secret. Receivers should reject timestamps more than 5 minutes off. Only `create_project` returns the signing secret, the first time and on every repeat call; `get_project` leaves it out, because agents call it at the start of every session and the secret would land in every transcript.
 - **Retries:** default 5 attempts total, max 5. Delays before retries 1 to 4 are 10 s, 2 min, 20 min and 40 min, with equal jitter, so five attempts span 31 to 62 minutes and outlast a 30-minute outage. A `Retry-After` from the destination is honoured as a minimum, up to 40 min. A task that keeps failing holds its lane, and delays its callback, a cron's `failing` alert or a failed wake's count, for that whole span; pass a lower `max_attempts` where speed matters more.
 - **Timeout:** 10 s per attempt. Redirects are not followed.
 - **Success:** any 2xx. Retry on 408, 425, 429, 5xx, timeouts and network errors. Anything else (other 4xx, 3xx) fails without retry.

@@ -38,7 +38,7 @@ paths:
       description: >
         Creates the project with a fresh trial. Idempotent: a repeat returns the existing
         project unchanged (200) and never refills the trial or rotates the secret.
-        Scope: project.
+        The only route that returns signing_secret, on 201 and on 200. Scope: project.
       responses:
         "201": { $ref: "#/components/responses/Project" }
         "200": { $ref: "#/components/responses/Project" }
@@ -671,7 +671,7 @@ components:
       enum: [GET, POST, PUT, PATCH, DELETE]
     Project:
       type: object
-      required: [id, created_ms, expires_ms, attempt_budget, attempts_used, attempts_remaining, paid, signing_secret, inbox_unread, wake]
+      required: [id, created_ms, expires_ms, attempt_budget, attempts_used, attempts_remaining, paid, inbox_unread, wake]
       properties:
         id: { type: string }
         created_ms: { type: integer }
@@ -680,7 +680,7 @@ components:
         attempts_used: { type: integer }
         attempts_remaining: { type: integer }
         paid: { type: boolean, description: Whether attempts have ever been bought for this project. }
-        signing_secret: { type: string, description: Verifies RunLater-Signature on deliveries. }
+        signing_secret: { type: string, description: "Verifies RunLater-Signature on deliveries. Present only in createProject's responses." }
         inbox_unread: { type: integer, description: Inbox events after the acked cursor. }
         wake:
           oneOf: [{ $ref: "#/components/schemas/Wake" }, { type: "null" }]

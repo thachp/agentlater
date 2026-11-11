@@ -267,7 +267,11 @@ describe("agent journey through the gateway", () => {
     assert.equal(project.attempts_remaining, 1_000);
     const again = data(await client.executeCapability({ agentId, capability: "create_project", arguments: {} }));
     assert.equal(again.id, project.id);
+    assert.match(project.signing_secret, /^rls_[0-9a-f]{64}$/);
     assert.equal(again.signing_secret, project.signing_secret);
+    const read = data(await client.executeCapability({ agentId, capability: "get_project", arguments: {} }));
+    assert.equal(read.id, project.id);
+    assert.equal("signing_secret" in read, false, "only create_project returns the signing secret");
   });
 
   test("schedule_http delivers a signed request", async () => {
@@ -648,7 +652,9 @@ describe("hosted MCP at /mcp", () => {
       await fetch(`${origin}/oauth/token`, { method: "POST", body: form({ grant_type: "refresh_token", refresh_token, client_id }) })
     ).json();
     const again = await mcpClient(refreshed.access_token);
-    assert.equal(value(await again.callTool({ name: "get_project", arguments: {} })).id, project.id);
+    const read = value(await again.callTool({ name: "get_project", arguments: {} }));
+    assert.equal(read.id, project.id);
+    assert.equal("signing_secret" in read, false, "the get_project tool leaves the signing secret out");
     await again.close();
 
     // A second connection is a separate owner with its own project.

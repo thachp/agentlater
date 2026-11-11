@@ -118,6 +118,9 @@ describe("api", () => {
     assert.equal(again.status, 200);
     assert.equal(again.json.signing_secret, first.json.signing_secret);
     secret = first.json.signing_secret;
+    const read = await api("GET", "/v1/projects/self");
+    assert.equal(read.json.id, first.json.id);
+    assert.equal("signing_secret" in read.json, false, "only create_project returns the signing secret");
   });
 
   test("validates requests and names the field", async () => {
@@ -283,8 +286,9 @@ describe("api", () => {
 
   test("wakes the agent when its inbox gets something, signed and with only a count", async () => {
     const project = "proj_wake";
-    assert.equal((await api("POST", "/v1/projects", { project })).status, 201);
-    const { signing_secret } = (await api("GET", "/v1/projects/self", { project })).json;
+    const created = await api("POST", "/v1/projects", { project });
+    assert.equal(created.status, 201);
+    const { signing_secret } = created.json;
     const set = await api("POST", "/v1/wake", {
       project,
       body: { url: "https://receiver.example.com/wake", headers: { Authorization: "Bearer trig" }, debounce: "1m" },

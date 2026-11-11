@@ -12,8 +12,10 @@ pub struct ProjectView {
     pub attempts_remaining: i64,
     /// Whether attempts have ever been bought for this project.
     pub paid: bool,
-    /// Receivers verify `RunLater-Signature` with this.
-    pub signing_secret: String,
+    /// Receivers verify `RunLater-Signature` with this. Only `create_project` returns it, so the
+    /// routine reads of a project don't put it in every transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing_secret: Option<String>,
     /// Inbox events not yet acked; `read_inbox` returns them.
     #[serde(default)]
     pub inbox_unread: i64,
@@ -47,7 +49,7 @@ impl ProjectRow {
             attempt_budget: self.attempt_budget,
             attempts_used: self.attempts_used,
             paid: self.paid != 0,
-            signing_secret: self.signing_secret,
+            signing_secret: None,
             inbox_unread: self.inbox_unread,
             wake: None,
         }
@@ -91,28 +93,32 @@ impl<D: Db> Ledger<'_, D> {
     }
 
     /// Creates the project with a fresh trial, or returns the existing one unchanged.
-    /// `signing_secret` is only used on creation.
+    /// `signing_secret` is only used on creation. The view carries the project's signing secret
+    /// either way: calling again is how to fetch it.
     pub fn create_project(
         &self,
         project_id: &str,
         signing_secret: &str,
         now: i64,
     ) -> Result<(ProjectView, bool), ApiError> {
-        if self.project_row()?.is_some() {
-            return Ok((self.project()?, false));
+        let existing = self.project_row()?.map(|p| p.signing_secret);
+        let created = existing.is_none();
+        if created {
+            self.db.exec(
+                "INSERT INTO project (id, created_ms, expires_ms, attempt_budget, attempts_used, \
+                 signing_secret) VALUES (?, ?, ?, ?, 0, ?)",
+                vec![
+                    project_id.into(),
+                    now.into(),
+                    (now + TRIAL_DURATION_MS).into(),
+                    TRIAL_ATTEMPTS.into(),
+                    signing_secret.into(),
+                ],
+            )?;
         }
-        self.db.exec(
-            "INSERT INTO project (id, created_ms, expires_ms, attempt_budget, attempts_used, \
-             signing_secret) VALUES (?, ?, ?, ?, 0, ?)",
-            vec![
-                project_id.into(),
-                now.into(),
-                (now + TRIAL_DURATION_MS).into(),
-                TRIAL_ATTEMPTS.into(),
-                signing_secret.into(),
-            ],
-        )?;
-        Ok((self.project()?, true))
+        let mut view = self.project()?;
+        view.signing_secret = existing.or_else(|| Some(signing_secret.into()));
+        Ok((view, created))
     }
 
     /// Adds `attempts` bought with payment `payment_id`, and makes the whole balance valid for
@@ -196,6 +202,18 @@ mod tests {
             again, p,
             "a second create must not refill or rekey the trial"
         );
+        assert_eq!(p.signing_secret.as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn only_create_project_returns_the_signing_secret() {
+        let db = Memory::new();
+        let l = setup(&db);
+        assert_eq!(l.project().unwrap().signing_secret, None);
+        let (credited, _) = l.add_credit("cs_1", 5_000, T0).unwrap();
+        assert_eq!(credited.signing_secret, None);
+        let json = serde_json::to_value(l.project().unwrap()).unwrap();
+        assert!(json.get("signing_secret").is_none(), "the key is left out");
     }
 
     #[test]
