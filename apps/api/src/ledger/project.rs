@@ -16,12 +16,23 @@ pub struct ProjectView {
     /// routine reads of a project don't put it in every transcript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing_secret: Option<String>,
+    /// When the signing secret that a rotation replaced stops signing; null outside an overlap.
+    #[serde(default)]
+    pub signing_secret_previous_until_ms: Option<i64>,
     /// Inbox events not yet acked; `read_inbox` returns them.
     #[serde(default)]
     pub inbox_unread: i64,
     /// Where AgentLater sends a wake when the inbox gets something; see `set_wake`.
     #[serde(default)]
     pub wake: Option<WakeView>,
+}
+
+/// What `rotate_signing_secret` answers: the only other place a signing secret is shown.
+#[derive(Debug, Serialize)]
+pub struct Rotated {
+    pub signing_secret: String,
+    /// When the secret this one replaced stops signing.
+    pub previous_valid_until_ms: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -31,7 +42,9 @@ pub(super) struct ProjectRow {
     pub(super) expires_ms: i64,
     pub(super) attempt_budget: i64,
     pub(super) attempts_used: i64,
-    pub(super) signing_secret: String,
+    signing_secret: String,
+    signing_secret_previous: Option<String>,
+    signing_secret_previous_until_ms: Option<i64>,
     pub(super) paid: i64,
     pub(super) inbox_last_seq: i64,
     pub(super) inbox_acked_seq: i64,
@@ -40,8 +53,9 @@ pub(super) struct ProjectRow {
 }
 
 impl ProjectRow {
-    fn view(self) -> ProjectView {
+    fn view(self, now: i64) -> ProjectView {
         ProjectView {
+            signing_secret_previous_until_ms: self.previous_until(now),
             attempts_remaining: (self.attempt_budget - self.attempts_used).max(0),
             id: self.id,
             created_ms: self.created_ms,
@@ -53,6 +67,20 @@ impl ProjectRow {
             inbox_unread: self.inbox_unread,
             wake: None,
         }
+    }
+
+    /// When the previous signing secret stops, while it is still signing at `now`.
+    fn previous_until(&self, now: i64) -> Option<i64> {
+        self.signing_secret_previous_until_ms
+            .filter(|until| now < *until)
+    }
+
+    /// The secrets that sign a delivery made at `now`, newest first.
+    pub(super) fn signing_secrets(self, now: i64) -> Vec<String> {
+        let previous = self.previous_until(now).and(self.signing_secret_previous);
+        std::iter::once(self.signing_secret)
+            .chain(previous)
+            .collect()
     }
 
     pub(super) fn max_retained_tasks(&self) -> i64 {
@@ -78,6 +106,7 @@ impl<D: Db> Ledger<'_, D> {
             .db
             .query(
                 "SELECT id, created_ms, expires_ms, attempt_budget, attempts_used, signing_secret, \
+                 signing_secret_previous, signing_secret_previous_until_ms, \
                  EXISTS (SELECT 1 FROM payments) AS paid, inbox_last_seq, inbox_acked_seq, \
                  inbox_dropped, (SELECT COUNT(*) FROM inbox WHERE seq > p.inbox_acked_seq) \
                  AS inbox_unread FROM project p LIMIT 1",
@@ -86,8 +115,8 @@ impl<D: Db> Ledger<'_, D> {
             .pop())
     }
 
-    pub fn project(&self) -> Result<ProjectView, ApiError> {
-        let mut view = self.project_row()?.ok_or_else(no_project)?.view();
+    pub fn project(&self, now: i64) -> Result<ProjectView, ApiError> {
+        let mut view = self.project_row()?.ok_or_else(no_project)?.view(now);
         view.wake = self.wake_view()?;
         Ok(view)
     }
@@ -116,9 +145,44 @@ impl<D: Db> Ledger<'_, D> {
                 ],
             )?;
         }
-        let mut view = self.project()?;
+        let mut view = self.project(now)?;
         view.signing_secret = existing.or_else(|| Some(signing_secret.into()));
         Ok((view, created))
+    }
+
+    /// Makes `new_secret` the project's signing secret. The one it replaces keeps signing beside
+    /// it for `overlap` (a duration like a wake's debounce; `"0s"` stops it at once), so a
+    /// receiver holding either verifies. A secret still in an earlier overlap stops now: at most
+    /// two sign.
+    pub fn rotate_signing_secret(
+        &self,
+        new_secret: &str,
+        overlap: Option<&str>,
+        now: i64,
+    ) -> Result<Rotated, ApiError> {
+        let project = self.project_row()?.ok_or_else(no_project)?;
+        let overlap_ms = parse_delay(overlap.unwrap_or(DEFAULT_ROTATION_OVERLAP))
+            .filter(|ms| *ms <= MAX_ROTATION_OVERLAP_MS)
+            .ok_or_else(|| {
+                ApiError::bad_request(
+                    "overlap must be a whole number followed by s, m, h or d, from \"0s\" to \"7d\"",
+                )
+                .in_field("overlap")
+            })?;
+        let until = (overlap_ms > 0).then_some(now + overlap_ms);
+        self.db.exec(
+            "UPDATE project SET signing_secret = ?, signing_secret_previous = ?, \
+             signing_secret_previous_until_ms = ?",
+            vec![
+                new_secret.into(),
+                until.and(Some(project.signing_secret)).into(),
+                until.into(),
+            ],
+        )?;
+        Ok(Rotated {
+            signing_secret: new_secret.into(),
+            previous_valid_until_ms: until,
+        })
     }
 
     /// Adds `attempts` bought with payment `payment_id`, and makes the whole balance valid for
@@ -154,7 +218,7 @@ impl<D: Db> Ledger<'_, D> {
             vec![payment_id.into()],
         )?;
         if applied > 0 {
-            return Ok((self.project()?, false));
+            return Ok((self.project(now)?, false));
         }
         let left = if now < project.expires_ms {
             (project.attempt_budget - project.attempts_used).max(0)
@@ -175,7 +239,7 @@ impl<D: Db> Ledger<'_, D> {
             vec![payment_id.into(), attempts.into(), now.into()],
         )?;
         self.restart_stopped_crons(now)?;
-        Ok((self.project()?, true))
+        Ok((self.project(now)?, true))
     }
 }
 
@@ -184,12 +248,13 @@ mod tests {
     use super::*;
     use crate::db::sqlite::Memory;
     use crate::ledger::testing::*;
+    use runlater_core::limits::HOUR_MS;
 
     #[test]
     fn creates_a_project_once() {
         let db = Memory::new();
         let l = Ledger::open(&db).unwrap();
-        assert_eq!(l.project().unwrap_err().code, "project_not_found");
+        assert_eq!(l.project(T0).unwrap_err().code, "project_not_found");
 
         let (p, created) = l.create_project(P, "s1", T0).unwrap();
         assert!(created);
@@ -209,11 +274,106 @@ mod tests {
     fn only_create_project_returns_the_signing_secret() {
         let db = Memory::new();
         let l = setup(&db);
-        assert_eq!(l.project().unwrap().signing_secret, None);
+        assert_eq!(l.project(T0).unwrap().signing_secret, None);
         let (credited, _) = l.add_credit("cs_1", 5_000, T0).unwrap();
         assert_eq!(credited.signing_secret, None);
-        let json = serde_json::to_value(l.project().unwrap()).unwrap();
+        let json = serde_json::to_value(l.project(T0).unwrap()).unwrap();
         assert!(json.get("signing_secret").is_none(), "the key is left out");
+    }
+
+    #[test]
+    fn rotating_returns_a_new_secret_that_create_project_then_returns() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let rotated = l.rotate_signing_secret("s2", None, T0).unwrap();
+        assert_eq!(rotated.signing_secret, "s2");
+        let (again, created) = l.create_project(P, "s3", T0 + 1).unwrap();
+        assert!(!created);
+        assert_eq!(again.signing_secret.as_deref(), Some("s2"));
+    }
+
+    /// The secrets that sign a delivery made at `now`, newest first.
+    fn signing(l: &Ledger<'_, Memory>, id: &str, now: i64) -> Vec<String> {
+        l.schedule(req("https://a.example.com/"), id, now).unwrap();
+        drive(l, id, http(200), None, now).0.signing_secrets
+    }
+
+    #[test]
+    fn both_secrets_sign_during_the_overlap_and_only_the_new_one_after() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let rotated = l.rotate_signing_secret("s2", Some("1h"), T0).unwrap();
+        assert_eq!(rotated.previous_valid_until_ms, Some(T0 + HOUR_MS));
+        assert_eq!(signing(&l, "t1", T0 + HOUR_MS - 1), ["s2", "secret"]);
+        assert_eq!(signing(&l, "t2", T0 + HOUR_MS), ["s2"]);
+    }
+
+    #[test]
+    fn the_overlap_defaults_to_24_hours_and_zero_stops_the_old_secrets_at_once() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let rotated = l.rotate_signing_secret("s2", None, T0).unwrap();
+        assert_eq!(rotated.previous_valid_until_ms, Some(T0 + DAY));
+        let at_once = l.rotate_signing_secret("s3", Some("0s"), T0 + 1).unwrap();
+        assert_eq!(at_once.previous_valid_until_ms, None);
+        assert_eq!(signing(&l, "t1", T0 + 1), ["s3"]);
+    }
+
+    #[test]
+    fn an_overlap_is_at_most_7_days_and_an_invalid_one_names_the_field() {
+        let db = Memory::new();
+        let l = setup(&db);
+        for bad in ["soon", "0", "", "-1h", "8d"] {
+            let e = l.rotate_signing_secret("s2", Some(bad), T0).unwrap_err();
+            assert_eq!((e.status, e.field), (400, Some("overlap")), "{bad:?}");
+        }
+        assert_eq!(signing(&l, "t1", T0), ["secret"], "nothing was rotated");
+        let longest = l.rotate_signing_secret("s2", Some("7d"), T0).unwrap();
+        assert_eq!(longest.previous_valid_until_ms, Some(T0 + 7 * DAY));
+    }
+
+    #[test]
+    fn rotating_again_during_an_overlap_keeps_the_two_newest_secrets() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.rotate_signing_secret("s2", Some("1h"), T0).unwrap();
+        l.rotate_signing_secret("s3", Some("1h"), T0 + 1).unwrap();
+        assert_eq!(signing(&l, "t1", T0 + 2), ["s3", "s2"]);
+    }
+
+    #[test]
+    fn the_project_shows_when_the_previous_secret_stops_and_no_secret() {
+        let db = Memory::new();
+        let l = setup(&db);
+        assert_eq!(
+            l.project(T0).unwrap().signing_secret_previous_until_ms,
+            None
+        );
+        l.rotate_signing_secret("s2", Some("1h"), T0).unwrap();
+        let during = serde_json::to_value(l.project(T0 + HOUR_MS - 1).unwrap()).unwrap();
+        assert_eq!(during["signing_secret_previous_until_ms"], T0 + HOUR_MS);
+        let shown = during.to_string();
+        assert!(!shown.contains("s2") && !shown.contains("\"secret\""));
+        let after = serde_json::to_value(l.project(T0 + HOUR_MS).unwrap()).unwrap();
+        assert!(after["signing_secret_previous_until_ms"].is_null());
+        assert!(after.get("signing_secret").is_none());
+    }
+
+    #[test]
+    fn rotating_needs_a_project_and_changes_nothing_else() {
+        let db = Memory::new();
+        let l = Ledger::open(&db).unwrap();
+        assert_eq!(
+            l.rotate_signing_secret("s2", None, T0).unwrap_err().code,
+            "project_not_found"
+        );
+        let l = setup(&db);
+        l.schedule(req("https://a.example.com/"), "t1", T0).unwrap();
+        let before = l.project(T0).unwrap();
+        let tasks = l.list(None, None, None, None).unwrap();
+        l.rotate_signing_secret("s2", Some("0s"), T0).unwrap();
+        assert_eq!(l.project(T0).unwrap(), before);
+        assert_eq!(l.list(None, None, None, None).unwrap(), tasks);
     }
 
     #[test]
@@ -300,7 +460,7 @@ mod tests {
                 Some(field)
             );
         }
-        assert!(!l.project().unwrap().paid);
+        assert!(!l.project(T0).unwrap().paid);
     }
 
     #[test]

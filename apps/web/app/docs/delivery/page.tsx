@@ -66,8 +66,8 @@ export default function Delivery() {
         <li>
           <code>RunLater-Signature</code> is <code>v1=</code> followed by the hex HMAC-SHA256 of{" "}
           <code>{"{timestamp}.{task_id}.{attempt}."}</code> and then the raw body, keyed with the project's{" "}
-          <code>signing_secret</code>. Only <code>create_project</code> returns it; call it again to get the same
-          secret back.
+          <code>signing_secret</code>. <code>create_project</code> returns it; call it again to get the secret
+          back.
         </li>
       </ul>
 

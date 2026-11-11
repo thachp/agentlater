@@ -10,14 +10,15 @@
 use crate::db::{Db, DbError, Param};
 use runlater_core::limits::{
     CAPTURED_HEADERS, CAPTURE_BODY_BYTES, CAPTURE_RETENTION_MS, CREDIT_VALIDITY_MS,
-    DEFAULT_MAX_ATTEMPTS, MAX_CREDIT_ATTEMPTS, MAX_CRONS, MAX_HEADER_BYTES, MAX_RETAINED_TASKS,
-    MAX_RETAINED_TASKS_PAID, MAX_SECRETS, RETENTION_MS, TRIAL_ATTEMPTS, TRIAL_DURATION_MS,
-    WATCH_EXCERPT_BYTES,
+    DEFAULT_MAX_ATTEMPTS, DEFAULT_ROTATION_OVERLAP, MAX_CREDIT_ATTEMPTS, MAX_CRONS,
+    MAX_HEADER_BYTES, MAX_RETAINED_TASKS, MAX_RETAINED_TASKS_PAID, MAX_ROTATION_OVERLAP_MS,
+    MAX_SECRETS, RETENTION_MS, TRIAL_ATTEMPTS, TRIAL_DURATION_MS, WATCH_EXCERPT_BYTES,
 };
 use runlater_core::{
-    fill, header_references, host_allowed, judge, next_poll, valid_lane, Attempt, CancelError,
-    ClaimError, CronRequest, FieldError, Method, Outcome, Poll, PollBody, RedriveError, Report,
-    Schedule, ScheduleRequest, Status, Task, Until, WakeRequest, Watch, WatchRequest, INBOX,
+    fill, header_references, host_allowed, judge, next_poll, parse_delay, valid_lane, Attempt,
+    CancelError, ClaimError, CronRequest, FieldError, Method, Outcome, Poll, PollBody,
+    RedriveError, Report, Schedule, ScheduleRequest, Status, Task, Until, WakeRequest, Watch,
+    WatchRequest, INBOX,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -44,8 +45,8 @@ pub use hooks::{
     Received,
 };
 pub use inbox::{InboxCursor, InboxPage, WakeView};
-pub use project::ProjectView;
 use project::{no_project, ProjectRow};
+pub use project::{ProjectView, Rotated};
 pub use runlater_core::Health;
 use schema::{MIGRATIONS, SCHEMA};
 pub use secrets::{ResealCount, SealedSecret, Sealer, SecretList, SecretView};
@@ -288,6 +289,34 @@ mod tests {
         l.create_project(P, "s", T0).unwrap();
         l.schedule(with_callback("https://a.example.com/"), "t1", T0)
             .unwrap();
+    }
+
+    #[test]
+    fn a_ledger_from_before_rotation_keeps_its_one_signing_secret() {
+        let db = Memory::new();
+        let before = MIGRATIONS[..12].iter().copied().flatten();
+        for statement in SCHEMA.iter().chain(before) {
+            db.0.execute(statement, []).unwrap();
+        }
+        db.0.execute("INSERT INTO meta (key, value) VALUES ('schema', 12)", [])
+            .unwrap();
+        db.0.execute(
+            "INSERT INTO project (id, created_ms, expires_ms, attempt_budget, attempts_used, \
+             signing_secret) VALUES (?1, ?2, ?3, 1000, 0, 'old')",
+            (P, T0, T0 + DAY),
+        )
+        .unwrap();
+
+        let l = Ledger::open(&db).unwrap();
+        assert_eq!(
+            l.project(T0).unwrap().signing_secret_previous_until_ms,
+            None
+        );
+        l.schedule(req("https://a.example.com/"), "t1", T0).unwrap();
+        let delivery = drive(&l, "t1", http(200), None, T0).0;
+        assert_eq!(delivery.signing_secrets, ["old"]);
+        let rotated = l.rotate_signing_secret("new", None, T0).unwrap();
+        assert_eq!(rotated.previous_valid_until_ms, Some(T0 + DAY));
     }
 
     /// One tick does the alarm's work in order: a cron run started in it is dispatched in it,

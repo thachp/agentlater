@@ -226,6 +226,13 @@ struct CreditBody {
     attempts: i64,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RotateBody {
+    #[serde(default)]
+    overlap: Option<String>,
+}
+
 #[derive(Serialize, Deserialize)]
 struct ClaimBody {
     task_id: String,
@@ -380,7 +387,12 @@ impl TaskLedger {
                 Route::CreateProject => {
                     created(ledger.create_project(&project_id, &minted("rls", 32)?, t)?)
                 }
-                Route::GetProject => ok(ledger.project()?),
+                Route::GetProject => ok(ledger.project(t)?),
+                Route::RotateSigningSecret => {
+                    let r: RotateBody = body(req).await?;
+                    let secret = minted("rls", 32)?;
+                    ok(ledger.rotate_signing_secret(&secret, r.overlap.as_deref(), t)?)
+                }
                 Route::AddCredit => self.add_credit(ledger, &body(req).await?, t),
                 Route::Schedule => {
                     created(ledger.schedule(body(req).await?, &minted("task", 10)?, t)?)

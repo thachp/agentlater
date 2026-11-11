@@ -409,7 +409,7 @@ mod tests {
             (w.last_status, w.last_body.as_deref()),
             (Some(200), Some(done))
         );
-        assert_eq!(l.project().unwrap().attempts_used, 3);
+        assert_eq!(l.project(T0).unwrap().attempts_used, 3);
 
         // The token is gone; the name stays.
         assert_eq!(t.header_names, ["Authorization"]);

@@ -36,7 +36,8 @@ pub struct Delivery {
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: Option<String>,
-    pub signing_secret: String,
+    /// The project's signing secrets, newest first: two while a rotation's overlap lasts.
+    pub signing_secrets: Vec<String>,
     /// A watch's poll: the consumer reads the response body and reports it with the outcome.
     #[serde(default)]
     pub read_body: bool,
@@ -205,7 +206,7 @@ impl<D: Db> Ledger<'_, D> {
             url: row.url.clone(),
             headers: row.headers()?,
             body,
-            signing_secret: project.signing_secret,
+            signing_secrets: project.signing_secrets(now),
             read_body: kind.is_watch() || reporting.capture,
             capture: reporting.capture,
             secrets,
@@ -447,11 +448,11 @@ mod tests {
 
         let d = deliver(&l, &due[0], T0 + 10);
         assert_eq!(
-            (d.attempt, d.fence, d.signing_secret.as_str()),
-            (1, 1, "secret")
+            (d.attempt, d.fence, d.signing_secrets),
+            (1, 1, vec!["secret".to_string()])
         );
         assert_eq!(l.task("t1").unwrap().status, Status::Delivering);
-        assert_eq!(l.project().unwrap().attempts_used, 1);
+        assert_eq!(l.project(T0).unwrap().attempts_used, 1);
 
         assert_eq!(
             l.finish("t1", 1, http(200), T0 + 20, 0.0).unwrap(),
@@ -525,7 +526,7 @@ mod tests {
         );
         assert_eq!(l.finish("t1", 99, http(200), T0, 0.0).unwrap(), None);
         assert_eq!(
-            l.project().unwrap().attempts_used,
+            l.project(T0).unwrap().attempts_used,
             1,
             "duplicates are not charged"
         );

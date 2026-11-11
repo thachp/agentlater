@@ -200,4 +200,10 @@ pub(super) const MIGRATIONS: &[&[&str]] = &[
         "ALTER TABLE hooks ADD COLUMN accept TEXT",
         "ALTER TABLE hooks ADD COLUMN filtered INTEGER NOT NULL DEFAULT 0",
     ],
+    // 13: rotating the signing secret. The secret it replaced, and when that one stops signing;
+    // nothing clears them afterwards, the time alone decides.
+    &[
+        "ALTER TABLE project ADD COLUMN signing_secret_previous TEXT",
+        "ALTER TABLE project ADD COLUMN signing_secret_previous_until_ms INTEGER",
+    ],
 ];

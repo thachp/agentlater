@@ -38,7 +38,8 @@ paths:
       description: >
         Creates the project with a fresh trial. Idempotent: a repeat returns the existing
         project unchanged (200) and never refills the trial or rotates the secret.
-        The only route that returns signing_secret, on 201 and on 200. Scope: project.
+        Returns signing_secret, on 201 and on 200; the only other route that returns one is
+        rotateSigningSecret. Scope: project.
       responses:
         "201": { $ref: "#/components/responses/Project" }
         "200": { $ref: "#/components/responses/Project" }
@@ -50,6 +51,45 @@ paths:
       description: "Scope: read."
       responses:
         "200": { $ref: "#/components/responses/Project" }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/projects/self/signing_secret/rotate:
+    post:
+      operationId: rotateSigningSecret
+      x-scope: project
+      description: >
+        Replaces the project's signing secret and returns the new one. For `overlap` the secret
+        it replaced keeps signing too: each delivery and wake carries one `v1=` entry per signing
+        secret in RunLater-Signature, the new secret's first, so a receiver holding either
+        verifies. After the overlap, or at once with an overlap of zero, only the new secret
+        signs. At most two sign: rotating during an overlap stops the older of them at once.
+        Tasks already scheduled are signed with the secrets in force when each attempt is made.
+        Nothing else about the project changes. Scope: project.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                overlap:
+                  type: string
+                  pattern: "^[0-9]{1,7}[smhd]$"
+                  default: 24h
+                  description: "How long the replaced secret keeps signing: 0s (it stops at once) to 7d."
+      responses:
+        "200":
+          description: The new secret, and when the one it replaced stops.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [signing_secret, previous_valid_until_ms]
+                properties:
+                  signing_secret: { type: string, description: Verifies RunLater-Signature from now on. }
+                  previous_valid_until_ms:
+                    type: [integer, "null"]
+                    description: When the replaced secret stops signing; null when it already has (an overlap of zero).
         default: { $ref: "#/components/responses/Error" }
   /v1/projects/self/credits:
     post:
@@ -671,7 +711,7 @@ components:
       enum: [GET, POST, PUT, PATCH, DELETE]
     Project:
       type: object
-      required: [id, created_ms, expires_ms, attempt_budget, attempts_used, attempts_remaining, paid, inbox_unread, wake]
+      required: [id, created_ms, expires_ms, attempt_budget, attempts_used, attempts_remaining, paid, signing_secret_previous_until_ms, inbox_unread, wake]
       properties:
         id: { type: string }
         created_ms: { type: integer }
@@ -681,6 +721,9 @@ components:
         attempts_remaining: { type: integer }
         paid: { type: boolean, description: Whether attempts have ever been bought for this project. }
         signing_secret: { type: string, description: "Verifies RunLater-Signature on deliveries. Present only in createProject's responses." }
+        signing_secret_previous_until_ms:
+          type: [integer, "null"]
+          description: When the signing secret replaced by rotateSigningSecret stops signing; null outside an overlap.
         inbox_unread: { type: integer, description: Inbox events after the acked cursor. }
         wake:
           oneOf: [{ $ref: "#/components/schemas/Wake" }, { type: "null" }]

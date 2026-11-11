@@ -352,7 +352,7 @@ pub fn valid_lane(lane: &str) -> bool {
 }
 
 /// `"<n><unit>"` with unit `s`, `m`, `h` or `d`, in milliseconds.
-pub(crate) fn parse_delay(s: &str) -> Option<i64> {
+pub fn parse_delay(s: &str) -> Option<i64> {
     let unit = match s.as_bytes().last()? {
         b's' => SECOND_MS,
         b'm' => MINUTE_MS,

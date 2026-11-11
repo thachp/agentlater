@@ -144,7 +144,7 @@ export const capabilities: CapabilityDefinition[] = [
       "Create this agent's AgentLater project with a free trial (1,000 delivery attempts, 7 days). " +
       "Call once before scheduling; calling again returns the same project and never resets the trial. " +
       "The returned signing_secret lets the destination verify RunLater-Signature on each delivery. " +
-      "Only this call returns it: call again when the destination needs it, not get_project.",
+      "Call again when the destination needs it: get_project never returns it.",
     input: noArgs,
   },
   {
@@ -152,8 +152,32 @@ export const capabilities: CapabilityDefinition[] = [
     api: { method: "GET", path: "/v1/projects/self", scope: "read" },
     description:
       "Show this agent's project: trial expiry, delivery attempts used and remaining, inbox_unread " +
-      "(inbox events waiting for read_inbox), and wake (see set_wake). Calling it at the start of a session tells you whether anything finished while you were away.",
+      "(inbox events waiting for read_inbox), and wake (see set_wake). Calling it at the start of a session tells you whether anything finished while you were away. " +
+      "signing_secret_previous_until_ms is set while a rotate_signing_secret overlap is running.",
     input: noArgs,
+  },
+  {
+    name: "rotate_signing_secret",
+    api: { method: "POST", path: "/v1/projects/self/signing_secret/rotate", scope: "project", body: "args" },
+    description:
+      "Replace the project's signing secret, e.g. after it leaked. Rotate only when the user asks. Returns the new signing_secret: " +
+      "give it only to the user, for the destination, and do not repeat it. For overlap (default 24h) every delivery and wake is " +
+      "signed with both secrets, one v1= entry each in RunLater-Signature, so the destination can be updated without rejecting " +
+      "a delivery; previous_valid_until_ms says when the old secret stops. Pass overlap: \"0s\" to stop the old secret at once " +
+      "when it has leaked. Rotating again during an overlap stops the oldest secret at once. Nothing else changes: tasks already " +
+      "scheduled are signed with the new secret from their next attempt, and create_project returns the new secret from now on.",
+    input: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        overlap: {
+          type: "string",
+          pattern: "^[0-9]{1,7}[smhd]$",
+          default: "24h",
+          description: "How long the old secret keeps signing too: a whole number and s, m, h or d, from \"0s\" (stops at once) to \"7d\".",
+        },
+      },
+    },
   },
   {
     name: "get_payment_link",
