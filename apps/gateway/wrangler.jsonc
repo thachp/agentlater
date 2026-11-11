@@ -12,7 +12,8 @@
   // Secrets, passed with `--secrets-file` at deploy from the GitHub environment (docs/DEPLOY.md):
   //   ASSERTION_PRIVATE_KEY  hex 32-byte Ed25519 seed; the API's GATEWAY_PUBLIC_KEY is its public key
   //   BETTER_AUTH_SECRET     32+ random bytes
-  "vars": { "PUBLIC_URL": "http://localhost:8787" },
+  // A2A_ENABLED "true" serves the A2A Agent Card and /a2a (src/a2a.ts); anything else answers 404 for both.
+  "vars": { "PUBLIC_URL": "http://localhost:8787", "A2A_ENABLED": "true" },
   // The task API is private; the gateway is its only caller.
   "services": [{ "binding": "API", "service": "runlater-api" }],
   // Hourly: the SECRETS_KEY reseal sweep (src/rotation.ts), idle unless a rotation is on.
@@ -40,7 +41,8 @@
         "HOOKS_URL": "https://hooks-staging.agentlater.io",
         "ALT_PUBLIC_URL": "https://gateway-staging.runlater.io",
         "ALT_HOOKS_URL": "https://hooks-staging.runlater.io",
-        "NEW_TRIALS_PER_DAY": "100"
+        "NEW_TRIALS_PER_DAY": "100",
+        "A2A_ENABLED": "true"
       },
       // Must match PUBLIC_URL or ALT_PUBLIC_URL: Agent Auth checks token audiences against the one
       // for the request's host (src/hosts.ts). The hooks hosts serve inbound hooks only.
@@ -72,7 +74,9 @@
         "HOOKS_URL": "https://hooks.agentlater.io",
         "ALT_PUBLIC_URL": "https://gateway.runlater.io",
         "ALT_HOOKS_URL": "https://hooks.runlater.io",
-        "NEW_TRIALS_PER_DAY": "100"
+        "NEW_TRIALS_PER_DAY": "100",
+        // Anything but "true": the Agent Card, the payload schema and /a2a answer 404 here.
+        "A2A_ENABLED": "false"
       },
       "routes": [
         { "pattern": "gateway.runlater.io", "custom_domain": true },

@@ -86,6 +86,91 @@ describe("gateway", () => {
     expect(claims).toEqual(["replay::agent_1:abc", "replay::agent_1:abc"]);
   });
 
+  describe("a token on an Agent Auth route", () => {
+    const part = (o: object) => Buffer.from(JSON.stringify(o)).toString("base64url");
+    const jwt = (claims: object) => `${part({ alg: "EdDSA" })}.${part(claims)}.c2ln`;
+    /**
+     * Sends a request and says what the gateway claimed in the AuthStore and what it answered. Better
+     * Auth has no database here, so a request the gateway passes on fails there: "passed on".
+     */
+    async function send(authorization: string | undefined, path = "/api/auth/capability/execute") {
+      const claims: string[] = [];
+      const env = {
+        ...envWithApi(200),
+        ASSERTION_PRIVATE_KEY: "07".repeat(32),
+        REGISTER_RATE: { limit: async () => ({ success: true }) },
+        AUTH_STORE: { idFromName: () => "id", get: () => ({ claim: async (key: string) => (claims.push(key), true) }) },
+      } as unknown as Env;
+      const request = new Request(`https://gateway.test${path}`, { method: "POST", headers: authorization === undefined ? {} : { Authorization: authorization }, body: "{}" });
+      const response = await worker.fetch(request, env, ctx).catch(() => undefined);
+      if (response?.status !== 401) return { status: "passed on", claims };
+      return { status: 401, body: await response.json(), claims };
+    }
+    const MALFORMED = { error: "invalid_jwt", message: "the Authorization header must be Bearer, one space and a compact JWT" };
+
+    it("is passed on when the header is Bearer, one space and a compact JWT, and when there is no header", async () => {
+      const token = jwt({ sub: "agent_1", jti: "abc" });
+      expect(await send(`Bearer ${token}`)).toMatchObject({ status: "passed on", claims: ["replay::agent_1:abc"] });
+      expect(await send(`bearer ${token}`)).toMatchObject({ status: "passed on" });
+      expect(await send(undefined)).toMatchObject({ status: "passed on", claims: [] });
+    });
+
+    it("is refused before Better Auth and before any claim when the header is anything else", async () => {
+      const token = jwt({ sub: "agent_1", jti: "abc" });
+      const [header, payload, signature] = token.split(".");
+      const others = [
+        `Bearer ${header}.${payload}.c2 ln`,
+        `Bearer ${header}.${payload}.c2\tln`,
+        `Bearer ${header}.${payload}. ${signature}`,
+        `Bearer  ${token}`,
+        `Bearer\t${token}`,
+        `Bearer ${token}=`,
+        `Bearer ${token} =`,
+        `Bearer ${token}.extra`,
+        `Bearer ${header}.${payload}`,
+        `Bearer ${header}..${signature}`,
+        `Bearer ${header}.${payload}.c2+n`,
+        `Bearer ${token}, Bearer ${token}`,
+        `Token ${token}`,
+        "Basic dXNlcjpwYXNz",
+        "Bearer opaque-token",
+        "Bearer",
+        "",
+      ];
+      for (const authorization of others) {
+        for (const path of ["/api/auth/capability/execute", "/api/auth/agent/register", "/api/auth/capability/list", "/api/auth/host/revoke"]) {
+          expect(await send(authorization, path), `${JSON.stringify(authorization)} on ${path}`).toEqual({ status: 401, body: MALFORMED, claims: [] });
+        }
+      }
+    });
+
+    it("is refused when its claims cannot be read or its jti is not a non-empty string", async () => {
+      const unreadable = [`${part({ alg: "EdDSA" })}.bm90LWpzb24.c2ln`, `${part({ alg: "EdDSA" })}.${Buffer.from('"a string"').toString("base64url")}.c2ln`, jwt([1])];
+      const noJti = [jwt({ sub: "agent_1" }), jwt({ sub: "agent_1", jti: "" }), jwt({ sub: "agent_1", jti: 7 }), jwt({ sub: "agent_1", jti: true }), jwt({ sub: "agent_1", jti: ["abc"] }), jwt({ sub: "agent_1", jti: null })];
+      for (const token of [...unreadable, ...noJti]) {
+        expect(await send(`Bearer ${token}`), token).toEqual({ status: 401, body: { error: "invalid_jwt", message: "this token has no jti" }, claims: [] });
+      }
+    });
+
+    it("is claimed by a digest when its jti, issuer and subject are too long to store as they are", async () => {
+      const long = "j".repeat(5_000);
+      const first = await send(`Bearer ${jwt({ sub: "agent_1", jti: long })}`);
+      expect(first.status).toBe("passed on");
+      expect(first.claims).toHaveLength(1);
+      expect(first.claims[0]).toMatch(/^replay:sha256:[0-9a-f]{64}$/);
+      // The same token claims the same key, and another jti, subject or issuer a different one.
+      expect((await send(`Bearer ${jwt({ sub: "agent_1", jti: long })}`)).claims).toEqual(first.claims);
+      for (const other of [{ sub: "agent_1", jti: `${long}k` }, { sub: "agent_2", jti: long }, { iss: "host_1", sub: "agent_1", jti: long }]) {
+        const { claims } = await send(`Bearer ${jwt(other)}`);
+        expect(claims[0]).toMatch(/^replay:sha256:/);
+        expect(claims).not.toEqual(first.claims);
+      }
+      // A jti of ordinary length is claimed as it is, as before.
+      expect((await send(`Bearer ${jwt({ sub: "agent_1", jti: "j".repeat(128) })}`)).claims).toEqual([`replay::agent_1:${"j".repeat(128)}`]);
+      expect((await send(`Bearer ${jwt({ sub: "agent_1", jti: "j".repeat(129) })}`)).claims[0]).toMatch(/^replay:sha256:/);
+    });
+  });
+
   it("serves only the agent routes", async () => {
     for (const path of ["/nope", "/api/auth/agent/list", "/api/auth/sign-in/email", "/api/auth/host/create"]) {
       expect((await get(path, envWithApi(200))).status, path).toBe(404);

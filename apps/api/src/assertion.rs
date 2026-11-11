@@ -63,6 +63,8 @@ impl Scope {
 pub struct Claims {
     pub project_id: String,
     pub scopes: Vec<Scope>,
+    /// The gateway is making this call for a request to its A2A interface.
+    pub a2a: bool,
 }
 
 impl Claims {
@@ -89,6 +91,9 @@ struct Raw {
     scope: String,
     iat: i64,
     exp: i64,
+    /// Absent, or "a2a".
+    #[serde(default)]
+    via: Option<String>,
 }
 
 pub fn parse_public_key(hex_key: &str) -> Option<VerifyingKey> {
@@ -130,9 +135,15 @@ pub fn verify(token: &str, key: &VerifyingKey, now_secs: i64) -> Result<Claims, 
         .split_ascii_whitespace()
         .map(|s| Scope::parse(s).ok_or(AssertionError::Malformed))
         .collect::<Result<_, _>>()?;
+    let a2a = match raw.via.as_deref() {
+        None => false,
+        Some("a2a") => true,
+        Some(_) => return Err(AssertionError::Malformed),
+    };
     Ok(Claims {
         project_id: raw.sub,
         scopes,
+        a2a,
     })
 }
 
@@ -188,6 +199,20 @@ pub(crate) mod tests {
         let c = verify(GATEWAY_TOKEN, &key().verifying_key(), NOW).unwrap();
         assert_eq!(c.project_id, "prj_1");
         assert_eq!(c.scopes, [Scope::Read, Scope::Schedule]);
+    }
+
+    /// Only the gateway signs assertions, so only it can say a call came through A2A.
+    #[test]
+    fn says_whether_the_call_came_through_a2a() {
+        assert!(!check(claims()).unwrap().a2a);
+        let mut c = claims();
+        c["via"] = "a2a".into();
+        assert!(check(c).unwrap().a2a);
+        for other in ["mcp", "A2A", ""] {
+            let mut c = claims();
+            c["via"] = other.into();
+            assert_eq!(check(c), Err(AssertionError::Malformed), "{other:?}");
+        }
     }
 
     #[test]

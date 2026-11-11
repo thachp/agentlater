@@ -12,7 +12,7 @@ use crate::sealing::{Keyring, SealingKey, NONCE_BYTES};
 use futures_util::future::{join_all, select, Either};
 use futures_util::StreamExt;
 use runlater_core::limits::{ATTEMPT_TIMEOUT_MS, CAPTURED_HEADERS};
-use runlater_core::{HookRequest, HookUpdate, Outcome, PollBody, SecretRequest, Status};
+use runlater_core::{HookRequest, HookUpdate, Outcome, PollBody, SecretRequest};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -22,6 +22,8 @@ use worker::*;
 
 /// Set by the entry Worker on requests it forwards to a ledger; never taken from callers.
 const PROJECT_HEADER: &str = "RunLater-Project";
+/// Set the same way, to "a2a", when the gateway's assertion says the call came through A2A.
+const VIA_HEADER: &str = "RunLater-Via";
 
 fn now() -> i64 {
     Date::now().as_millis() as i64
@@ -203,7 +205,10 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         Method::Post => Some(req.bytes().await?.into()),
         _ => None,
     };
-    let forwarded = ledger_request(&claims.project_id, method, url.as_str(), body)?;
+    let mut forwarded = ledger_request(&claims.project_id, method, url.as_str(), body)?;
+    if claims.a2a {
+        forwarded.headers_mut()?.set(VIA_HEADER, "a2a")?;
+    }
     env.durable_object("LEDGER")?
         .get_by_name(&claims.project_id)?
         .fetch_with_request(forwarded)
@@ -295,14 +300,6 @@ fn hook_answer(reply: HookReply) -> Result<Response> {
             .set("Retry-After", &((ms + 999) / 1000).max(1).to_string())?;
     }
     Ok(r)
-}
-
-#[derive(Deserialize)]
-struct ListQuery {
-    status: Option<Status>,
-    lane: Option<String>,
-    cursor: Option<String>,
-    limit: Option<usize>,
 }
 
 async fn body<T: DeserializeOwned>(req: &mut Request) -> std::result::Result<T, ApiError> {
@@ -398,10 +395,7 @@ impl TaskLedger {
                     created(ledger.schedule(body(req).await?, &minted("task", 10)?, t)?)
                 }
                 Route::Watch => created(ledger.watch(body(req).await?, &minted("task", 10)?, t)?),
-                Route::ListTasks => {
-                    let q: ListQuery = query(&url)?;
-                    ok(ledger.list(q.status, q.lane.as_deref(), q.cursor.as_deref(), q.limit)?)
-                }
+                Route::ListTasks => ok(ledger.list(query(&url)?)?),
                 Route::GetTask(id) => ok(ledger.task(id)?),
                 Route::CancelTask(id) => ok(ledger.cancel(id, t)?),
                 Route::RedriveTask(id) => ok(ledger.redrive(id, t)?),
@@ -509,7 +503,7 @@ fn query<T: DeserializeOwned>(url: &Url) -> std::result::Result<T, ApiError> {
     let mut map = serde_json::Map::new();
     for (k, v) in url.query_pairs() {
         let value = match v.parse::<u64>() {
-            Ok(n) if k == "limit" => serde_json::Value::from(n),
+            Ok(n) if matches!(&*k, "limit" | "updated_since_ms") => serde_json::Value::from(n),
             _ => serde_json::Value::from(v.into_owned()),
         };
         map.insert(k.into_owned(), value);
@@ -525,7 +519,9 @@ impl DurableObject for TaskLedger {
 
     async fn fetch(&self, mut req: Request) -> Result<Response> {
         let sql = self.sql();
+        let through_a2a = req.headers().get(VIA_HEADER)?.as_deref() == Some("a2a");
         let ledger = match self.ledger(&sql) {
+            Ok(l) if through_a2a => l.through_a2a(),
             Ok(l) => l,
             Err(e) => return error(e.into()),
         };

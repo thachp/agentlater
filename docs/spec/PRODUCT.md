@@ -38,7 +38,8 @@ There is no human sign-up, password, or dashboard in v1. The agent *is* the cust
 | Claude Code plugin | The MCP server plus an `agentlater` skill that says when to use it, including the start-of-session inbox check | `plugins/agentlater`, `.claude-plugin/marketplace.json` |
 | MCP Registry | `io.agentlater/agentlater`, pointing at the hosted server | `server.json` |
 | Agent Auth | Discovery at `/.well-known/agent-configuration`, then the SDK or the local bridge | `apps/gateway/src/auth.ts` |
-| Machine-readable pages | `/llms.txt` says what AgentLater is and how to connect; `/openapi.json` advertises the paid MPP endpoint | `apps/gateway/src/discovery.ts` |
+| A2A | The Agent Card at `/.well-known/agent-card.json` and JSON-RPC at `/a2a`, for Agent Auth hosts. Switched on per environment: on in staging, not yet in production | `apps/gateway/src/a2a.ts` |
+| Machine-readable pages | `/llms.txt` says what AgentLater is and how to connect (naming A2A only where it is switched on); `/openapi.json` advertises the paid MPP endpoint | `apps/gateway/src/discovery.ts` |
 | Site | Landing page and docs at `agentlater.io` | `apps/web` |
 
 ## Core jobs (v1)
@@ -83,7 +84,7 @@ Next session ──read_inbox──▶ AgentLater  ← the report (or get_task: 
 
 | Term | Meaning |
 | --- | --- |
-| **Owner** | Who holds a project: an Agent Auth host (host + agent keypair), or a hosted MCP connection (an OAuth grant). There are no other ways to authenticate. |
+| **Owner** | Who holds a project: an Agent Auth host (host + agent keypair), or a hosted MCP connection (an OAuth grant). There are no other ways to authenticate: a caller of the A2A interface is an Agent Auth host's agent. |
 | **Project** | Owned by exactly one owner, and never reassigned. Holds tasks, budget, the signing secret and everything below. One project per owner in v1. |
 | **Trial** | A project's free allocation: N delivery attempts, expires after 7 days. No refills. |
 | **Attempt pack** | Delivery attempts bought for a project: 50,000 for $5. See *Buying attempts*. |
@@ -160,6 +161,35 @@ The bridge keeps the agent's keys in `~/.agent-auth`. Losing them loses access t
 The REST routes underneath (`/v1/tasks`, …) are an internal contract between
 services, not a public product in v1.
 
+## A2A interface
+
+A third way in to the same capabilities, for an agent that speaks the Agent2Agent protocol: it sends one HTTP request to deliver and reads back a task. It is an interface, not an identity: the caller is an Agent Auth host's agent, and the tasks land in that host's project. Guide and reference: [agentlater.io/docs/a2a](https://agentlater.io/docs/a2a).
+
+- **Switched on per environment** by `A2A_ENABLED`: on in staging, off in production until the staging end-to-end run (`apps/gateway/e2e/a2a-staging.mjs`) has passed. Off means the Agent Card, the payload schema and `/a2a` answer `404`, and `/llms.txt` does not name them; work already scheduled keeps delivering. Nothing may say A2A is available on production before the switch is on there.
+- **Pinned versions:** [A2A specification v1.0.1](https://a2a-protocol.org/v1.0.1/specification/) (`1.0` on the wire), JSON-RPC binding only; `@a2a-js/sdk` 1.3.0 in the gateway, the tests and the example. A request without `A2A-Version: 1.0` is answered `-32009`.
+- **Discovery:** `GET /.well-known/agent-card.json`, public. Its extension `https://agentlater.io/a2a/extensions/agent-auth/v1` gives `discovery` (the Agent Auth configuration), `audience` (the `/a2a` URL) and `capability` (`a2a`). Its one skill, `deliver-http`, names the payload schema.
+- **Auth sequence:** (1) read the card; (2) make and keep a host key; (3) register an agent at `discovery`, autonomous, with `a2a` plus the capability each operation uses (`schedule_http` for a send with `run_at_ms` or `delay`, `queue_http` for a send with neither, `get_task`, `list_tasks`, `cancel_task`) and `create_project`; (4) execute `create_project` over Agent Auth; (5) for every request sign an agent JWT whose `aud` is the `/a2a` URL and whose `capabilities` are `["a2a"]`, without `htm` or `htu`; it lives 60 seconds and is accepted once; (6) send it as the bearer token with `A2A-Version: 1.0`; (7) agents are revoked 7 days after they are registered, so register a new one with the same host key when the answer is `403 absolute_lifetime_exceeded` or `agent_revoked`. A token for capability execution is refused on `/a2a`, and a token for `/a2a` is refused everywhere else.
+- **Payload:** one JSON data part, defined by the versioned JSON Schema at `/a2a/schemas/deliver-http/v1.json`: `url`, `method`, `headers`, `body`, `run_at_ms` or `delay`, `idempotency_key`, `max_attempts`, `capture`. Each field's rules are `schedule_http`'s. Any other field is refused by name. The message's `messageId` is the idempotency key when the payload has none.
+- **Sends never wait.** `SendMessage` returns the task at once, as it is, whether or not `returnImmediately` is set: a deviation from the 1.0 default.
+- **States:** the A2A task id is the delivery task's id, and `contextId` equals it.
+
+  | Delivery status | A2A state |
+  | --- | --- |
+  | `scheduled` | `TASK_STATE_SUBMITTED` |
+  | `delivering`, `retrying` | `TASK_STATE_WORKING` |
+  | `succeeded` | `TASK_STATE_COMPLETED` |
+  | `failed` | `TASK_STATE_FAILED` |
+  | `canceled` | `TASK_STATE_CANCELED` |
+
+  The task's one artifact, `delivery`, holds the status, times, attempts and (with `capture`) the destination's response; nothing of the request.
+- **Reading:** `GetTask` and `ListTasks` see only tasks made through A2A. `ListTasks` is ordered by last change, pages 1 to 100 (default 50) with `totalSize`, filters by `status` and `statusTimestampAfter` (inclusive), refuses `contextId`, and leaves artifacts out unless `includeArtifacts` is true (then without the list of attempts).
+- **Canceling:** a waiting task is canceled at once. One whose attempt is out comes back as working, with a status message: the attempt cannot be stopped, a 2xx completes the task and anything else cancels it. A repeated cancel is safe; only a completed or failed task answers `-32002`.
+- **Errors:** credentials are refused at HTTP before JSON-RPC, with `{"error", "message"}`: `401` (`authentication_required`, `invalid_jwt`, `jti_replay`, `request_binding_mismatch`, `agent_not_found`; each carries the Agent Auth discovery challenge), `403` (`capability_not_granted`, `agent_revoked`, `absolute_lifetime_exceeded`, `host_revoked`), `429 rate_limited` with `Retry-After` (60 requests a minute per IP address), `413`, `503`. Everything else is a JSON-RPC error with HTTP 200: `-32009` version, `-32700`, `-32600`, `-32601`, `-32602` for a request at fault (naming the field; `idempotency_conflict` for a key reused with another payload), `-32001` task not found (also another host's task, one made over another interface, and any task of a host with no project), `-32002` not cancelable, `-32003` push notifications, `-32004` streaming, the extended card or a message to an existing task, `-32005` a part that is not JSON data, `-32000` with the API's code for what is not the request's fault (`project_not_found`, `budget_exhausted`, `trial_expired`, `task_limit`, `rate_limited`), `-32603` for AgentLater's own failures.
+- **Retention:** as for every task. A task and its attempts are deleted 30 days after it finishes and then read as task not found; a captured response is deleted after 7 days.
+- **A finished A2A task never starts again:** `redrive_task` is refused for it from every interface (see *Delivery rules*). The retry path is a new send with a new key.
+- **Deferred:** crons, watches, hooks, the inbox and wake, storing secrets, payments, streaming, push notifications, callbacks (`callback_url`), lanes and queues, further messages to a task, contexts across tasks, text input, the REST and gRPC bindings and the extended card. The card and the docs advertise none of them. A header may still use `{{secret:NAME}}` for a secret the same host stored over Agent Auth.
+- **Clients:** generic A2A clients do not sign Agent Auth tokens; a client needs a fetch that signs one per request. `apps/gateway/examples/a2a-client.mjs` is a complete one, run by the gateway's e2e suite: it persists its host key, finds its project and task again after a restart, and registers a new agent when its own is gone.
+
 ## Delivery rules
 
 - **Destinations:** `https://` on the default port to a public DNS name. No IP literals, credentials in the URL, fragments, or non-public names (`localhost`, `*.local`, `*.internal`, `*.test`, …). Checked when the task is accepted and again before every attempt. Resolved addresses are restricted to the public internet by Cloudflare (`global_fetch_strictly_public`).
@@ -174,6 +204,7 @@ services, not a public product in v1.
 - **Timeout:** 10 s per attempt. Redirects are not followed.
 - **Success:** any 2xx. Retry on 408, 425, 429, 5xx, timeouts and network errors. Anything else (other 4xx, 3xx) fails without retry.
 - **Admission:** work is refused up front if the project has expired (`403 trial_expired`), holds too many tasks (`429 task_limit`), or would need more attempts than are left once waiting tasks are counted (`402 budget_exhausted`). A waiting task reserves one attempt, plus one for a callback to a URL and any for its `on_match` action. A task already being delivered reserves only those follow-ups (its attempt was charged when it started), and a pending wake reserves nothing.
+- **Redrive:** `redrive_task` gives a failed task a fresh set of attempts under the same id; any other status is `409 task_not_failed`. A watch and a wake cannot be redriven (`409 watch_not_redrivable`, `wake_not_redrivable`), and neither can a task made through the A2A interface (`409 a2a_task_not_redrivable`, from every interface): A2A lets no finished task start again, so its request is scheduled again as a new task.
 - **Idempotency:** an optional `idempotency_key` makes `schedule_http` and `queue_http` safe to repeat. The same key with the same request returns the original task; with a different request it is a conflict.
 - **Queues:** `queue_http`'s `queue` and `schedule_http`'s `lane` are the same thing; a task shows it as `lane`, and `schedule_http` without a time still sends now. Tasks given the same one (1–64 of `A-Z a-z 0-9 _ - . :`) run one at a time. A task that has started (delivering, or waiting to retry) holds its lane until it succeeds, fails or is canceled; then the waiting task with the earliest due time (ties: earliest scheduled) goes next. A failed or canceled task does not block the lane. A redriven task rejoins it with a due time of now. Order is by due time, not by when tasks were scheduled: schedule A with `delay: "1h"` and then B for now in the same lane, and B runs first. Lanes order delivery attempts, not what the destination does with them; at-least-once still applies. Callbacks are not in any lane.
 - **Delay:** `delay` is a relative alternative to `run_at_ms`: a whole number followed by `s`, `m`, `h` or `d` (`"90s"`, `"24h"`, `"7d"`), at most 7 days. Giving both is an error.
@@ -323,9 +354,10 @@ An agent cannot pay, so a person pays for it. Stripe takes the payment; AgentLat
 
 | Out of scope | Why it's later |
 | --- | --- |
+| A2A beyond one-off deliveries | See *A2A interface*, Deferred. |
 | Web dashboard | A page where a human signs in to see tasks. v1 has no humans signing in. |
 | Subscriptions, invoices, larger packs | One pack size, paid by card, covers launch. |
-| SDKs | A packaged npm client. Agents use capabilities/MCP directly. |
+| SDKs | A packaged npm client. Agents use capabilities, MCP or A2A directly; the A2A example client is one file to copy, not a package. |
 | API keys, invitations, receiver pairing | Replaced by Agent Auth and hosted MCP's one-click OAuth. |
 | Workflows, fan-out, ordering across lanes | Different product. Lanes give one-at-a-time order within a lane only. `on_match` is one request and doesn't chain. |
 | Hooks that send requests | Anyone with a hook's URL could spend the project's attempts. It needs `verify` to be required and its own spec. |
