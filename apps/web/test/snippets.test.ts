@@ -128,8 +128,8 @@ describe("stated limits", () => {
       `${ATTEMPT_PACK.attempts.toLocaleString("en-US")} for $${ATTEMPT_PACK.priceCents / 100}, valid 12 months; leftovers carry over`,
     );
     expect(constant("RETENTION_MS")).toBe("30 * DAY_MS");
-    expect(limitsRs.match(/pub const RETRY_DELAYS_MS: \[i64; 4\] = \[([^\]]+)\]/)?.[1].replace(/\s+/g, " ").trim()).toBe(
-      "10 * SECOND_MS, 2 * MINUTE_MS, 20 * MINUTE_MS, 40 * MINUTE_MS,",
+    expect(limitsRs.replace(/\s+/g, " ")).toContain(
+      "pub const RETRY_DELAYS_MS: [i64; 4] = [ 10 * SECOND_MS, 2 * MINUTE_MS, 20 * MINUTE_MS, 40 * MINUTE_MS, ];",
     );
     expect(RETRIES.map(([, wait]) => wait)).toEqual(["5–10 s", "1–2 min", "10–20 min", "20–40 min"]);
     expect(constant("MAX_SCHEDULE_AHEAD_MS")).toBe("7 * DAY_MS");
