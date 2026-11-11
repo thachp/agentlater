@@ -411,40 +411,62 @@ const MAX_BODY_BYTES = 192 * 1024;
 const isRpcRequest = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value) && "jsonrpc" in value && value.jsonrpc === "2.0" && "method" in value && typeof value.method === "string";
 
-/** A JSON-RPC error. Protocol errors travel in the body, so the HTTP status is 200. */
-const rpcError = (problem: unknown) => json({ jsonrpc: "2.0", id: null, error: problem });
+/** A JSON-RPC answer, as far as the transport reads one. Protocol errors travel in the body, so the HTTP status is 200. */
+type RpcAnswer = { error?: { code: number; message: string } };
+const rpcError = (problem: { code: number; message: string }): RpcAnswer => ({ jsonrpc: "2.0", id: null, error: problem }) as RpcAnswer;
+
+/** What a log line may carry of something a caller or a library chose: a short plain word, such as a method name, a code or a ray id. A token, a URL or a sentence is not one. */
+const word = (value: unknown) => (typeof value === "string" && /^[\w-]{1,64}$/.test(value) ? value : null);
 
 /**
  * Answers a request to /a2a: the protocol version first (a header, so nothing is read for a caller
  * that speaks another version), then credentials, refused with HTTP 401 or 403, and only then JSON-RPC.
  */
 async function handleA2a(request: Request, env: A2aEnv, verify: Verify, run: Run): Promise<Response> {
-  if (request.method !== "POST") return error(405, "method_not_allowed", "POST a JSON-RPC request", { Allow: "POST" });
+  const started = Date.now();
+  let host: string | null = null;
+  let method: string | null = null;
+  /**
+   * Writes the request's one log line and returns the response it is about. `outcome` is "ok", a
+   * JSON-RPC error's code or the code of a refusal at HTTP. The line holds no token, payload, URL,
+   * header value or error text: of what the caller sent, only the method's name and Cloudflare's
+   * ray id, and those only when they are plain words.
+   */
+  const logged = (response: Response, outcome: string | number | null): Response => {
+    console.log(JSON.stringify({ event: "a2a_request", method, outcome, status: response.status, ms: Date.now() - started, ray: word(request.headers.get("CF-Ray")), host }));
+    return response;
+  };
+  const refused = (refusal: Refusal) => logged(refuse(env, refusal), word(refusal.code));
+  const answered = (answer: RpcAnswer) => logged(json(answer), answer.error?.code ?? "ok");
+
+  if (request.method !== "POST") return logged(error(405, "method_not_allowed", "POST a JSON-RPC request", { Allow: "POST" }), "method_not_allowed");
 
   // No version means 0.3 (specification 3.6), which the card does not offer.
   const requestedVersion = request.headers.get(A2A_VERSION_HEADER) ?? new URL(request.url).searchParams.get(A2A_VERSION_HEADER) ?? undefined;
   try {
     validateVersion(new ServerCallContext({ requestedVersion }).requestedVersion, card(env), "JSONRPC");
   } catch (e) {
-    return rpcError(JsonRpcTransportHandler.mapToJSONRPCError(e));
+    return answered(rpcError(JsonRpcTransportHandler.mapToJSONRPCError(e)));
   }
 
   if (!/^Bearer\s+\S+$/i.test(request.headers.get("Authorization") ?? "")) {
-    return refuse(env, { status: 401, code: "authentication_required", message: "send an Agent Auth agent JWT as a Bearer token" });
+    return refused({ status: 401, code: "authentication_required", message: "send an Agent Auth agent JWT as a Bearer token" });
   }
   const caller = await verify(request);
-  if (!(caller instanceof Caller)) return refuse(env, caller);
+  if (!(caller instanceof Caller)) return refused(caller);
+  host = caller.hostId;
 
   const body = await readLimited(request, MAX_BODY_BYTES);
-  if (body === null) return tooLarge();
+  if (body === null) return logged(tooLarge(), "too_large");
   let rpc: unknown;
   try {
     rpc = JSON.parse(new TextDecoder().decode(body));
   } catch {
-    return rpcError({ code: A2A_ERROR_CODE.PARSE_ERROR, message: "Invalid JSON payload" });
+    return answered(rpcError({ code: A2A_ERROR_CODE.PARSE_ERROR, message: "Invalid JSON payload" }));
   }
   // The SDK's handler answers both of these with -32602; the specification (9.5) gives each its own code.
-  if (!isRpcRequest(rpc)) return rpcError({ code: A2A_ERROR_CODE.INVALID_REQUEST, message: "Request payload validation error" });
+  if (!isRpcRequest(rpc)) return answered(rpcError({ code: A2A_ERROR_CODE.INVALID_REQUEST, message: "Request payload validation error" }));
+  method = word(rpc.method);
   // The SDK's dispatcher answers whatever an operation throws as a JSON-RPC error. A refusal is
   // HTTP's to answer, so an operation hands it over here before it stops.
   let refusal: Refusal | undefined;
@@ -454,16 +476,14 @@ async function handleA2a(request: Request, env: A2aEnv, verify: Verify, run: Run
   });
   // The SDK's dispatcher: method names, parameter and result codecs, and error codes. Always one
   // answer, never a stream: both streaming methods throw before a stream exists.
-  const answer = (await new JsonRpcTransportHandler(operations).handle(rpc, new ServerCallContext({ requestedVersion, user: caller }))) as {
-    error?: { code: number; message: string };
-  };
-  if (refusal) return refuse(env, refusal);
+  const answer = (await new JsonRpcTransportHandler(operations).handle(rpc, new ServerCallContext({ requestedVersion, user: caller }))) as RpcAnswer;
+  if (refusal) return refused(refusal);
   if (answer.error?.code === A2A_ERROR_CODE.INTERNAL_ERROR) {
     // The SDK passes on the message of whatever was thrown, which may describe AgentLater's insides.
     console.error("a2a operation failed", rpc.method, answer.error.message);
     answer.error.message = "AgentLater could not complete this request; try again";
   }
-  return json(answer);
+  return answered(answer);
 }
 
 /** What the card and the schema are served with: both are public, and a browser may read them. */

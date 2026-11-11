@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Caller, serveA2a, type Refusal } from "../src/a2a";
 import worker, { type Env } from "../src/index";
 
@@ -257,6 +257,75 @@ describe("/a2a for a verified caller", () => {
     expect((await handleA2a(post(V1), on, counting, nothing)).status).toBe(401);
     expect((await handleA2a(post({ Authorization: "Bearer verified" }), on, counting, nothing)).status).toBe(200);
     expect(asked).toBe(0);
+  });
+});
+
+describe("the log line of an /a2a request", () => {
+  const TOKEN = "eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJhZ2VudF8xIiwianRpIjoiYWJjIn0.c2lnbmF0dXJlLXNlY3JldA";
+  const AUTH = { ...V1, Authorization: `Bearer ${TOKEN}`, "CF-Ray": "8f2c1d3e4a5b6c7d-SJC" };
+  const accept = async () => new Caller("host_1", new Set(["a2a", "schedule_http"]));
+  const scheduled = async () => ({ id: "task_0123456789abcdef0123", status: "scheduled", updated_ms: 1_800_000_000_000, capture: false, response: null });
+  /** Sends one request and returns what it wrote with console.log: each line parsed, and all of them as text. */
+  async function logged(request: Request, verify: Parameters<typeof serveA2a>[2] = accept, run: Parameters<typeof serveA2a>[3] = scheduled) {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    // The line an internal failure already writes for AgentLater's own eyes; not the one under test.
+    const failure = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await handleA2a(request, on, verify, run);
+      const text = log.mock.calls.map((line) => line.join(" ")).join("\n");
+      return { lines: log.mock.calls.map(([line]) => JSON.parse(line as string) as Json), text };
+    } finally {
+      log.mockRestore();
+      failure.mockRestore();
+    }
+  }
+  /** What the one line of a request says of how it ended. */
+  async function ending(...args: Parameters<typeof logged>) {
+    const { lines } = await logged(...args);
+    expect(lines).toHaveLength(1);
+    const { method, outcome, status, host } = lines[0]!;
+    return { method, outcome, status, host };
+  }
+
+  it("is one JSON line with the method, the outcome, the HTTP status, the duration, the ray id and the host, and nothing the caller sent", async () => {
+    const payload = { url: "https://dest.example.com/hook?key=url-secret-9f8e", headers: { Authorization: "Bearer payload-secret-7c6b" }, body: "body-secret-5a4f", delay: "15m" };
+    const message = { messageId: "message-id-3e2d", role: "ROLE_USER", parts: [{ data: payload, mediaType: "application/json" }] };
+    const { lines, text } = await logged(post({ ...AUTH, "X-Api-Key": "header-secret-4d1a" }, rpc("SendMessage", { message })));
+    expect(lines).toEqual([{ event: "a2a_request", method: "SendMessage", outcome: "ok", status: 200, ms: expect.any(Number), ray: "8f2c1d3e4a5b6c7d-SJC", host: "host_1" }]);
+    expect(lines[0]!.ms).toBeGreaterThanOrEqual(0);
+    for (const secret of [TOKEN, ...TOKEN.split("."), "url-secret-9f8e", "payload-secret-7c6b", "body-secret-5a4f", "header-secret-4d1a", "message-id-3e2d", "dest.example.com", "Bearer"]) {
+      expect(text).not.toContain(secret);
+    }
+  });
+
+  it("says how the request ended: ok, a JSON-RPC error's code, or the code of a refusal at HTTP", async () => {
+    expect(await ending(post(AUTH, rpc("SubscribeToTask", { id: "task_1" })))).toEqual({ method: "SubscribeToTask", outcome: -32004, status: 200, host: "host_1" });
+    expect(await ending(post(AUTH, "{"))).toEqual({ method: null, outcome: -32700, status: 200, host: "host_1" });
+    expect(await ending(post({ Authorization: AUTH.Authorization }))).toEqual({ method: null, outcome: -32009, status: 200, host: null });
+    expect(await ending(post(V1))).toEqual({ method: null, outcome: "authentication_required", status: 401, host: null });
+    expect(await ending(new Request("https://gateway.test/a2a"))).toEqual({ method: null, outcome: "method_not_allowed", status: 405, host: null });
+    expect(await ending(post(AUTH, rpc("SendMessage", { pad: "x".repeat(200 * 1024) })))).toEqual({ method: null, outcome: "too_large", status: 413, host: "host_1" });
+    // The agent holds a2a and schedule_http only.
+    expect(await ending(post(AUTH, rpc("GetTask", { id: "task_0123456789abcdef0123" })))).toEqual({ method: "GetTask", outcome: "capability_not_granted", status: 403, host: "host_1" });
+  });
+
+  it("leaves out a method name, a refusal's code and a ray id that are not plain words, and every error's own text", async () => {
+    const odd = await logged(post({ ...AUTH, "CF-Ray": "ray with spaces" }, rpc(`tasks/get ${TOKEN}`)));
+    expect(odd.lines).toMatchObject([{ method: null, outcome: -32601, ray: null }]);
+    expect(odd.text).not.toContain("tasks/get");
+
+    const refused = await logged(post(AUTH), async () => ({ status: 401, code: "invalid_jwt", message: `the token ${TOKEN} is not accepted` }));
+    expect(refused.lines).toMatchObject([{ outcome: "invalid_jwt", status: 401, host: null }]);
+    expect(refused.text).not.toContain("not accepted");
+    const sentence = await logged(post(AUTH), async () => ({ status: 401, code: `no: ${TOKEN}`, message: "no" }));
+    expect(sentence.lines).toMatchObject([{ outcome: null, status: 401 }]);
+
+    const message = { messageId: "m-1", role: "ROLE_USER", parts: [{ data: { url: "https://dest.example.com/hook", delay: "15m" }, mediaType: "application/json" }] };
+    const broken = await logged(post(AUTH, rpc("SendMessage", { message })), accept, async () => {
+      throw new TypeError("failure-detail-1b2c");
+    });
+    expect(broken.lines).toMatchObject([{ method: "SendMessage", outcome: -32603, status: 200 }]);
+    for (const { text } of [odd, refused, sentence, broken]) for (const secret of [TOKEN, "failure-detail-1b2c"]) expect(text).not.toContain(secret);
   });
 });
 
