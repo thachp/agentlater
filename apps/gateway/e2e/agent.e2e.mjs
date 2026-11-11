@@ -1508,6 +1508,9 @@ describe("A2A at /a2a", () => {
     return { get: async (key) => kept.get(key) ?? null, set: async (key, value) => void kept.set(key, value), del: async (key) => void kept.delete(key) };
   };
 
+  /** The example client run as a program. */
+  const program = (args, env = {}) => promisify(execFile)(process.execPath, [join(gatewayDir, "examples/a2a-client.mjs"), ...args], { env: { ...process.env, AGENTLATER_URL: "", ...env } });
+
   test("the example client goes from nothing to a delivered request; restarted, it keeps its identity and finds its project and task again; it registers a new agent when its own has expired or been revoked", async () => {
     const dir = await mkdtemp(join(tmpdir(), "a2a-example-"));
     const state = join(dir, "state", "client.json");
@@ -1561,12 +1564,34 @@ describe("A2A at /a2a", () => {
       assert.equal((await start()).agentId, last.agentId);
 
       // As a program: the gateway is its argument, its state is where AGENTLATER_STATE says, and it exits 0 for a completed task.
-      const program = (args, env = {}) => promisify(execFile)(process.execPath, [join(gatewayDir, "examples/a2a-client.mjs"), ...args], { env: { ...process.env, AGENTLATER_URL: "", ...env } });
       const { stdout } = await program([`${origin}/`], { AGENTLATER_STATE: state });
       assert.ok(stdout.includes(`task ${another.taskId} found again`) && stdout.includes("TASK_STATE_COMPLETED: 1 attempt(s), last HTTP status 200"), stdout);
       await assert.rejects(program([]), (e) => e.code === 2 && /usage/.test(e.stderr));
       await assert.rejects(promisify(execFile)(process.execPath, [join(gatewayDir, "e2e/a2a-staging.mjs"), origin], { env: { ...process.env, RECEIVER_URL: "" } }), (e) => e.code === 2 && /usage/.test(e.stderr));
       assert.equal(deliveriesTo("/a2a-example").length, 2);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the example client stops waiting for a task at its bound, says the task goes on, and exits 3; a later run reads the same task", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "a2a-example-wait-"));
+    const state = join(dir, "client.json");
+    const lines = [];
+    try {
+      const started = Date.now();
+      const waited = await runExample({ baseUrl: origin, state, payload: { url: "https://dest.example.com/a2a-example-wait", delay: "1h" }, fetch: fromAnywhere, pollMs: 100, waitMs: 400, log: (line) => lines.push(line) });
+      assert.deepEqual([waited.ended, waited.state, waited.delivery.attempt_count], [false, "TASK_STATE_SUBMITTED", 0]);
+      assert.ok(Date.now() - started < 30_000, "the run went on long after its bound");
+      assert.equal(lines.at(-1), `task ${waited.taskId} is still TASK_STATE_SUBMITTED after 0.4 s. It goes on without this run; run again to read it, with AGENTLATER_WAIT_SECONDS set to wait longer`);
+
+      // As a program: AGENTLATER_WAIT_SECONDS is the bound, and 3 is the exit code of a run that stopped waiting.
+      await assert.rejects(program([origin], { AGENTLATER_STATE: state, AGENTLATER_WAIT_SECONDS: "1" }), (e) => {
+        assert.equal(e.code, 3, e.stderr);
+        assert.ok(e.stdout.includes(`task ${waited.taskId} found again`) && e.stdout.includes(`task ${waited.taskId} is still TASK_STATE_SUBMITTED after 1 s`), e.stdout);
+        return true;
+      });
+      assert.equal(deliveriesTo("/a2a-example-wait").length, 0);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

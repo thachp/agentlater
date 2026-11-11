@@ -311,7 +311,10 @@ await store.set("agentlater:task", task.id);
 
 // …
 
-while (!ended(task)) {
+// Not for ever: a delivery that is retried can take an hour, and one scheduled for later waits
+// until then. The task goes on without this run, and the next run finds it again.
+const deadline = Date.now() + waitMs;
+while (!ended(task) && Date.now() < deadline) {
   await sleep(pollMs);
   task = await a2a.getTask({ id: task.id });
 }

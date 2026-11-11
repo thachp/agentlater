@@ -9,6 +9,10 @@
 //
 // The gateway's URL is the first argument, or AGENTLATER_URL. `--new` schedules another delivery
 // instead of reading the last one. AGENTLATER_DELIVER_URL is the URL to deliver to.
+// AGENTLATER_WAIT_SECONDS is how long to wait for the task to end, 300 unless set.
+//
+// Exit code: 0 the request was delivered, 1 the task failed or was canceled, or the run itself
+// failed, 2 no gateway URL was given, 3 the task had not ended when the wait ran out.
 //
 // State: one JSON file, ~/.agentlater/a2a-client-<gateway host>.json (AGENTLATER_STATE to put it
 // elsewhere), written with mode 0600 in a directory made with mode 0700. It holds the host's and
@@ -142,9 +146,9 @@ const statePath = (baseUrl) => join(homedir(), ".agentlater", `a2a-client-${new 
 
 /**
  * One run: connect, make or find the project, schedule the delivery or find the one scheduled by
- * an earlier run, and poll it to its end.
+ * an earlier run, and poll it to its end, or for `waitMs` if it has not ended by then.
  */
-export async function run({ baseUrl, state = statePath(baseUrl), payload = { url: "https://example.com/", method: "GET", delay: "5s" }, another = false, fetch, pollMs = 2000, log = console.log }) {
+export async function run({ baseUrl, state = statePath(baseUrl), payload = { url: "https://example.com/", method: "GET", delay: "5s" }, another = false, fetch, pollMs = 2000, waitMs = 300_000, log = console.log }) {
   const store = await fileStore(state);
   const { a2a, execute, agentId, registered } = await connect({ baseUrl, store, fetch, log });
 
@@ -176,13 +180,18 @@ export async function run({ baseUrl, state = statePath(baseUrl), payload = { url
     log(`task ${task.id} scheduled`);
   }
 
-  while (!ended(task)) {
+  // Not for ever: a delivery that is retried can take an hour, and one scheduled for later waits
+  // until then. The task goes on without this run, and the next run finds it again.
+  const deadline = Date.now() + waitMs;
+  while (!ended(task) && Date.now() < deadline) {
     await sleep(pollMs);
     task = await a2a.getTask({ id: task.id });
   }
   const result = deliveryOf(task);
-  log(`task ${task.id} ${taskStateToJSON(task.status.state)}: ${result.attempt_count} attempt(s), last HTTP status ${result.attempts.at(-1)?.http_status ?? "none"}`);
-  return { agentId: agentId(), registered: registered(), projectId: project.id, taskId: task.id, state: taskStateToJSON(task.status.state), delivery: result };
+  const now = taskStateToJSON(task.status.state);
+  if (ended(task)) log(`task ${task.id} ${now}: ${result.attempt_count} attempt(s), last HTTP status ${result.attempts.at(-1)?.http_status ?? "none"}`);
+  else log(`task ${task.id} is still ${now} after ${waitMs / 1000} s. It goes on without this run; run again to read it, with AGENTLATER_WAIT_SECONDS set to wait longer`);
+  return { agentId: agentId(), registered: registered(), projectId: project.id, taskId: task.id, state: now, ended: ended(task), delivery: result };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -193,9 +202,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.exit(2);
   }
   const url = process.env.AGENTLATER_DELIVER_URL;
+  const wait = Number(process.env.AGENTLATER_WAIT_SECONDS);
   try {
-    const { state } = await run({ baseUrl, state: process.env.AGENTLATER_STATE, another: args.includes("--new"), payload: url ? { url, delay: "5s" } : undefined });
-    process.exit(state === "TASK_STATE_COMPLETED" ? 0 : 1);
+    const task = await run({ baseUrl, state: process.env.AGENTLATER_STATE, another: args.includes("--new"), payload: url ? { url, delay: "5s" } : undefined, waitMs: wait > 0 ? wait * 1000 : undefined });
+    process.exit(task.state === "TASK_STATE_COMPLETED" ? 0 : task.ended ? 1 : 3);
   } catch (e) {
     console.error(`failed: ${e instanceof Error ? e.message : e}`);
     process.exit(1);
