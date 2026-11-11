@@ -5,6 +5,7 @@ on:
   pull_request:
 permissions:
   contents: read
+# scripts/check.mjs runs these same checks locally. Change the two together.
 jobs:
   rust:
     runs-on: ubuntu-latest

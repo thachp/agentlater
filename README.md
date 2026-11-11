@@ -176,6 +176,12 @@ npm install
 cargo test && npm run typecheck && npm test
 ```
 
+Every check CI runs, in one command (`-- --fast` skips the e2e suites):
+
+```bash
+npm run verify
+```
+
 The rules the code keeps, and the lints that enforce them, are in [CODING_STANDARDS.md](CODING_STANDARDS.md).
 
 ```bash
