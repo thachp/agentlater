@@ -56,7 +56,8 @@ const { agentId } = await client.connectAgent({
   provider: "${GATEWAY_URL}",
   mode: "autonomous",
   name: "my agent",
-  capabilities: ["create_project", "get_project", "get_payment_link", "schedule_http", "queue_http",
+  capabilities: ["create_project", "get_project", "rotate_signing_secret", "get_payment_link",
+                 "schedule_http", "queue_http",
                  "get_task", "list_tasks", "cancel_task", "redrive_task",
                  "create_cron", "get_cron", "list_crons", "delete_cron", "watch_http",
                  "read_inbox", "ack_inbox", "set_wake", "delete_wake",
@@ -158,6 +159,17 @@ RunLater-Signature: v1=5d0e…c41a
 
 {"remind":"invoice #42"}`;
 
+export const rotateSecret = `// The secret leaked: the old one stops signing at once.
+rotate_signing_secret({ overlap: "0s" })
+// { signing_secret: "rls_9f2c…", previous_valid_until_ms: null }
+
+// Routine: both secrets sign for the overlap (default "24h", at most "7d").
+rotate_signing_secret({ overlap: "2h" })
+// { signing_secret: "rls_41d7…", previous_valid_until_ms: 1767319200000 }
+
+// During the overlap a delivery carries one entry per secret:
+// RunLater-Signature: v1=8a13…07be,v1=5d0e…c41a`;
+
 export const verifyNode = `import { createHmac, timingSafeEqual } from "node:crypto";
 
 // headers: lowercase names. rawBody: the body exactly as received (string or Buffer).
@@ -172,7 +184,8 @@ export function verifyAgentLater(headers, rawBody, secret, toleranceSecs = 300) 
     .update(\`\${timestamp}.\${taskId}.\${attempt}.\`)
     .update(rawBody)
     .digest();
-  // During secret rotation the header holds several comma-separated v1= entries.
+  // After rotate_signing_secret the header holds one v1= entry per signing secret until the
+  // overlap ends: accept a match on any.
   return String(headers["runlater-signature"] ?? "").split(",").some((entry) => {
     const [scheme, hex] = entry.trim().split("=");
     return scheme === "v1" && /^[0-9a-f]{64}$/.test(hex ?? "") &&
@@ -201,7 +214,8 @@ def verify_runlater(headers, raw_body: bytes, secret: str, tolerance_secs: float
         return False
     prefix = f"{timestamp}.{task_id}.{attempt}.".encode()
     expected = hmac.new(secret.encode(), prefix + raw_body, hashlib.sha256).hexdigest()
-    # During secret rotation the header holds several comma-separated v1= entries.
+    # After rotate_signing_secret the header holds one v1= entry per signing secret until the
+    # overlap ends: accept a match on any.
     for entry in (headers.get("runlater-signature") or "").split(","):
         scheme, _, sig = entry.strip().partition("=")
         if scheme == "v1" and _HEX64.fullmatch(sig) and hmac.compare_digest(sig, expected):

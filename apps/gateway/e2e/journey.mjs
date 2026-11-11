@@ -1,7 +1,7 @@
 // The agent journey against a deployed (or local) stack: a fresh Agent Auth identity, a
 // project, and real deliveries to the staging receiver, checked end to end including the
 // signature, lanes, delays, callbacks, crons, watches, the inbox with captured responses,
-// wake, secrets, inbound hooks, and hosted MCP. Used by `staging.mjs` after each staging deploy, and by agent.e2e.mjs locally.
+// wake, secrets, inbound hooks, a signing-secret rotation, and hosted MCP. Used by `staging.mjs` after each staging deploy, and by agent.e2e.mjs locally.
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { AgentAuthClient, MemoryStorage } from "@auth/agent";
@@ -10,7 +10,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { connectHosted } from "./oauth.mjs";
 
 const CAPABILITIES = [
-  "create_project", "get_project", "schedule_http", "queue_http", "get_task", "list_tasks", "cancel_task", "redrive_task",
+  "create_project", "get_project", "rotate_signing_secret", "schedule_http", "queue_http", "get_task", "list_tasks", "cancel_task", "redrive_task",
   "create_cron", "get_cron", "list_crons", "delete_cron", "watch_http",
   "read_inbox", "ack_inbox", "set_wake", "delete_wake",
   "set_secret", "list_secrets", "delete_secret",
@@ -96,9 +96,10 @@ export async function runJourney(c) {
       const t = await exec("get_task", { task_id: task.id });
       return statuses.includes(t.status) && t;
     });
-  const verify = (d, body) => {
+  // True only for a header with one v1= entry, made with `secret`.
+  const verify = (d, body, secret = project.signing_secret) => {
     const h = d.headers;
-    const mac = createHmac("sha256", project.signing_secret)
+    const mac = createHmac("sha256", secret)
       .update(`${h["runlater-timestamp"]}.${h["runlater-task-id"]}.${h["runlater-attempt"]}.`)
       .update(body)
       .digest();
@@ -353,7 +354,20 @@ export async function runJourney(c) {
   check((await toHook(hookBody, `journey-${run}-2`)).status === 404, "a deleted hook still accepted requests");
   log("hook received a signed webhook once, refused the rest, filtered what it was told to");
 
-  // 12. Hosted MCP: a client connects through OAuth consent (its own project and trial) and
+  // 12. Rotating the signing secret with no overlap: the next delivery carries one signature,
+  //     made with the new secret. The project was created by this run for this run, in every
+  //     environment, so no destination outside it holds the secret that stops here.
+  const rotated = await exec("rotate_signing_secret", { overlap: "0s" });
+  check(/^rls_/.test(rotated.signing_secret ?? ""), "rotate_signing_secret returned no signing_secret");
+  check(rotated.signing_secret !== project.signing_secret, "rotate_signing_secret returned the secret it replaced");
+  check(rotated.previous_valid_until_ms === null, `a rotation with no overlap left the old secret until ${rotated.previous_valid_until_ms}`);
+  check((await exec("create_project")).signing_secret === rotated.signing_secret, "create_project does not return the rotated secret");
+  await exec("schedule_http", { url: hook("rotated"), body });
+  const afterRotation = await until("the delivery after the rotation", async () => (await deliveries()).find((d) => d.name === "rotated"));
+  check(verify(afterRotation, body, rotated.signing_secret), "the delivery after the rotation does not verify with the new signing_secret alone");
+  log("signing secret rotated with no overlap, next delivery signed with the new one only");
+
+  // 13. Hosted MCP: a client connects through OAuth consent (its own project and trial) and
   //    schedules a delivery with the schedule_http tool.
   const tokens = await connectHosted(c.gatewayUrl);
   const mcp = new Client({ name: "runlater-journey", version: "1.0.0" });

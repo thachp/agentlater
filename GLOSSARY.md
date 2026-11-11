@@ -2,6 +2,12 @@
 
 AgentLater makes HTTP requests later for agents and records whether they happened. Each project has its own ledger of tasks and the attempts made to send them.
 
+## Projects
+
+**Signing secret**:
+What a project and its destinations share so that a destination can tell a request came from that project. Rotating it replaces it; the one replaced stays valid for an overlap the owner chooses, which can be none.
+_Avoid_: signing key, webhook secret, API key, "secret" alone (that is a credential an agent stores for its requests)
+
 ## Tasks
 
 **Task**:
