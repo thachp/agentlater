@@ -197,6 +197,15 @@ impl<'a, D: Db> Ledger<'a, D> {
         let rows: Vec<Count> = self.db.query(sql, params)?;
         Ok(rows.first().map_or(0, |c| c.total))
     }
+
+    /// Refuses a new cron, hook or secret (`table`) once the project has `max` of them.
+    fn room_for(&self, table: &str, code: &'static str, max: i64) -> Result<(), ApiError> {
+        if self.count(&format!("SELECT COUNT(*) AS total FROM {table}"), vec![])? < max {
+            return Ok(());
+        }
+        let message = format!("this project already has {max} {table}; delete one first");
+        Err(ApiError::new(429, code, message))
+    }
 }
 
 #[derive(Deserialize)]

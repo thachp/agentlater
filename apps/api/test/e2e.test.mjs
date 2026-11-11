@@ -8,10 +8,9 @@
 import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac, generateKeyPairSync, randomBytes, sign } from "node:crypto";
-import { fileURLToPath } from "node:url";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
+import { apiWorker } from "./api-worker.mjs";
 
-const root = fileURLToPath(new URL("..", import.meta.url));
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
 const publicHex = Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url").toString("hex");
 
@@ -32,17 +31,7 @@ let mf;
 before(async () => {
   // Miniflare 5 takes a new options shape; it converts from the documented v4 one.
   mf = new Miniflare(convertV4MiniflareOptions({
-    modulesRoot: root,
-    modules: [
-      { type: "ESModule", path: `${root}build/index.js` },
-      { type: "CompiledWasm", path: `${root}build/index_bg.wasm` },
-    ],
-    compatibilityDate: "2026-10-27",
-    durableObjects: { LEDGER: { className: "TaskLedger", useSQLite: true } },
-    queueProducers: { READY: { queueName: "runlater-ready" } },
-    queueConsumers: { "runlater-ready": { maxBatchTimeout: 1 } },
-    analyticsEngineDatasets: { STATS: { dataset: "runlater_stats" } },
-    bindings: { GATEWAY_PUBLIC_KEY: publicHex, SECRETS_KEY: randomBytes(32).toString("hex") },
+    ...apiWorker(publicHex),
     outboundService: async (req) => {
       const url = new URL(req.url);
       received.push({

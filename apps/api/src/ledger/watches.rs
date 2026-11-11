@@ -807,13 +807,12 @@ mod tests {
             assert!(actions_of(&db, id).is_empty(), "{id}");
             let w = watch_view(&l, id);
             assert_eq!((w.action_task_id, w.action_skipped), (None, None), "{id}");
-            let stored: Vec<IdRow> = db
-                .query(
-                    "SELECT on_match AS id FROM tasks WHERE id = ?",
-                    vec![id.into()],
-                )
+            let stored: String =
+                db.0.query_row("SELECT on_match FROM tasks WHERE id = ?", [id], |r| {
+                    r.get(0)
+                })
                 .unwrap();
-            assert!(!stored[0].id.contains("ci-token"), "{id}: {}", stored[0].id);
+            assert!(!stored.contains("ci-token"), "{id}: {stored}");
         }
     }
 

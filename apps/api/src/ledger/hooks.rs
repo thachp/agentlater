@@ -209,14 +209,8 @@ impl<D: Db> Ledger<'_, D> {
             ));
         }
         let existing = self.hook_row(&spec.name)?;
-        if existing.is_none()
-            && self.count("SELECT COUNT(*) AS total FROM hooks", vec![])? >= MAX_HOOKS
-        {
-            return Err(ApiError::new(
-                429,
-                "hook_limit",
-                format!("this project already has {MAX_HOOKS} hooks; delete one first"),
-            ));
+        if existing.is_none() {
+            self.room_for("hooks", "hook_limit", MAX_HOOKS)?;
         }
         let sealed_secret = match &spec.verify {
             Some((_, secret)) => Some(self.seal_hook_secret(&project.id, &spec.name, secret)?),
@@ -651,10 +645,10 @@ mod tests {
             !listed.contains(TOKEN) && !listed.contains("v1:") && !listed.contains("whsec_"),
             "{listed}"
         );
-        let stored: Vec<IdRow> = db
-            .query("SELECT token_hash AS id FROM hooks", vec![])
-            .unwrap();
-        assert_eq!(stored[0].id, token_hash(TOKEN), "only the hash is stored");
+        let stored: String =
+            db.0.query_row("SELECT token_hash FROM hooks", [], |r| r.get(0))
+                .unwrap();
+        assert_eq!(stored, token_hash(TOKEN), "only the hash is stored");
 
         assert!(l.hook_for_token(TOKEN).unwrap().is_some());
         assert!(l.hook_for_token("hk_other").unwrap().is_none());
@@ -1002,10 +996,10 @@ mod tests {
             ["workflow_run"]
         );
         // Nor does it spend the hook's rate limit, so noise can't crowd out a real event.
-        let tat: Vec<Count> = db
-            .query("SELECT rate_tat_ms AS total FROM hooks", vec![])
-            .unwrap();
-        assert_eq!(tat[0].total, 0);
+        let tat: i64 =
+            db.0.query_row("SELECT rate_tat_ms FROM hooks", [], |r| r.get(0))
+                .unwrap();
+        assert_eq!(tat, 0);
         // A flood over the limit is turned away before the filter is even asked.
         db.exec(
             "UPDATE hooks SET rate_tat_ms = ?",
