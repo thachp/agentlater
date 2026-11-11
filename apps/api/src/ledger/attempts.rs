@@ -36,8 +36,11 @@ pub struct Delivery {
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: Option<String>,
-    /// The project's signing secrets, newest first: two while a rotation's overlap lasts.
-    pub signing_secrets: Vec<String>,
+    pub signing_secret: String,
+    /// The secret a rotation replaced, while its overlap lasts: it signs too. Left out when
+    /// there is none, so a ledger and a consumer on either side of a deploy read each other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing_secret_previous: Option<String>,
     /// A watch's poll: the consumer reads the response body and reports it with the outcome.
     #[serde(default)]
     pub read_body: bool,
@@ -54,6 +57,16 @@ pub struct Delivery {
     /// lane, a wake held back on purpose, a retry and a redrive are late by design.
     #[serde(default)]
     pub late_ms: Option<i64>,
+}
+
+impl Delivery {
+    /// The secrets that sign this delivery, the current one first.
+    pub fn signing_secrets(&self) -> Vec<&str> {
+        std::iter::once(&self.signing_secret)
+            .chain(&self.signing_secret_previous)
+            .map(String::as_str)
+            .collect()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -198,6 +211,7 @@ impl<D: Db> Ledger<'_, D> {
         } else {
             row.body.clone()
         };
+        let (signing_secret, signing_secret_previous) = project.signing_secrets(now);
         Ok(Claimed::Deliver(Box::new(Delivery {
             task_id: task_id.into(),
             attempt: attempt.number,
@@ -206,7 +220,8 @@ impl<D: Db> Ledger<'_, D> {
             url: row.url.clone(),
             headers: row.headers()?,
             body,
-            signing_secrets: project.signing_secrets(now),
+            signing_secret,
+            signing_secret_previous,
             read_body: kind.is_watch() || reporting.capture,
             capture: reporting.capture,
             secrets,
@@ -448,8 +463,8 @@ mod tests {
 
         let d = deliver(&l, &due[0], T0 + 10);
         assert_eq!(
-            (d.attempt, d.fence, d.signing_secrets),
-            (1, 1, vec!["secret".to_string()])
+            (d.attempt, d.fence, d.signing_secrets()),
+            (1, 1, vec!["secret"])
         );
         assert_eq!(l.task("t1").unwrap().status, Status::Delivering);
         assert_eq!(l.project(T0).unwrap().attempts_used, 1);

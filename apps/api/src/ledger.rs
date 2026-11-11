@@ -314,7 +314,7 @@ mod tests {
         );
         l.schedule(req("https://a.example.com/"), "t1", T0).unwrap();
         let delivery = drive(&l, "t1", http(200), None, T0).0;
-        assert_eq!(delivery.signing_secrets, ["old"]);
+        assert_eq!(delivery.signing_secrets(), ["old"]);
         let rotated = l.rotate_signing_secret("new", None, T0).unwrap();
         assert_eq!(rotated.previous_valid_until_ms, Some(T0 + DAY));
     }

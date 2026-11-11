@@ -922,9 +922,12 @@ mod tests {
         l.set_wake(waking(serde_json::json!({})), T0).unwrap();
         l.rotate_signing_secret("s2", Some("1h"), T0).unwrap();
         finish_to_inbox(&l, "t1", T0 + 5);
-        assert_eq!(send_wake(&l, 202, T0 + 5).signing_secrets, ["s2", "secret"]);
+        assert_eq!(
+            send_wake(&l, 202, T0 + 5).signing_secrets(),
+            ["s2", "secret"]
+        );
         finish_to_inbox(&l, "t2", T0 + DAY);
-        assert_eq!(send_wake(&l, 202, T0 + DAY).signing_secrets, ["s2"]);
+        assert_eq!(send_wake(&l, 202, T0 + DAY).signing_secrets(), ["s2"]);
     }
 
     #[test]

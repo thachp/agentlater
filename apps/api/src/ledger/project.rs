@@ -75,12 +75,11 @@ impl ProjectRow {
             .filter(|until| now < *until)
     }
 
-    /// The secrets that sign a delivery made at `now`, newest first.
-    pub(super) fn signing_secrets(self, now: i64) -> Vec<String> {
+    /// The secrets that sign a delivery made at `now`: the current one, and the previous one
+    /// while its overlap lasts.
+    pub(super) fn signing_secrets(self, now: i64) -> (String, Option<String>) {
         let previous = self.previous_until(now).and(self.signing_secret_previous);
-        std::iter::once(self.signing_secret)
-            .chain(previous)
-            .collect()
+        (self.signing_secret, previous)
     }
 
     pub(super) fn max_retained_tasks(&self) -> i64 {
@@ -271,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn only_create_project_returns_the_signing_secret() {
+    fn reading_or_crediting_a_project_never_returns_the_signing_secret() {
         let db = Memory::new();
         let l = setup(&db);
         assert_eq!(l.project(T0).unwrap().signing_secret, None);
@@ -295,7 +294,12 @@ mod tests {
     /// The secrets that sign a delivery made at `now`, newest first.
     fn signing(l: &Ledger<'_, Memory>, id: &str, now: i64) -> Vec<String> {
         l.schedule(req("https://a.example.com/"), id, now).unwrap();
-        drive(l, id, http(200), None, now).0.signing_secrets
+        let delivery = drive(l, id, http(200), None, now).0;
+        delivery
+            .signing_secrets()
+            .into_iter()
+            .map(String::from)
+            .collect()
     }
 
     #[test]
