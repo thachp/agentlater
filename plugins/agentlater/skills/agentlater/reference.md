@@ -42,7 +42,7 @@ scheduled ──(run_at reached)──▶ delivering ──2xx──▶ succeede
 | `trials_paused` | New trials are full for today; call `create_project` again later |
 | `rate_limited` | Over 300 calls in a minute; wait a minute, then batch or slow down |
 | `secret_not_found`, `secret_host_not_allowed` | `set_secret` with the destination's exact host in `allowed_hosts` |
-| `watch_not_redrivable`, `wake_not_redrivable` | start a new watch / `set_wake` again |
+| `watch_not_redrivable`, `wake_not_redrivable`, `a2a_task_not_redrivable` | start a new watch / `set_wake` again / schedule the request again |
 | `ack_beyond_inbox` | ack only up to the last `seq` you read |
 | `hook_limit`, `secret_limit` | delete one you no longer need |
 | `invalid_request` with `field` | fix that argument and call again |

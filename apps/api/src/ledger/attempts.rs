@@ -866,7 +866,11 @@ mod tests {
         assert_eq!(r.body_bytes, Some(big.len() as u64));
         assert_eq!(r.headers["content-type"], "text/plain");
 
-        let listed = l.list(None, None, None, None).unwrap().tasks.remove(0);
+        let listed = l
+            .list(None, None, None, None, None)
+            .unwrap()
+            .tasks
+            .remove(0);
         assert!(listed.capture);
         let r = listed.response.unwrap();
         assert_eq!((r.status, r.body), (200, None), "lists leave out the body");

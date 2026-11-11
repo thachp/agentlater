@@ -137,11 +137,24 @@ paths:
     get:
       operationId: listTasks
       x-scope: read
-      description: "Newest first. Scope: read."
+      description: >
+        Newest first. For a call made for the gateway's A2A interface (see the assertion's via): only
+        tasks made through A2A, most recently changed first (updated_ms, then newest), with `total`.
+        Scope: read.
       parameters:
-        - { name: status, in: query, schema: { $ref: "#/components/schemas/Status" } }
+        - name: status
+          in: query
+          description: One status, or several separated by commas.
+          schema: { type: string, pattern: "^(scheduled|delivering|retrying|succeeded|failed|canceled)(,(scheduled|delivering|retrying|succeeded|failed|canceled))*$" }
         - { name: lane, in: query, schema: { type: string, pattern: "^[A-Za-z0-9_.:-]{1,64}$" } }
-        - { name: cursor, in: query, schema: { type: string } }
+        - name: updated_since_ms
+          in: query
+          description: Only tasks whose updated_ms is this or later.
+          schema: { type: integer, minimum: 0 }
+        - name: cursor
+          in: query
+          description: The next_cursor of the previous page, as given.
+          schema: { type: string }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
       responses:
         "200":
@@ -154,6 +167,7 @@ paths:
                 properties:
                   tasks: { type: array, items: { $ref: "#/components/schemas/Task" } }
                   next_cursor: { type: [string, "null"] }
+                  total: { type: integer, description: "How many tasks match in all. Only for a call made for the A2A interface." }
         default: { $ref: "#/components/responses/Error" }
   /v1/tasks/{id}:
     get:
@@ -182,7 +196,9 @@ paths:
       x-scope: schedule
       description: >
         Gives a failed task a fresh set of attempts, starting now. 409 task_not_failed
-        otherwise. Scope: schedule.
+        otherwise; 409 watch_not_redrivable or wake_not_redrivable for a watch or a wake; 409
+        a2a_task_not_redrivable for a task made through A2A, whoever asks, so that a finished A2A
+        task never starts again. Scope: schedule.
       parameters: [{ $ref: "#/components/parameters/TaskId" }]
       responses:
         "200": { $ref: "#/components/responses/Task" }
@@ -516,7 +532,7 @@ components:
         Claims: aud "runlater-api", sub (project id, [A-Za-z0-9_-]{1,64}), scope
         (space-separated: project schedule read cancel billing secrets hooks.receive maintain), iat and exp in unix seconds,
         lifetime at most 300 s. Optional: via "a2a", on a call made for the gateway's A2A interface; the task it
-        schedules is marked, and it finds only marked tasks.
+        schedules is marked, it finds only marked tasks, and it lists them by change (see listTasks).
   parameters:
     TaskId:
       name: id
@@ -569,7 +585,7 @@ components:
       description: >
         400 invalid_request / ack_beyond_inbox / secret_not_found / secret_host_not_allowed, 401 unauthorized, 402 budget_exhausted, 403 forbidden or
         trial_expired, 404 not_found / project_not_found / task_not_found / cron_not_found / wake_not_set,
-        409 idempotency_conflict / task_finished / task_not_failed / watch_not_redrivable / wake_not_redrivable,
+        409 idempotency_conflict / task_finished / task_not_failed / watch_not_redrivable / wake_not_redrivable / a2a_task_not_redrivable,
         429 task_limit (1,000 tasks held, finished ones included until purged) / cron_limit,
         500 internal_error.
       content:

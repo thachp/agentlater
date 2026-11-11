@@ -212,12 +212,6 @@ describe("/a2a for a verified caller", () => {
     for (const method of ["Nope", "message/send", "tasks/get", "getTask"]) expect(await codeOf(method), method).toBe(-32601);
   });
 
-  // Sending and reading run capabilities: test/a2a-tasks.test.ts.
-  it("does not list or cancel yet: both are unsupported", async () => {
-    expect(await codeOf("CancelTask", { id: "task_1" })).toBe(-32004);
-    expect(await codeOf("ListTasks")).toBe(-32004);
-  });
-
   it("names the A2A error in the error's data", async () => {
     const body = await call(rpc("SubscribeToTask", { id: "task_1" }));
     expect(body.error.data).toEqual([{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "UNSUPPORTED_OPERATION", domain: "a2a-protocol.org" }]);

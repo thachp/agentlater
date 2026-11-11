@@ -13,9 +13,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
-import { SendMessageRequest, TaskState } from "@a2a-js/sdk";
+import { CancelTaskRequest, ListTasksRequest, SendMessageRequest, SubscribeToTaskRequest, TaskState } from "@a2a-js/sdk";
 import { AgentCardResolver, ClientFactory, JsonRpcTransportFactory } from "@a2a-js/sdk/client";
-import { ContentTypeNotSupportedError, TaskNotFoundError, UnsupportedOperationError } from "@a2a-js/sdk/errors";
+import { ContentTypeNotSupportedError, TaskNotCancelableError, TaskNotFoundError, UnsupportedOperationError } from "@a2a-js/sdk/errors";
 import { AgentAuthClient, MemoryStorage } from "@auth/agent";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -63,7 +63,10 @@ const stripeSessions = [];
 /** Fake Stripe: MPP PaymentIntents by idempotency key, as Stripe replays them. */
 const paymentIntents = new Map();
 
-/** Deliveries the API sent out, and scripted replies per path (default 200). */
+/**
+ * Deliveries the API sent out, and scripted replies per path (default 200). A reply may be a
+ * function: the destination holds the request until it resolves to the status.
+ */
 const received = [];
 const replies = new Map();
 
@@ -157,8 +160,8 @@ before(async () => {
             }
             received.push({ url: req.url, headers: Object.fromEntries(req.headers), body: await req.text() });
             const script = replies.get(new URL(req.url).pathname) ?? [];
-            const status = script.length ? script.shift() : 200;
-            return new Response("", { status });
+            const reply = script.length ? script.shift() : 200;
+            return new Response("", { status: typeof reply === "function" ? await reply() : reply });
           },
         },
       ],
@@ -636,7 +639,8 @@ describe("A2A at /a2a", () => {
 
   test("an agent JWT signed for /a2a with the a2a capability reaches the SDK's dispatcher", async () => {
     const client = await a2aClient(caller);
-    await assert.rejects(client.cancelTask({ id: "task_00000000000000000000" }), UnsupportedOperationError);
+    // Streaming is the operation that stays unsupported.
+    await assert.rejects(client.resubscribeTask(SubscribeToTaskRequest.fromJSON({ id: "task_00000000000000000000" })).next(), UnsupportedOperationError);
     await dispatched(await call(await caller.token()));
     await dispatched(await call(await caller.forge()), "a hand-signed token with the same claims is the same token");
   });
@@ -838,7 +842,7 @@ describe("A2A at /a2a", () => {
     await dispatched(await call(await old.token()));
   });
 
-  // ---- Delivery tasks: SendMessage and GetTask ----
+  // ---- Delivery tasks: SendMessage, GetTask, CancelTask and ListTasks ----
 
   /** One JSON-RPC call to /a2a for an agent: the HTTP status and the body. */
   async function rpcAs(agent, method, params) {
@@ -1114,6 +1118,222 @@ describe("A2A at /a2a", () => {
     // Each task is still there for whoever may read it: its own host through A2A, and the host's every task over Agent Auth.
     assert.equal((await getAs(stranger, theirs.id)).result.id, theirs.id);
     assert.deepEqual((await run(agent, "list_tasks")).tasks.map((t) => t.id).sort(), [mine.id, scheduled.id, queued.id].sort());
+  });
+
+  /** A destination that holds its next request until `answer(status)`. */
+  function held(path) {
+    let answer;
+    const status = new Promise((resolve) => (answer = resolve));
+    replies.set(path, [() => status]);
+    return answer;
+  }
+  const NEVER = "task_00000000000000000000";
+  const ids = (tasks) => tasks.map((t) => t.id);
+
+  test("CancelTask cancels a task that has not started, answers TaskNotCancelableError for a finished one, and returns one in flight as working", async () => {
+    const agent = await withProject();
+    const client = await a2aClient(agent);
+    const cancel = (id) => client.cancelTask(CancelTaskRequest.fromJSON({ id }));
+
+    // Not started: canceled now, and never sent.
+    const later = await sendAs(agent, { url: "https://dest.example.com/a2a-cancel-later", delay: "1h" });
+    const canceled = await cancel(later.id);
+    assert.equal(canceled.id, later.id);
+    assert.equal(canceled.status.state, TaskState.TASK_STATE_CANCELED);
+    assert.equal(canceled.status.message, undefined);
+    assert.equal(canceled.artifacts[0].parts[0].content.value.status, "canceled");
+    assert.equal((await getAs(agent, later.id)).result.status.state, "TASK_STATE_CANCELED");
+    // Asked again, it is still canceled: a cancel that is repeated is not an error.
+    assert.equal((await cancel(later.id)).status.state, TaskState.TASK_STATE_CANCELED);
+    assert.equal((await run(agent, "get_task", { task_id: later.id })).status, "canceled");
+    assert.equal(deliveriesTo("/a2a-cancel-later").length, 0);
+
+    // Finished, either way: not cancelable, and unchanged.
+    replies.set("/a2a-cancel-gone", [404]);
+    const done = await sendAs(agent, { url: "https://dest.example.com/a2a-cancel-done" });
+    const gone = await sendAs(agent, { url: "https://dest.example.com/a2a-cancel-gone" });
+    for (const [task, state, how] of [[done, "TASK_STATE_COMPLETED", "succeeded"], [gone, "TASK_STATE_FAILED", "failed"]]) {
+      assert.equal((await settledAs(agent, task.id)).status.state, state);
+      await assert.rejects(cancel(task.id), TaskNotCancelableError);
+      const { status, body } = await rpcAs(agent, "CancelTask", { id: task.id });
+      assert.equal(status, 200);
+      assert.deepEqual(body.error, {
+        code: -32002,
+        message: `task already ${how}`,
+        data: [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "TASK_NOT_CANCELABLE", domain: "a2a-protocol.org" }],
+      });
+      assert.equal((await getAs(agent, task.id)).result.status.state, state);
+    }
+
+    // In flight: the attempt is out and cannot be recalled. Working, and nothing says canceled.
+    const inFlight = async (path) => {
+      const answer = held(path);
+      const task = await sendAs(agent, { url: `https://dest.example.com${path}` });
+      await until(async () => delivery((await getAs(agent, task.id)).result).status === "delivering");
+      const { body } = await rpcAs(agent, "CancelTask", { id: task.id });
+      assert.equal(body.result.status.state, "TASK_STATE_WORKING");
+      assert.equal(delivery(body.result).status, "delivering");
+      assert.match(body.result.status.message.parts[0].text, /cannot be stopped/);
+      assert.equal(JSON.stringify(body).includes("TASK_STATE_CANCELED"), false);
+      assert.equal((await getAs(agent, task.id)).result.status.state, "TASK_STATE_WORKING");
+      return { task, answer };
+    };
+    // The destination answers 2xx after the cancel: the delivery happened, so the task completes.
+    const won = await inFlight("/a2a-cancel-won");
+    won.answer(200);
+    assert.equal((await settledAs(agent, won.task.id)).status.state, "TASK_STATE_COMPLETED");
+    // It answers with a failure that would have been retried: the task is canceled instead.
+    const lost = await inFlight("/a2a-cancel-lost");
+    lost.answer(503);
+    const stopped = await settledAs(agent, lost.task.id);
+    assert.equal(stopped.status.state, "TASK_STATE_CANCELED");
+    assert.deepEqual(delivery(stopped).attempts.map((a) => a.http_status), [503]);
+    assert.equal(deliveriesTo("/a2a-cancel-lost").length, 1);
+
+    // Without the cancel_task grant nothing is canceled, whether or not the task exists.
+    const reader = await register(["a2a", "get_task", "list_tasks"], agent.client);
+    const standing = await sendAs(agent, { url: "https://dest.example.com/a2a-cancel-later", delay: "1h" });
+    for (const id of [standing.id, NEVER]) assert.equal((await rpcAs(reader, "CancelTask", { id })).status, 403);
+    assert.equal((await getAs(reader, standing.id)).result.status.state, "TASK_STATE_SUBMITTED");
+  });
+
+  test("redrive_task is refused for a task made through A2A, so a terminal A2A task never reopens; any other task redrives as before", async () => {
+    const agent = await withProject();
+    for (const path of ["/a2a-redrive", "/a2a-redrive-plain"]) replies.set(path, [404]);
+    const made = await sendAs(agent, { url: "https://dest.example.com/a2a-redrive" });
+    const plain = await run(agent, "queue_http", { url: "https://dest.example.com/a2a-redrive-plain" });
+    const canceled = await sendAs(agent, { url: "https://dest.example.com/a2a-redrive", delay: "1h" });
+    await rpcAs(agent, "CancelTask", { id: canceled.id });
+    assert.equal((await settledAs(agent, made.id)).status.state, "TASK_STATE_FAILED");
+    await until(async () => (await run(agent, "get_task", { task_id: plain.id })).status === "failed");
+
+    // Over Agent Auth, the interface that can redrive: refused for the A2A tasks, whatever their end.
+    for (const task of [made, canceled]) {
+      await assert.rejects(run(agent, "redrive_task", { task_id: task.id }), (e) => {
+        assert.equal(e.status, 409);
+        assert.equal(e.code, "a2a_task_not_redrivable");
+        assert.match(e.message, /made through A2A cannot be redriven/);
+        return true;
+      });
+    }
+    assert.equal((await getAs(agent, made.id)).result.status.state, "TASK_STATE_FAILED");
+    assert.equal((await getAs(agent, canceled.id)).result.status.state, "TASK_STATE_CANCELED");
+    assert.equal(deliveriesTo("/a2a-redrive").length, 1);
+
+    // A task made over Agent Auth redrives, and is sent again.
+    assert.equal((await run(agent, "redrive_task", { task_id: plain.id })).status, "scheduled");
+    await until(async () => (await run(agent, "get_task", { task_id: plain.id })).status === "succeeded");
+    assert.equal(deliveriesTo("/a2a-redrive-plain").length, 2);
+  });
+
+  test("ListTasks returns only the caller's A2A tasks, most recently changed first, with paging, a total and the filters; never another host's or interface's", async () => {
+    const agent = await withProject();
+    const stranger = await withProject();
+    const client = await a2aClient(agent);
+    const list = (params = {}) => client.listTasks(ListTasksRequest.fromJSON(params));
+
+    // Nothing yet: all four fields, empty.
+    assert.deepEqual((await rpcAs(agent, "ListTasks", {})).body.result, { tasks: [], nextPageToken: "", pageSize: 50, totalSize: 0 });
+
+    const waiting = await sendAs(agent, { url: "https://dest.example.com/a2a-list", delay: "1h" });
+    const dropped = await sendAs(agent, { url: "https://dest.example.com/a2a-list", delay: "1h" });
+    const sent = await sendAs(agent, { url: "https://dest.example.com/a2a-list-now" });
+    const completed = await settledAs(agent, sent.id);
+    await rpcAs(agent, "CancelTask", { id: dropped.id });
+    // In the same project over Agent Auth, and in another host's project through A2A.
+    const other = await run(agent, "schedule_http", { url: "https://dest.example.com/a2a-list-other", delay: "1h" });
+    const theirs = await sendAs(stranger, { url: "https://dest.example.com/a2a-list-theirs", delay: "1h" });
+
+    // By status timestamp, newest first: the cancel is the latest change, the untouched task the oldest.
+    const all = await list();
+    assert.deepEqual(ids(all.tasks), [dropped.id, sent.id, waiting.id]);
+    assert.deepEqual([all.totalSize, all.pageSize, all.nextPageToken], [3, 50, ""]);
+    assert.deepEqual(all.tasks.map((t) => t.status.state), [TaskState.TASK_STATE_CANCELED, TaskState.TASK_STATE_COMPLETED, TaskState.TASK_STATE_SUBMITTED]);
+    const times = all.tasks.map((t) => new Date(t.status.timestamp).getTime());
+    assert.deepEqual(times, [...times].sort((a, b) => b - a));
+    // Artifacts are left out, not sent empty, unless asked for.
+    const { result: bare } = (await rpcAs(agent, "ListTasks", {})).body;
+    for (const task of bare.tasks) assert.equal("artifacts" in task, false);
+    const { result: full } = (await rpcAs(agent, "ListTasks", { includeArtifacts: true, historyLength: 5 })).body;
+    assert.deepEqual(full.tasks.map((t) => delivery(t).status), ["canceled", "succeeded", "scheduled"]);
+    assert.equal(delivery(full.tasks[1]).attempt_count, 1);
+    assert.equal("history" in full.tasks[0], false);
+
+    // Pages: the token is the cursor, every page carries the whole count, and the last has no token.
+    const first = await list({ pageSize: 2 });
+    assert.deepEqual([ids(first.tasks), first.totalSize, first.pageSize], [[dropped.id, sent.id], 3, 2]);
+    assert.notEqual(first.nextPageToken, "");
+    const last = await list({ pageSize: 2, pageToken: first.nextPageToken });
+    assert.deepEqual([ids(last.tasks), last.totalSize, last.nextPageToken], [[waiting.id], 3, ""]);
+
+    // Filters: a state, a time, both.
+    for (const [status, expected] of [["TASK_STATE_SUBMITTED", [waiting.id]], ["TASK_STATE_COMPLETED", [sent.id]], ["TASK_STATE_CANCELED", [dropped.id]], ["TASK_STATE_FAILED", []], ["TASK_STATE_WORKING", []], ["TASK_STATE_INPUT_REQUIRED", []]]) {
+      const page = await list({ status });
+      assert.deepEqual([ids(page.tasks), page.totalSize], [expected, expected.length], status);
+    }
+    const since = await list({ statusTimestampAfter: completed.status.timestamp });
+    assert.deepEqual([ids(since.tasks), since.totalSize], [[dropped.id, sent.id], 2]);
+    assert.deepEqual(ids((await list({ statusTimestampAfter: completed.status.timestamp, status: "TASK_STATE_COMPLETED" })).tasks), [sent.id]);
+    assert.equal((await list({ statusTimestampAfter: new Date(Date.now() + 60_000).toISOString() })).totalSize, 0);
+    // Working is a delivery whose attempt is out (or one waiting to be retried).
+    const answer = held("/a2a-list-held");
+    const working = await sendAs(agent, { url: "https://dest.example.com/a2a-list-held" });
+    await until(async () => delivery((await getAs(agent, working.id)).result).status === "delivering");
+    assert.deepEqual(ids((await list({ status: "TASK_STATE_WORKING" })).tasks), [working.id]);
+    assert.equal((await list()).tasks[0].id, working.id);
+    answer(200);
+    await settledAs(agent, working.id);
+
+    // What is not honoured is refused by name, never ignored.
+    for (const [params, field] of [[{ contextId: waiting.id }, "contextId"], [{ pageSize: 0 }, "pageSize"], [{ pageSize: 101 }, "pageSize"], [{ pageToken: "x" }, "pageToken"], [{ statusTimestampAfter: "soon" }, "statusTimestampAfter"], [{ status: "TASK_STATE_DONE" }, "status"]]) {
+      const { error } = (await rpcAs(agent, "ListTasks", params)).body;
+      assert.equal(error?.code, -32602, JSON.stringify(params));
+      assert.equal(error.data[0].metadata.field, field);
+    }
+
+    // Another host lists its own task and nothing of this one's; a host with no project is told it has none.
+    const strangers = await (await a2aClient(stranger)).listTasks(ListTasksRequest.fromJSON({}));
+    assert.deepEqual([ids(strangers.tasks), strangers.totalSize], [[theirs.id], 1]);
+    const nobody = (await rpcAs(await register(), "ListTasks", {})).body;
+    assert.equal(nobody.error.code, -32000);
+    assert.match(nobody.error.message, /^project_not_found/);
+    // Every other interface lists the project as before: every task, newest made first, and no total.
+    const overAgentAuth = await run(agent, "list_tasks");
+    assert.deepEqual(ids(overAgentAuth.tasks), [working.id, other.id, sent.id, dropped.id, waiting.id]);
+    assert.equal("total" in overAgentAuth, false);
+    // Without the list_tasks grant nothing is listed.
+    const reader = await register(["a2a", "get_task"], agent.client);
+    for (const params of [{}, { status: "TASK_STATE_REJECTED" }]) assert.equal((await rpcAs(reader, "ListTasks", params)).status, 403);
+  });
+
+  test("a cancel of another host's or another interface's task is answered like one of a task that never was, and cancels nothing", async () => {
+    const agent = await withProject();
+    const stranger = await withProject();
+    const client = await a2aClient(stranger);
+    const mine = await sendAs(agent, { url: "https://dest.example.com/a2a-keep", delay: "1h" });
+    const finished = await sendAs(agent, { url: "https://dest.example.com/a2a-keep-done" });
+    await settledAs(agent, finished.id);
+    // In the stranger's own project, over Agent Auth.
+    const plain = await run(stranger, "schedule_http", { url: "https://dest.example.com/a2a-keep-plain", delay: "1h" });
+
+    const never = (await rpcAs(stranger, "CancelTask", { id: NEVER })).body;
+    assert.equal(never.error.code, -32001);
+    assert.deepEqual(never.error.data, [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "TASK_NOT_FOUND", domain: "a2a-protocol.org" }]);
+    // Another host's task, waiting or finished (which its own host would be told is not cancelable), another
+    // interface's, and ids that could be no task's.
+    for (const id of [mine.id, finished.id, plain.id, "not-a-task-id", ""]) {
+      assert.deepEqual((await rpcAs(stranger, "CancelTask", { id })).body, never, id);
+      await assert.rejects(client.cancelTask(CancelTaskRequest.fromJSON({ id })), TaskNotFoundError, id);
+    }
+    assert.deepEqual((await rpcAs(await register(), "CancelTask", { id: mine.id })).body, never);
+
+    // Nothing was canceled, and each is still its owner's to cancel.
+    assert.equal((await getAs(agent, mine.id)).result.status.state, "TASK_STATE_SUBMITTED");
+    assert.equal((await run(stranger, "get_task", { task_id: plain.id })).status, "scheduled");
+    assert.equal((await rpcAs(agent, "CancelTask", { id: mine.id })).body.result.status.state, "TASK_STATE_CANCELED");
+    assert.equal((await run(stranger, "cancel_task", { task_id: plain.id })).status, "canceled");
+    // The stranger's list never had any of them.
+    assert.deepEqual((await rpcAs(stranger, "ListTasks", {})).body.result, { tasks: [], nextPageToken: "", pageSize: 50, totalSize: 0 });
   });
 
   test("the 61st request in a minute from one address is refused with 429, whichever agent sends it", async () => {

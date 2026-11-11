@@ -53,7 +53,7 @@ const view = (over: Json = {}): Json => ({
   ...over,
 });
 
-const ALL = ["a2a", "schedule_http", "queue_http", "get_task"];
+const ALL = ["a2a", "schedule_http", "queue_http", "get_task", "list_tasks", "cancel_task"];
 /** /a2a for a verified caller with these grants; `answer` stands in for running a capability. */
 function adapter(grants = ALL, answer: (capability: string, args: Json) => unknown = () => view()) {
   const ran: [string, Json][] = [];
@@ -383,12 +383,222 @@ describe("GetTask", () => {
   });
 });
 
+describe("CancelTask", () => {
+  const cancel = (answer: (capability: string, args: Json) => unknown) => adapter(ALL, answer).send("CancelTask", { id: TASK_ID });
+
+  it("runs cancel_task with the id and returns a task that had not started as canceled", async () => {
+    const { ran, send } = adapter(ALL, () => view({ status: "canceled", finished_ms: 1_799_999_000_500 }));
+    const { body } = await send("CancelTask", { id: TASK_ID, metadata: { why: "changed my mind" } });
+    expect(ran).toEqual([["cancel_task", { task_id: TASK_ID }]]);
+    expect(body.result).toMatchObject({ id: TASK_ID, contextId: TASK_ID, status: { state: "TASK_STATE_CANCELED", timestamp: "2027-01-15T07:43:20.500Z" } });
+    expect(body.result.status.message).toBeUndefined();
+    expect(body.result.artifacts[0].parts[0].data).toMatchObject({ task_id: TASK_ID, status: "canceled" });
+  });
+
+  it("answers TaskNotCancelableError for a task that has finished, and says how it finished", async () => {
+    for (const how of ["succeeded", "failed"]) {
+      const { body } = await cancel(refuses(409, "task_finished", `task already ${how}`));
+      expect(body).toEqual({
+        jsonrpc: "2.0",
+        id: 7,
+        error: {
+          code: -32002,
+          message: `task already ${how}`,
+          data: [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "TASK_NOT_CANCELABLE", domain: "a2a-protocol.org" }],
+        },
+      });
+    }
+  });
+
+  it("returns a task in flight as working, and says the cancel waits on the attempt: nothing claims it was canceled", async () => {
+    const { body } = await cancel(() => view({ status: "delivering", attempt_count: 1 }));
+    expect(body.result.status.state).toBe("TASK_STATE_WORKING");
+    expect(body.result.artifacts[0].parts[0].data.status).toBe("delivering");
+    const { message } = body.result.status;
+    expect(message).toMatchObject({ role: "ROLE_AGENT", taskId: TASK_ID, contextId: TASK_ID });
+    expect(message.messageId).toBeTruthy();
+    expect(message.parts).toEqual([{ text: "An attempt is being sent and cannot be stopped. If it succeeds the task completes; if not, the task is canceled and is not retried." }]);
+    expect(JSON.stringify(body)).not.toContain("TASK_STATE_CANCELED");
+  });
+
+  it("returns a task that was already canceled as canceled, however often it is asked", async () => {
+    const { ran, send } = adapter(ALL, () => view({ status: "canceled" }));
+    for (let i = 0; i < 2; i++) expect((await send("CancelTask", { id: TASK_ID })).body.result.status.state).toBe("TASK_STATE_CANCELED");
+    expect(ran).toHaveLength(2);
+  });
+
+  it("answers TaskNotFoundError the same for a task that is not there, a caller with no project and an id that could be no task's", async () => {
+    const answers = [
+      refuses(404, "task_not_found", "no such task in this project"),
+      refuses(404, "project_not_found", "call create_project before using other capabilities"),
+      () => {
+        throw new ArgumentError("task_id is not a valid task id", "task_id");
+      },
+    ];
+    const bodies = [];
+    for (const answer of answers) bodies.push((await cancel(answer)).body);
+    expect(bodies[0]).toMatchObject({ error: { code: -32001, message: "Task not found" } });
+    expect(bodies[1]).toEqual(bodies[0]);
+    expect(bodies[2]).toEqual(bodies[0]);
+  });
+});
+
+describe("ListTasks", () => {
+  /** A task as list_tasks returns it: without its attempts. */
+  const listed = (over: Json = {}) => {
+    const { attempts: _, ...task } = view(over);
+    return task;
+  };
+  const OTHER_ID = "task_ffffffffffffffffffff";
+  const page = (over: Json = {}) => () => ({ tasks: [listed({ status: "succeeded" }), listed({ id: OTHER_ID, updated_ms: 1_799_999_000_000 })], next_cursor: null, total: 2, ...over });
+  const list = async (params: Json, answer = page()) => {
+    const { ran, send } = adapter(ALL, answer);
+    return { ...(await send("ListTasks", params)), ran };
+  };
+  const refusedFor = (field: string) => ({ code: -32602, data: [{ reason: "INVALID_PARAMS", metadata: { field } }] });
+
+  it("runs list_tasks for a page of 50 and returns its tasks in the order given, with the page size and the total", async () => {
+    const { ran, body } = await list({});
+    expect(ran).toEqual([["list_tasks", { limit: 50 }]]);
+    expect(body).toMatchObject({
+      jsonrpc: "2.0",
+      id: 7,
+      result: {
+        tasks: [
+          { id: TASK_ID, contextId: TASK_ID, status: { state: "TASK_STATE_COMPLETED", timestamp: "2027-01-15T07:43:20.500Z" } },
+          { id: OTHER_ID, contextId: OTHER_ID, status: { state: "TASK_STATE_SUBMITTED", timestamp: "2027-01-15T07:43:20.000Z" } },
+        ],
+        pageSize: 50,
+        totalSize: 2,
+      },
+    });
+  });
+
+  it("gives the next page's token, and an empty one on the last page: all four fields are always there", async () => {
+    const more = await list({ pageSize: 2 }, page({ next_cursor: "1799999000000.41", total: 7 }));
+    expect(more.ran).toEqual([["list_tasks", { limit: 2 }]]);
+    expect(more.body.result).toMatchObject({ nextPageToken: "1799999000000.41", pageSize: 2, totalSize: 7 });
+
+    const next = await list({ pageSize: 2, pageToken: "1799999000000.41" });
+    expect(next.ran).toEqual([["list_tasks", { limit: 2, cursor: "1799999000000.41" }]]);
+    expect(next.body.result.nextPageToken).toBe("");
+
+    const none = await list({}, page({ tasks: [], total: 0 }));
+    expect(none.body.result).toEqual({ tasks: [], nextPageToken: "", pageSize: 50, totalSize: 0 });
+  });
+
+  it("refuses a page size outside 1 to 100 and a token it did not give, by name, before anything runs", async () => {
+    for (const pageSize of [0, 101, -1, 2.5]) {
+      const { ran, body } = await list({ pageSize });
+      expect(body.error, String(pageSize)).toMatchObject(refusedFor("pageSize"));
+      expect(ran).toEqual([]);
+    }
+    for (const pageToken of ["x", "1.2.3", "1&status=failed", "42"]) {
+      const { ran, body } = await list({ pageToken });
+      expect(body.error, pageToken).toMatchObject(refusedFor("pageToken"));
+      expect(ran).toEqual([]);
+    }
+    expect((await list({ pageSize: 1 })).ran).toEqual([["list_tasks", { limit: 1 }]]);
+    expect((await list({ pageSize: 100 })).ran).toEqual([["list_tasks", { limit: 100 }]]);
+  });
+
+  it("filters by state through the decided table: working is both delivering and retrying", async () => {
+    // Written out, not derived from the table the code uses.
+    const statusesOf: Json = {
+      TASK_STATE_SUBMITTED: "scheduled",
+      TASK_STATE_WORKING: "delivering,retrying",
+      TASK_STATE_COMPLETED: "succeeded",
+      TASK_STATE_FAILED: "failed",
+      TASK_STATE_CANCELED: "canceled",
+    };
+    for (const [state, status] of Object.entries(statusesOf)) {
+      expect((await list({ status: state })).ran, state).toEqual([["list_tasks", { limit: 50, status }]]);
+    }
+    // Every delivery status is reached by exactly one state's filter.
+    expect(Object.values(statusesOf).join(",").split(",").sort()).toEqual(ledgerStatuses().sort());
+    for (const none of [undefined, "TASK_STATE_UNSPECIFIED"]) expect((await list({ status: none })).ran).toEqual([["list_tasks", { limit: 50 }]]);
+  });
+
+  it("lists nothing for a state no delivery is ever in, and refuses one the protocol does not have", async () => {
+    for (const status of ["TASK_STATE_INPUT_REQUIRED", "TASK_STATE_AUTH_REQUIRED", "TASK_STATE_REJECTED"]) {
+      const { ran, body } = await list({ status, pageSize: 10 });
+      expect(body.result, status).toEqual({ tasks: [], nextPageToken: "", pageSize: 10, totalSize: 0 });
+      expect(ran).toEqual([]);
+    }
+    const { ran, body } = await list({ status: "TASK_STATE_DONE" });
+    expect(body.error).toMatchObject(refusedFor("status"));
+    expect(ran).toEqual([]);
+  });
+
+  it("lists from a status timestamp on, and refuses one that is not a time", async () => {
+    const { ran } = await list({ statusTimestampAfter: "2027-01-15T07:43:20.500Z", status: "TASK_STATE_FAILED" });
+    expect(ran).toEqual([["list_tasks", { limit: 50, status: "failed", updated_since_ms: 1_799_999_000_500 }]]);
+    // With an offset, and from before any task could be: the same instant, and everything.
+    expect((await list({ statusTimestampAfter: "2027-01-15T09:43:20+02:00" })).ran).toEqual([["list_tasks", { limit: 50, updated_since_ms: 1_799_999_000_000 }]]);
+    expect((await list({ statusTimestampAfter: "1969-12-31T23:59:59Z" })).ran).toEqual([["list_tasks", { limit: 50, updated_since_ms: 0 }]]);
+    for (const statusTimestampAfter of ["yesterday", "-1", "1799999000500", "2027-13-45T07:43:20Z", "2027-01-15T07:43:20"]) {
+      const refused = await list({ statusTimestampAfter });
+      expect(refused.body.error, statusTimestampAfter).toMatchObject(refusedFor("statusTimestampAfter"));
+      expect(refused.ran).toEqual([]);
+    }
+  });
+
+  it("refuses a context id, by name, rather than ignore it: a task is its own context", async () => {
+    const { ran, body } = await list({ contextId: TASK_ID });
+    expect(body.error).toMatchObject(refusedFor("contextId"));
+    expect(body.error.message).toMatch(/GetTask/);
+    expect(ran).toEqual([]);
+  });
+
+  it("leaves artifacts out unless they are asked for, and then carries what a list knows: no attempts and no response", async () => {
+    for (const includeArtifacts of [undefined, false]) {
+      const { body } = await list({ includeArtifacts });
+      for (const task of body.result.tasks) expect("artifacts" in task).toBe(false);
+    }
+    const { body } = await list({ includeArtifacts: true }, page({ tasks: [listed({ status: "succeeded", capture: true, attempt_count: 1, finished_ms: 1_799_999_000_500 })] }));
+    const [artifact] = body.result.tasks[0].artifacts;
+    expect(artifact).toMatchObject({ artifactId: "delivery", parts: [{ mediaType: "application/json" }] });
+    expect(artifact.parts[0].data).toEqual({
+      task_id: TASK_ID,
+      status: "succeeded",
+      run_at_ms: 1_800_000_000_000,
+      next_attempt_ms: 1_800_000_000_000,
+      max_attempts: 5,
+      attempt_count: 1,
+      failure: null,
+      created_ms: 1_799_999_000_000,
+      updated_ms: 1_799_999_000_500,
+      finished_ms: 1_799_999_000_500,
+    });
+    expect(JSON.stringify(body)).not.toMatch(/query-token|path-token|key-token|Authorization/);
+  });
+
+  it("returns no history, whatever length is asked for, as GetTask does", async () => {
+    for (const historyLength of [undefined, 0, 10]) {
+      const { ran, body } = await list({ historyLength });
+      expect(ran).toEqual([["list_tasks", { limit: 50 }]]);
+      for (const task of body.result.tasks) expect(task.history).toBeUndefined();
+    }
+  });
+
+  it("tells a caller with no project so, as SendMessage does, and hides a failure of AgentLater's own", async () => {
+    const none = await list({}, refuses(404, "project_not_found", "call create_project before using other capabilities"));
+    expect(none.body.error).toEqual({ code: -32000, message: "project_not_found: call create_project before using other capabilities" });
+    const broken = await list({}, refuses(503, "api_unavailable", "API returned 503"));
+    expect(broken.body.error).toMatchObject({ code: -32603, message: "AgentLater could not complete this request; try again" });
+  });
+});
+
 describe("an agent without the grant for the capability an operation uses", () => {
   const cases: [string, string, unknown][] = [
     ["schedule_http", "SendMessage", message({ url: "https://dest.example.com/hook", delay: "15m" })],
     ["queue_http", "SendMessage", message({ url: "https://dest.example.com/hook" })],
     ["get_task", "GetTask", { id: TASK_ID }],
     ["get_task", "SendMessage", message({ url: "https://dest.example.com/hook" }, { taskId: TASK_ID })],
+    ["cancel_task", "CancelTask", { id: TASK_ID }],
+    ["list_tasks", "ListTasks", {}],
+    // A state no delivery is ever in lists nothing, but not for an agent that may not list.
+    ["list_tasks", "ListTasks", { status: "TASK_STATE_REJECTED" }],
   ];
 
   it("is refused with HTTP 403 that names the capability, and nothing runs", async () => {

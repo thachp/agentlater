@@ -27,12 +27,16 @@ function only(args: Args, allowed: string[]): void {
   }
 }
 
+/**
+ * The query of a list. Beyond what list_tasks advertises it takes what the A2A interface's ListTasks
+ * needs: several statuses separated by commas, updated_since_ms, and the two-part cursor of a list by change.
+ */
 function listQuery(args: Args): string {
-  only(args, ["status", "queue", "lane", "cursor", "limit"]);
+  only(args, ["status", "queue", "lane", "cursor", "limit", "updated_since_ms"]);
   if (args.queue != null && args.lane != null) throw new ArgumentError("pass queue or lane, not both", "queue");
   const q = new URLSearchParams();
   if (args.status !== undefined) {
-    if (typeof args.status !== "string" || !STATUSES.includes(args.status)) throw new ArgumentError("unknown status", "status");
+    if (typeof args.status !== "string" || !args.status.split(",").every((s) => STATUSES.includes(s))) throw new ArgumentError("unknown status", "status");
     q.set("status", args.status);
   }
   const field = args.queue != null ? "queue" : "lane";
@@ -42,7 +46,7 @@ function listQuery(args: Args): string {
     q.set("lane", value);
   }
   if (args.cursor !== undefined) {
-    if (typeof args.cursor !== "string" || !/^[0-9]{1,16}$/.test(args.cursor)) throw new ArgumentError("invalid cursor", "cursor");
+    if (typeof args.cursor !== "string" || !/^[0-9]{1,16}(\.[0-9]{1,16})?$/.test(args.cursor)) throw new ArgumentError("invalid cursor", "cursor");
     q.set("cursor", args.cursor);
   }
   if (args.limit !== undefined) {
@@ -50,6 +54,10 @@ function listQuery(args: Args): string {
       throw new ArgumentError("limit must be 1-100", "limit");
     }
     q.set("limit", String(args.limit));
+  }
+  if (args.updated_since_ms !== undefined) {
+    if (!Number.isSafeInteger(args.updated_since_ms) || (args.updated_since_ms as number) < 0) throw new ArgumentError("updated_since_ms must be a time in unix ms", "updated_since_ms");
+    q.set("updated_since_ms", String(args.updated_since_ms));
   }
   const s = q.toString();
   return s ? `?${s}` : "";

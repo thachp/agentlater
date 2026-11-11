@@ -297,6 +297,8 @@ pub struct CapturedResponse {
 pub struct TaskPage {
     pub tasks: Vec<TaskView>,
     pub next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -600,6 +602,14 @@ impl<D: Db> Ledger<'_, D> {
         if let Some(refusal) = row.kind()?.redrive_refusal() {
             return Err(refusal);
         }
+        // A2A lets no finished task start again, whoever asks.
+        if row.via.is_some() {
+            return Err(ApiError::new(
+                409,
+                "a2a_task_not_redrivable",
+                "a task made through A2A cannot be redriven; send its request again as a new task",
+            ));
+        }
         let mut task = row.task()?;
         if let Err(RedriveError::NotFailed(s)) = task.redrive(now) {
             return Err(ApiError::new(
@@ -664,46 +674,86 @@ impl<D: Db> Ledger<'_, D> {
         row.view(Some(attempts))
     }
 
-    /// Newest first. `cursor` is the `next_cursor` of the previous page.
+    /// A page of tasks, newest first, and where the next page begins. `status` is one status or
+    /// several separated by commas; `since` leaves out tasks last changed before it. Through A2A
+    /// the order is its ListTasks': most recently changed first, with how many match in all.
     pub fn list(
         &self,
-        status: Option<Status>,
+        status: Option<&str>,
         lane: Option<&str>,
+        since: Option<i64>,
         cursor: Option<&str>,
         limit: Option<usize>,
     ) -> Result<TaskPage, ApiError> {
         self.project_row()?.ok_or_else(no_project)?;
         let limit = limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
-        let before = match cursor {
-            None => MAX_SAFE_INTEGER,
-            Some(c) => c
-                .parse::<i64>()
-                .map_err(|_| ApiError::bad_request("cursor is not valid"))?,
+        // What orders the list; a cursor is the last row's values of these.
+        let keys: &[&str] = if self.a2a {
+            &["updated_ms", "seq"]
+        } else {
+            &["seq"]
         };
-        let mut sql = format!("SELECT {TASK_COLUMNS} FROM tasks WHERE seq < ?");
-        let mut params: Vec<Param> = vec![before.into()];
+        let before = match cursor {
+            None => vec![MAX_SAFE_INTEGER; keys.len()],
+            Some(c) => c
+                .split('.')
+                .map(|n| n.parse::<i64>().ok())
+                .collect::<Option<Vec<_>>>()
+                .filter(|values| values.len() == keys.len())
+                .ok_or_else(|| ApiError::bad_request("cursor is not valid"))?,
+        };
+        let mut filter = String::new();
+        let mut params: Vec<Param> = vec![];
         if self.a2a {
-            sql.push_str(" AND via = ?");
+            filter.push_str(" AND via = ?");
             params.push(A2A.into());
         }
         if let Some(status) = status {
-            sql.push_str(" AND status = ?");
-            params.push(text(&status).into());
+            let statuses: Vec<&str> = status.split(',').collect();
+            if (statuses.iter()).any(|s| serde_json::from_value::<Status>((*s).into()).is_err()) {
+                return Err(ApiError::bad_request("status is not valid"));
+            }
+            let marks = vec!["?"; statuses.len()].join(", ");
+            filter.push_str(&format!(" AND status IN ({marks})"));
+            params.extend(statuses.into_iter().map(Param::from));
         }
         if let Some(lane) = lane {
             if !valid_lane(lane) {
                 return Err(ApiError::bad_request("lane is not valid"));
             }
-            sql.push_str(" AND lane = ?");
+            filter.push_str(" AND lane = ?");
             params.push(lane.into());
         }
-        sql.push_str(" ORDER BY seq DESC LIMIT ?");
-        params.push((limit as i64 + 1).into());
-
-        let mut rows: Vec<TaskRow> = self.db.query(&sql, params)?;
+        if let Some(since) = since {
+            filter.push_str(" AND updated_ms >= ?");
+            params.push(since.into());
+        }
+        let total = match self.a2a {
+            true => Some(self.count(
+                &format!("SELECT COUNT(*) AS total FROM tasks WHERE TRUE{filter}"),
+                params.clone(),
+            )?),
+            false => None,
+        };
+        let sql = format!(
+            "SELECT {TASK_COLUMNS} FROM tasks WHERE ({}) < ({}){filter} ORDER BY {} DESC LIMIT ?",
+            keys.join(", "),
+            vec!["?"; keys.len()].join(", "),
+            keys.join(" DESC, "),
+        );
+        let mut rows: Vec<TaskRow> = self.db.query(
+            &sql,
+            (before.into_iter().map(Param::from))
+                .chain(params)
+                .chain([(limit as i64 + 1).into()])
+                .collect(),
+        )?;
         let next_cursor = if rows.len() > limit {
             rows.truncate(limit);
-            rows.last().map(|r| r.seq.to_string())
+            rows.last().map(|r| match self.a2a {
+                true => format!("{}.{}", r.updated_ms, r.seq),
+                false => r.seq.to_string(),
+            })
         } else {
             None
         };
@@ -711,7 +761,11 @@ impl<D: Db> Ledger<'_, D> {
             .iter()
             .map(|r| r.view(None))
             .collect::<Result<_, _>>()?;
-        Ok(TaskPage { tasks, next_cursor })
+        Ok(TaskPage {
+            tasks,
+            next_cursor,
+            total,
+        })
     }
 
     pub(super) fn insert(&self, new: NewTask<'_>, now: i64) -> Result<(), DbError> {
@@ -997,7 +1051,10 @@ mod tests {
             .schedule(req("https://a.example.com/"), "t1", T0)
             .unwrap_err();
         assert_eq!(err.code, "project_not_found");
-        assert_eq!(l.list(None, None, None, None).unwrap_err().status, 404);
+        assert_eq!(
+            l.list(None, None, None, None, None).unwrap_err().status,
+            404
+        );
     }
 
     #[test]
@@ -1080,12 +1137,12 @@ mod tests {
             .unwrap();
         let ids = |page: &TaskPage| page.tasks.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
         assert_eq!(
-            ids(&a2a.list(None, None, None, None).unwrap()),
+            ids(&a2a.list(None, None, None, None, None).unwrap()),
             ["t3", "t1"]
         );
-        let first = a2a.list(None, None, None, Some(1)).unwrap();
+        let first = a2a.list(None, None, None, None, Some(1)).unwrap();
         let rest = a2a
-            .list(None, None, first.next_cursor.as_deref(), Some(1))
+            .list(None, None, None, first.next_cursor.as_deref(), Some(1))
             .unwrap();
         assert_eq!(
             (ids(&first), ids(&rest)),
@@ -1093,7 +1150,7 @@ mod tests {
         );
         assert_eq!(rest.next_cursor, None);
         assert_eq!(
-            ids(&l.list(None, None, None, None).unwrap()),
+            ids(&l.list(None, None, None, None, None).unwrap()),
             ["t3", "t2", "t1"]
         );
     }
@@ -1115,7 +1172,7 @@ mod tests {
         let keys =
             |v: &serde_json::Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
         assert_eq!(keys(&a), keys(&b));
-        assert_eq!(l.list(None, None, None, None).unwrap().tasks.len(), 2);
+        assert_eq!(l.list(None, None, None, None, None).unwrap().tasks.len(), 2);
     }
 
     #[test]
@@ -1153,6 +1210,171 @@ mod tests {
         drive(&a2a, "t1", http(200), None, T0);
         let callback = a2a.task("t1").unwrap().callback_task_id.unwrap();
         assert_eq!(a2a.task(&callback).unwrap_err().code, "task_not_found");
+    }
+
+    /// A2A lets no finished task start again, so no interface may redrive one made through it.
+    #[test]
+    fn a_task_made_through_a2a_is_redriven_from_no_interface_and_any_other_is_as_before() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let a2a = through_a2a(&db);
+        a2a.schedule(req("https://a.example.com/"), "t1", T0)
+            .unwrap();
+        l.schedule(req("https://a.example.com/"), "t2", T0).unwrap();
+        for due in l.publish_due(P, T0).unwrap() {
+            let fence = deliver(&l, &due, T0).fence;
+            let failed = l.finish(&due.task_id, fence, http(400), T0, 0.0).unwrap();
+            assert_eq!(failed, Some(Status::Failed));
+        }
+
+        let refused = l.redrive("t1", T0 + 1).unwrap_err();
+        assert_eq!(
+            (refused.status, refused.code),
+            (409, "a2a_task_not_redrivable")
+        );
+        assert_eq!(a2a.redrive("t1", T0 + 1).unwrap_err(), refused);
+        let still = l.task("t1").unwrap();
+        assert_eq!((still.status, still.attempt_count), (Status::Failed, 1));
+        assert!(l.publish_due(P, T0 + 1).unwrap().is_empty());
+
+        assert_eq!(l.redrive("t2", T0 + 1).unwrap().status, Status::Scheduled);
+        // Through A2A that other task is not there to redrive, as it is not there to read.
+        assert_eq!(
+            drive(&l, "t2", http(400), None, T0 + 1).1,
+            Some(Status::Failed)
+        );
+        assert_eq!(
+            a2a.redrive("t2", T0 + 2).unwrap_err().code,
+            "task_not_found"
+        );
+    }
+
+    /// What A2A's ListTasks requires of a list: by status timestamp, with a total.
+    #[test]
+    fn through_a2a_a_list_is_most_recently_changed_first_and_counts_what_matches() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let a2a = through_a2a(&db);
+        for (i, id) in ["t1", "t2", "t3", "t4"].into_iter().enumerate() {
+            a2a.schedule(req("https://a.example.com/"), id, T0 + i as i64)
+                .unwrap();
+        }
+        l.schedule(req("https://a.example.com/"), "other", T0 + 9)
+            .unwrap();
+        // The oldest changes last; two change in the same millisecond.
+        a2a.cancel("t2", T0 + 10).unwrap();
+        a2a.cancel("t3", T0 + 10).unwrap();
+        drive(&a2a, "t1", http(200), None, T0 + 20);
+
+        let ids = |page: &TaskPage| page.tasks.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        let all = a2a.list(None, None, None, None, None).unwrap();
+        assert_eq!(
+            (ids(&all), all.total),
+            (
+                vec!["t1".to_string(), "t3".into(), "t2".into(), "t4".into()],
+                Some(4)
+            )
+        );
+
+        // Every page carries the whole count, and no task is repeated or skipped between pages.
+        let mut seen = vec![];
+        let mut cursor = None;
+        loop {
+            let page = a2a
+                .list(None, None, None, cursor.as_deref(), Some(1))
+                .unwrap();
+            assert_eq!((page.tasks.len(), page.total), (1, Some(4)));
+            seen.extend(ids(&page));
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(seen, ids(&all));
+
+        // A task that changes between two pages moves to the front; the rest still follow.
+        let first = a2a.list(None, None, None, None, Some(2)).unwrap();
+        a2a.cancel("t4", T0 + 30).unwrap();
+        let rest = a2a
+            .list(None, None, None, first.next_cursor.as_deref(), Some(2))
+            .unwrap();
+        assert_eq!((ids(&rest), rest.total), (vec!["t2".to_string()], Some(4)));
+
+        for bad in ["x", "5", "1.2.3", "1.x", ""] {
+            let e = a2a.list(None, None, None, Some(bad), None).unwrap_err();
+            assert_eq!(
+                (e.status, e.message.as_str()),
+                (400, "cursor is not valid"),
+                "{bad:?}"
+            );
+        }
+        // Any other interface lists as before: newest first, every task, and no count.
+        let plain = l.list(None, None, None, None, None).unwrap();
+        assert_eq!(
+            (ids(&plain), plain.total),
+            (
+                vec![
+                    "other".to_string(),
+                    "t4".into(),
+                    "t3".into(),
+                    "t2".into(),
+                    "t1".into()
+                ],
+                None
+            )
+        );
+        assert!(!serde_json::to_string(&plain).unwrap().contains("total"));
+        assert_eq!(
+            l.list(None, None, None, Some("1.2"), None)
+                .unwrap_err()
+                .status,
+            400
+        );
+    }
+
+    #[test]
+    fn lists_tasks_in_any_of_several_statuses_or_changed_since_a_time() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let a2a = through_a2a(&db);
+        for id in ["t1", "t2", "t3", "t4"] {
+            a2a.schedule(req("https://a.example.com/"), id, T0).unwrap();
+        }
+        a2a.cancel("t2", T0 + 10).unwrap();
+        let due = l.publish_due(P, T0 + 20).unwrap();
+        let due = |id: &str| due.iter().find(|d| d.task_id == id).unwrap();
+        let attempt = deliver(&l, due("t3"), T0 + 20);
+        l.finish("t3", attempt.fence, http(500), T0 + 20, 0.0)
+            .unwrap();
+        deliver(&l, due("t4"), T0 + 30);
+
+        let ids = |page: TaskPage| page.tasks.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        let listed = |status, since| a2a.list(status, None, since, None, None).unwrap();
+        assert_eq!(listed(Some("delivering,retrying"), None).total, Some(2));
+        assert_eq!(ids(listed(Some("delivering,retrying"), None)), ["t4", "t3"]);
+        assert_eq!(ids(listed(Some("canceled"), None)), ["t2"]);
+        // At or after the time, as A2A defines statusTimestampAfter.
+        assert_eq!(ids(listed(None, Some(T0 + 20))), ["t4", "t3"]);
+        assert_eq!(ids(listed(None, Some(T0 + 21))), ["t4"]);
+        assert_eq!(
+            listed(Some("canceled,retrying"), Some(T0 + 20)).total,
+            Some(1)
+        );
+        assert_eq!(
+            ids(l
+                .list(Some("delivering,retrying"), None, Some(T0 + 30), None, None)
+                .unwrap()),
+            ["t4"]
+        );
+
+        for bad in ["done", "canceled,", ",", "canceled,done", ""] {
+            let e = l.list(Some(bad), None, None, None, None).unwrap_err();
+            assert_eq!(
+                (e.status, e.message.as_str()),
+                (400, "status is not valid"),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]
@@ -1407,22 +1629,27 @@ mod tests {
         }
         l.cancel("t3", T0).unwrap();
 
-        let page = l.list(None, None, None, Some(2)).unwrap();
+        let page = l.list(None, None, None, None, Some(2)).unwrap();
         let ids: Vec<_> = page.tasks.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, ["t4", "t3"]);
         assert!(page.tasks[0].attempts.is_none());
         let page2 = l
-            .list(None, None, page.next_cursor.as_deref(), Some(2))
+            .list(None, None, None, page.next_cursor.as_deref(), Some(2))
             .unwrap();
         assert_eq!(page2.tasks[0].id, "t2");
         let last = l
-            .list(None, None, page2.next_cursor.as_deref(), Some(2))
+            .list(None, None, None, page2.next_cursor.as_deref(), Some(2))
             .unwrap();
         assert_eq!((last.tasks.len(), last.next_cursor), (1, None));
 
-        let canceled = l.list(Some(Status::Canceled), None, None, None).unwrap();
+        let canceled = l.list(Some("canceled"), None, None, None, None).unwrap();
         assert_eq!(canceled.tasks.len(), 1);
-        assert_eq!(l.list(None, None, Some("x"), None).unwrap_err().status, 400);
+        assert_eq!(
+            l.list(None, None, None, Some("x"), None)
+                .unwrap_err()
+                .status,
+            400
+        );
     }
 
     #[test]
@@ -1431,11 +1658,13 @@ mod tests {
         let l = setup(&db);
         l.schedule(in_lane("pay", T0), "a", T0).unwrap();
         l.schedule(in_lane("mail", T0), "b", T0).unwrap();
-        let page = l.list(None, Some("pay"), None, None).unwrap();
+        let page = l.list(None, Some("pay"), None, None, None).unwrap();
         let ids: Vec<_> = page.tasks.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, ["a"]);
         assert_eq!(
-            l.list(None, Some("a b"), None, None).unwrap_err().status,
+            l.list(None, Some("a b"), None, None, None)
+                .unwrap_err()
+                .status,
             400
         );
     }

@@ -89,6 +89,16 @@ describe("capabilities", () => {
     );
   });
 
+  // What the A2A interface's ListTasks asks of the API beyond what list_tasks advertises.
+  it("build the list queries A2A needs: several statuses, a time to list from, and the cursor of a list by change", () => {
+    expect(route("list_tasks", { status: "delivering,retrying", updated_since_ms: 1_800_000_000_000, cursor: "1800000000000.42", limit: 50 }).path).toBe(
+      "/v1/tasks?status=delivering%2Cretrying&cursor=1800000000000.42&limit=50&updated_since_ms=1800000000000",
+    );
+    for (const args of [{ status: "failed,done" }, { status: "failed," }, { updated_since_ms: "1" }, { updated_since_ms: -1 }, { updated_since_ms: 1.5 }, { cursor: "1.2.3" }, { cursor: "1." }]) {
+      expect(() => route("list_tasks", args), JSON.stringify(args)).toThrow(ArgumentError);
+    }
+  });
+
   it("refuse task ids that could escape the path", () => {
     for (const task_id of ["../projects/self", "task_x", ID + "/cancel", 7]) {
       expect(() => route("get_task", { task_id })).toThrow(ArgumentError);

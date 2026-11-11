@@ -12,7 +12,7 @@ use crate::sealing::{Keyring, SealingKey, NONCE_BYTES};
 use futures_util::future::{join_all, select, Either};
 use futures_util::StreamExt;
 use runlater_core::limits::{ATTEMPT_TIMEOUT_MS, CAPTURED_HEADERS};
-use runlater_core::{HookRequest, HookUpdate, Outcome, PollBody, SecretRequest, Status};
+use runlater_core::{HookRequest, HookUpdate, Outcome, PollBody, SecretRequest};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -306,8 +306,9 @@ fn hook_answer(reply: HookReply) -> Result<Response> {
 
 #[derive(Deserialize)]
 struct ListQuery {
-    status: Option<Status>,
+    status: Option<String>,
     lane: Option<String>,
+    updated_since_ms: Option<i64>,
     cursor: Option<String>,
     limit: Option<usize>,
 }
@@ -407,7 +408,13 @@ impl TaskLedger {
                 Route::Watch => created(ledger.watch(body(req).await?, &minted("task", 10)?, t)?),
                 Route::ListTasks => {
                     let q: ListQuery = query(&url)?;
-                    ok(ledger.list(q.status, q.lane.as_deref(), q.cursor.as_deref(), q.limit)?)
+                    ok(ledger.list(
+                        q.status.as_deref(),
+                        q.lane.as_deref(),
+                        q.updated_since_ms,
+                        q.cursor.as_deref(),
+                        q.limit,
+                    )?)
                 }
                 Route::GetTask(id) => ok(ledger.task(id)?),
                 Route::CancelTask(id) => ok(ledger.cancel(id, t)?),
@@ -516,7 +523,7 @@ fn query<T: DeserializeOwned>(url: &Url) -> std::result::Result<T, ApiError> {
     let mut map = serde_json::Map::new();
     for (k, v) in url.query_pairs() {
         let value = match v.parse::<u64>() {
-            Ok(n) if k == "limit" => serde_json::Value::from(n),
+            Ok(n) if matches!(&*k, "limit" | "updated_since_ms") => serde_json::Value::from(n),
             _ => serde_json::Value::from(v.into_owned()),
         };
         map.insert(k.into_owned(), value);
