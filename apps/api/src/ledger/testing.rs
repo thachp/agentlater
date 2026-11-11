@@ -20,6 +20,22 @@ pub(super) fn req(url: &str) -> ScheduleRequest {
     }
 }
 
+pub(super) fn with_callback(url: &str) -> ScheduleRequest {
+    ScheduleRequest {
+        callback_url: Some("https://cb.example.com/done".into()),
+        ..req(url)
+    }
+}
+
+pub(super) fn in_lane(lane: &str, run_at_ms: i64) -> ScheduleRequest {
+    ScheduleRequest {
+        lane: Some(lane.into()),
+        run_at_ms: Some(run_at_ms),
+        max_attempts: Some(2),
+        ..req("https://a.example.com/")
+    }
+}
+
 pub(super) fn setup(db: &Memory) -> Ledger<'_, Memory> {
     let l = Ledger::open(db)
         .unwrap()
