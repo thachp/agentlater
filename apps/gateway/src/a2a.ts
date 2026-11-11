@@ -470,11 +470,10 @@ async function handleA2a(request: Request, env: A2aEnv, verify: Verify, run: Run
   });
   const answer = (await new JsonRpcTransportHandler(operations).handle(rpc, new ServerCallContext({ requestedVersion, user: caller }))) as RpcAnswer;
   if (stopped) return refused(stopped);
-  if (answer.error?.code === A2A_ERROR_CODE.INTERNAL_ERROR) {
-    // The SDK passes on the message of whatever was thrown, which may describe AgentLater's insides.
-    console.error("a2a operation failed", rpc.method, answer.error.message);
-    answer.error.message = "AgentLater could not complete this request; try again";
-  }
+  // The SDK passes on the message of whatever was thrown, which may describe AgentLater's insides or
+  // repeat what a caller sent: it is neither answered nor logged. The request's line, with this
+  // code, its method and its ray id, is how the failure is found.
+  if (answer.error?.code === A2A_ERROR_CODE.INTERNAL_ERROR) answer.error.message = "AgentLater could not complete this request; try again";
   return answered(answer);
 }
 

@@ -268,15 +268,12 @@ describe("the log line of an /a2a request", () => {
   /** Sends one request and returns what it wrote with console.log: each line parsed, and all of them as text. */
   async function logged(request: Request, verify: Parameters<typeof serveA2a>[2] = accept, run: Parameters<typeof serveA2a>[3] = scheduled) {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    // The line an internal failure already writes for AgentLater's own eyes; not the one under test.
-    const failure = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       await handleA2a(request, on, verify, run);
       const text = log.mock.calls.map((line) => line.join(" ")).join("\n");
       return { lines: log.mock.calls.map(([line]) => JSON.parse(line as string) as Json), text };
     } finally {
       log.mockRestore();
-      failure.mockRestore();
     }
   }
   /** What the one line of a request says of how it ended. */
@@ -326,6 +323,29 @@ describe("the log line of an /a2a request", () => {
     });
     expect(broken.lines).toMatchObject([{ method: "SendMessage", outcome: -32603, status: 200 }]);
     for (const { text } of [odd, refused, sentence, broken]) for (const secret of [TOKEN, "failure-detail-1b2c"]) expect(text).not.toContain(secret);
+  });
+});
+
+describe("an operation that fails inside AgentLater", () => {
+  it("is found by its request's log line, and nothing its error says is in any log line: no URL, header value or token", async () => {
+    const TOKEN = "eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJhZ2VudF8xIiwianRpIjoiYWJjIn0.c2lnbmF0dXJlLXNlY3JldA";
+    const methods = ["log", "info", "warn", "error", "debug"] as const;
+    const spies = methods.map((name) => vi.spyOn(console, name).mockImplementation(() => {}));
+    try {
+      const message = { messageId: "m-1", role: "ROLE_USER", parts: [{ data: { url: "https://dest.example.com/hook", delay: "15m" }, mediaType: "application/json" }] };
+      const request = post({ ...V1, Authorization: `Bearer ${TOKEN}`, "CF-Ray": "8f2c1d3e4a5b6c7d-SJC" }, rpc("SendMessage", { message }));
+      const res = await handleA2a(request, on, async () => new Caller("host_1", new Set(["a2a", "schedule_http"])), async () => {
+        throw new TypeError(`POST https://dest.example.com/hook?key=url-secret-9f8e with Authorization: Bearer header-secret-4d1a failed for ${TOKEN}`);
+      });
+      expect(await res.json()).toMatchObject({ error: { code: -32603, message: "AgentLater could not complete this request; try again" } });
+      const lines = spies.flatMap((spy) => spy.mock.calls.map((call) => call.map(String).join(" ")));
+      expect(lines.map((line) => JSON.parse(line))).toEqual([
+        { event: "a2a_request", method: "SendMessage", outcome: -32603, status: 200, ms: expect.any(Number), ray: "8f2c1d3e4a5b6c7d-SJC", host: "host_1" },
+      ]);
+      for (const secret of [TOKEN, "url-secret-9f8e", "header-secret-4d1a", "dest.example.com", "Bearer", "failed for"]) expect(lines.join("\n")).not.toContain(secret);
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
   });
 });
 
