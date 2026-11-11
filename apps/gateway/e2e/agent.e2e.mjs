@@ -6,14 +6,15 @@
 
 import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { createHmac, createPrivateKey, createPublicKey, randomBytes } from "node:crypto";
+import { createHmac, createPrivateKey, createPublicKey, randomBytes, randomUUID, sign } from "node:crypto";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
-import { AgentCardResolver, ClientFactory } from "@a2a-js/sdk/client";
+import { AgentCardResolver, ClientFactory, JsonRpcTransportFactory } from "@a2a-js/sdk/client";
+import { UnsupportedOperationError } from "@a2a-js/sdk/errors";
 import { AgentAuthClient, MemoryStorage } from "@auth/agent";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -27,6 +28,8 @@ import { REDIRECT, connectHosted } from "./oauth.mjs";
 const gatewayDir = fileURLToPath(new URL("..", import.meta.url));
 const receiverDir = fileURLToPath(new URL("../../receiver/", import.meta.url));
 const RECEIVER_HOST = "receiver.example.com";
+/** The gateway's second domain; requests reach it through Miniflare's dispatchFetch. */
+const ALT_ORIGIN = "https://alt.gateway.test";
 const receiverToken = randomBytes(16).toString("hex");
 const CAPABILITIES = [
   "create_project", "get_project", "rotate_signing_secret", "get_payment_link", "schedule_http", "queue_http", "get_task", "list_tasks", "cancel_task", "redrive_task",
@@ -100,6 +103,7 @@ before(async () => {
           compatibilityFlags: ["nodejs_compat"],
           bindings: {
             PUBLIC_URL: origin,
+            ALT_PUBLIC_URL: ALT_ORIGIN,
             A2A_ENABLED: "true",
             ASSERTION_PRIVATE_KEY: seed.toString("hex"),
             BETTER_AUTH_SECRET: randomBytes(32).toString("hex"),
@@ -555,12 +559,286 @@ describe("A2A at /a2a", () => {
     assert.equal(error.data[0].reason, "VERSION_NOT_SUPPORTED");
   });
 
-  test("no caller reaches JSON-RPC: without or with a bearer token the answer is 401 and the Agent Auth challenge", async () => {
-    for (const headers of [{}, { Authorization: "Bearer not-verified" }]) {
-      const res = await rpc({ "A2A-Version": "1.0", ...headers });
-      assert.equal(res.status, 401);
-      assert.equal(res.headers.get("WWW-Authenticate"), `AgentAuth discovery="${origin}/.well-known/agent-configuration"`);
+  const a2a = () => `${origin}/a2a`;
+  const execute = () => `${origin}/api/auth/capability/execute`;
+  /** Each call comes from its own address unless told otherwise, so one test's requests don't spend another's rate limit. */
+  let addresses = 0;
+  const call = (token, { ip = `198.51.100.${++addresses}`, to = a2a(), via = fetch } = {}) =>
+    via(to, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "A2A-Version": "1.0", "CF-Connecting-IP": ip, ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "SendMessage", params: { message: { messageId: "m-1", role: "ROLE_USER", parts: [{ data: { url: "https://dest.example.com/a2a" }, mediaType: "application/json" }] } } }),
+    });
+  /** The request reached the SDK's dispatcher, which has no SendMessage yet. */
+  const dispatched = async (res, why = "") => {
+    const body = await res.json();
+    assert.equal(res.status, 200, `${why} ${JSON.stringify(body)}`);
+    assert.equal(body.error.code, -32004, why);
+  };
+  /** The request was turned away at HTTP, before JSON-RPC. */
+  const refused = async (res, status, code, host = origin) => {
+    const body = await res.json();
+    assert.equal(res.status, status, JSON.stringify(body));
+    assert.equal(body.error, code);
+    assert.equal(body.jsonrpc, undefined);
+    assert.equal(res.headers.get("WWW-Authenticate"), status === 401 ? `AgentAuth discovery="${host}/.well-known/agent-configuration"` : null);
+  };
+
+  /** A client at an address of its own: Better Auth allows ten registrations a minute from one. */
+  const sdkAt = (ip) =>
+    new AgentAuthClient({
+      storage: new MemoryStorage(),
+      fetch: (url, init) => fetch(url, { ...init, headers: { ...init.headers, "X-Forwarded-For": ip } }),
+      directoryUrl: null,
+      allowDirectDiscovery: true,
+      hostName: "AgentLater e2e",
+    });
+
+  /** Registers an agent with the real SDK. `token` is what a caller signs for each request; `forge` signs what the SDK would not. */
+  async function register(capabilities = ["a2a", ...CAPABILITIES], client = sdkAt(`192.0.2.${++addresses}`)) {
+    const conn = await client.connectAgent({ provider: origin, mode: "autonomous", capabilities, name: "a2a caller" });
+    const token = async (audience = a2a(), caps = ["a2a"]) => (await client.signJwt({ agentId: conn.agentId, audience, capabilities: caps ?? undefined })).token;
+    const forge = async (claims = {}, header = {}) => {
+      const { agentKeypair } = await client.getConnection(conn.agentId);
+      const now = Math.floor(Date.now() / 1000);
+      const part = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+      const signed = `${part({ alg: "EdDSA", typ: "agent+jwt", ...header })}.${part({ sub: conn.agentId, aud: a2a(), capabilities: ["a2a"], iat: now, exp: now + 60, jti: randomUUID(), ...claims })}`;
+      return `${signed}.${sign(null, Buffer.from(signed), createPrivateKey({ key: agentKeypair.privateKey, format: "jwk" })).toString("base64url")}`;
+    };
+    return { client, agentId: conn.agentId, hostId: conn.hostId, token, forge };
+  }
+  /** A request to an Agent Auth route, from an address of its own: Better Auth allows 60 a minute to most of them. */
+  const agentAuth = (path, token, body) =>
+    fetch(`${origin}/api/auth${path}`, {
+      method: body ? "POST" : "GET",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, "X-Forwarded-For": `192.0.2.${++addresses}` },
+      body: body && JSON.stringify(body),
+    });
+  const gatewayDb = () => mf.getD1Database("DB", "gateway");
+
+  let caller;
+  before(async () => {
+    caller = await register();
+  });
+
+  test("an agent JWT signed for /a2a with the a2a capability reaches the SDK's dispatcher, which answers SendMessage with -32004", async () => {
+    const card = await AgentCardResolver.default.resolve(origin);
+    const { audience, capability } = card.capabilities.extensions[0].params;
+    // The official client, with a fetch that signs a new token for every request, as the card says to.
+    const fetchImpl = async (url, init) => fetch(url, { ...init, headers: { ...Object.fromEntries(new Headers(init.headers)), Authorization: `Bearer ${await caller.token(audience, [capability])}` } });
+    const client = await new ClientFactory({ transports: [new JsonRpcTransportFactory({ fetchImpl })] }).createFromAgentCard(card);
+    const message = { messageId: "m-1", role: "ROLE_USER", parts: [{ data: { url: "https://dest.example.com/a2a" }, mediaType: "application/json" }] };
+    await assert.rejects(client.sendMessage({ message }), UnsupportedOperationError);
+    await dispatched(await call(await caller.token()));
+    await dispatched(await call(await caller.forge()), "a hand-signed token with the same claims is the same token");
+  });
+
+  test("a new host is given the a2a capability", async () => {
+    const host = await (await gatewayDb()).prepare('SELECT "defaultCapabilities" FROM "agentHost" WHERE id = ?').bind(caller.hostId).first();
+    assert.deepEqual(JSON.parse(host.defaultCapabilities), [...CAPABILITIES, "a2a"]);
+  });
+
+  test("a request without a token is refused", async () => {
+    await refused(await call(null), 401, "authentication_required");
+  });
+
+  test("a malformed token is refused", async () => {
+    const good = await caller.token();
+    for (const token of ["not-a-jwt", "a.b.c", "e30.e30.e30", good.split(".").slice(0, 2).join("."), `${good}.extra`]) {
+      await refused(await call(token), 401, "invalid_jwt");
     }
+  });
+
+  test("a token with a wrong signature is refused", async () => {
+    const [header, payload, signature] = (await caller.token()).split(".");
+    const other = await register();
+    const claims = JSON.parse(Buffer.from(payload, "base64url"));
+    const tampered = Buffer.from(JSON.stringify({ ...claims, jti: randomUUID() })).toString("base64url");
+    await refused(await call(`${header}.${tampered}.${signature}`), 401, "invalid_jwt");
+    await refused(await call(`${header}.${payload}.${(await other.token()).split(".")[2]}`), 401, "invalid_jwt");
+    // Another agent's key, claiming to be this agent.
+    await refused(await call(await other.forge({ sub: caller.agentId })), 401, "invalid_jwt");
+    await refused(await call(await caller.forge({}, { alg: "none" })), 401, "invalid_jwt");
+  });
+
+  test("an expired token is refused, and so is one older than a minute or not an agent JWT", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    await refused(await call(await caller.forge({ iat: now - 120, exp: now - 60 })), 401, "invalid_jwt");
+    await refused(await call(await caller.forge({ iat: now - 120, exp: now + 60 })), 401, "invalid_jwt");
+    await refused(await call(await caller.forge({ iat: undefined })), 401, "invalid_jwt");
+    await refused(await call(await caller.forge({ iat: now + 600, exp: now + 660 })), 401, "invalid_jwt");
+    await refused(await call(await caller.forge({}, { typ: "JWT" })), 401, "invalid_jwt");
+    await refused(await call(await caller.forge({ jti: undefined })), 401, "invalid_jwt");
+  });
+
+  // The plugin checks htm and htu against its own session route, not /a2a, so a caller must leave them out.
+  test("a token that binds itself to the request with htm or htu is refused", async () => {
+    await refused(await call(await caller.forge({ htm: "POST", htu: a2a() })), 401, "request_binding_mismatch");
+    await refused(await call(await caller.forge({ htu: a2a() })), 401, "request_binding_mismatch");
+  });
+
+  test("a token used once is refused the second time, on /a2a and on every other route", async () => {
+    const token = await caller.token();
+    await dispatched(await call(token));
+    await refused(await call(token), 401, "jti_replay");
+    // With an audience the other routes take, so that only its having been used is against it.
+    const general = await caller.token(origin, null);
+    assert.equal((await agentAuth(`/agent/status?agent_id=${caller.agentId}`, general)).status, 200);
+    await refused(await call(general), 401, "jti_replay");
+  });
+
+  test("two copies of one request sent at once reach the dispatcher only once", async () => {
+    const token = await caller.token();
+    const [a, b] = await Promise.all([call(token), call(token)]);
+    assert.deepEqual([a.status, b.status].sort(), [200, 401]);
+  });
+
+  test("a token signed for the capability-execution route is refused on /a2a", async () => {
+    const config = await (await fetch(`${origin}/.well-known/agent-configuration`)).json();
+    assert.equal(config.default_location, execute());
+    // As the SDK signs it for executeCapability, then with a2a named, then with no capability named.
+    for (const capabilities of [["schedule_http"], ["a2a"], null]) {
+      await refused(await call(await caller.token(config.default_location, capabilities)), 401, "invalid_jwt");
+    }
+  });
+
+  test("a token signed for the bare origin, the issuer or any other audience is refused on /a2a", async () => {
+    for (const audience of [origin, `${origin}/api/auth`, `${a2a()}/`, `${a2a()}?x=1`, a2a().toUpperCase(), "https://gateway.agentlater.io/a2a"]) {
+      for (const capabilities of [["a2a"], null]) await refused(await call(await caller.token(audience, capabilities)), 401, "invalid_jwt");
+    }
+    // A list that names /a2a among others is not a token for /a2a only.
+    await refused(await call(await caller.forge({ aud: [a2a(), origin] })), 401, "invalid_jwt");
+    await refused(await call(await caller.forge({ aud: [a2a()] })), 401, "invalid_jwt");
+  });
+
+  test("a token that does not name the a2a capability, and it alone, is refused", async () => {
+    for (const capabilities of [null, ["schedule_http"], ["a2a", "schedule_http"], []]) {
+      await refused(await call(await caller.forge({ capabilities: capabilities ?? undefined })), 401, "invalid_jwt");
+    }
+  });
+
+  test("an agent that does not hold the a2a capability is refused with 403", async () => {
+    const without = await register(CAPABILITIES);
+    await assert.rejects(without.token(), { code: "capability_not_granted" }, "the SDK will not sign for a capability the agent lacks");
+    await refused(await call(await without.forge()), 403, "capability_not_granted");
+
+    const revoked = await register();
+    await (await gatewayDb()).prepare('UPDATE "agentCapabilityGrant" SET status = ? WHERE "agentId" = ? AND capability = ?').bind("revoked", revoked.agentId, "a2a").run();
+    await refused(await call(await revoked.token()), 403, "capability_not_granted");
+    const expired = await register();
+    await (await gatewayDb()).prepare('UPDATE "agentCapabilityGrant" SET "expiresAt" = ? WHERE "agentId" = ? AND capability = ?').bind(new Date(Date.now() - 1000).toISOString(), expired.agentId, "a2a").run();
+    await refused(await call(await expired.token()), 403, "capability_not_granted");
+  });
+
+  test("a revoked agent is refused", async () => {
+    const doomed = await register();
+    const token = await doomed.token();
+    await doomed.client.disconnectAgent(doomed.agentId);
+    await refused(await call(token), 403, "agent_revoked");
+  });
+
+  test("an agent of a revoked host is refused, even if not yet revoked itself", async () => {
+    const doomed = await register();
+    await dispatched(await call(await doomed.token()));
+    // A host revocation that stopped before reaching its agents.
+    await (await gatewayDb()).prepare('UPDATE "agentHost" SET status = ? WHERE id = ?').bind("revoked", doomed.hostId).run();
+    await refused(await call(await doomed.token()), 403, "host_revoked");
+    await dispatched(await call(await caller.token()), "another host's agent is not affected");
+  });
+
+  test("a host's own JWT is refused", async () => {
+    const { keypair } = await caller.client.storage.getHostIdentity();
+    const now = Math.floor(Date.now() / 1000);
+    const part = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+    const signed = `${part({ alg: "EdDSA", typ: "host+jwt" })}.${part({ iss: caller.hostId, sub: caller.hostId, aud: a2a(), capabilities: ["a2a"], iat: now, exp: now + 60, jti: randomUUID() })}`;
+    const token = `${signed}.${sign(null, Buffer.from(signed), createPrivateKey({ key: keypair.privateKey, format: "jwk" })).toString("base64url")}`;
+    await refused(await call(token), 401, "invalid_jwt");
+  });
+
+  test("an OAuth token for hosted MCP is refused", async () => {
+    const { access_token } = await connectHosted(origin, "A2A intruder");
+    const mcp = await fetch(`${origin}/mcp`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${access_token}`, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    assert.equal(mcp.status, 200, "the token is good where it was issued for");
+    await refused(await call(access_token), 401, "invalid_jwt");
+  });
+
+  test("a token signed for /a2a executes nothing on the capability-execution route, and is refused on every other Agent Auth route", async () => {
+    await caller.client.executeCapability({ agentId: caller.agentId, capability: "create_project", arguments: {} });
+    const tasks = async () => data(await caller.client.executeCapability({ agentId: caller.agentId, capability: "list_tasks", arguments: {} })).tasks.length;
+    const before = await tasks();
+    const attempts = [
+      ["/capability/execute", { capability: "schedule_http", arguments: { url: "https://dest.example.com/must-not-run" } }],
+      ["/capability/execute", { capability: "get_project", arguments: {} }],
+      ["/capability/execute", { capability: "a2a", arguments: {} }],
+      ["/agent/request-capability", { capabilities: ["schedule_http"] }],
+      ["/agent/revoke", { agent_id: caller.agentId }],
+      ["/agent/rotate-key", { public_key: { kty: "OKP", crv: "Ed25519", x: "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo" } }],
+      [`/agent/status?agent_id=${caller.agentId}`, undefined],
+      ["/capability/list", undefined],
+    ];
+    for (const [path, body] of attempts) {
+      const res = await agentAuth(path, await caller.token(), body);
+      assert.equal(res.status, 401, path);
+      assert.deepEqual(await res.json(), { error: "invalid_jwt", message: "a token signed for /a2a is accepted only there" }, path);
+    }
+    assert.equal(await tasks(), before);
+    assert.equal(received.some((r) => r.url === "https://dest.example.com/must-not-run"), false);
+    await dispatched(await call(await caller.token()), "the agent was neither revoked nor given another key");
+    // A list of audiences that names /a2a is refused here as well as there.
+    const both = await agentAuth("/capability/execute", await caller.forge({ aud: [a2a(), execute()] }), { capability: "get_project", arguments: {} });
+    assert.equal(both.status, 401);
+    // The refusal is made only about a token the plugin has verified: the capability list is public, and a
+    // token that fails verification there is ignored as before, whatever audience it claims.
+    const unverified = `${(await caller.token()).split(".").slice(0, 2).join(".")}.${"A".repeat(86)}`;
+    assert.equal((await agentAuth("/capability/list", unverified)).status, 200);
+  });
+
+  test("the a2a capability cannot be executed: it does nothing on the capability-execution route", async () => {
+    const res = await agentAuth("/capability/execute", await caller.token(execute(), ["a2a"]), { capability: "a2a", arguments: {} });
+    assert.equal(res.status, 400);
+    assert.deepEqual(await res.json(), { error: "invalid_request", message: `a2a is not executed; it lets an agent call ${a2a()}` });
+  });
+
+  test("a token for one gateway domain's /a2a is refused on the other's", async () => {
+    const onAlt = (url, init) => mf.dispatchFetch(url, init);
+    const altA2a = `${ALT_ORIGIN}/a2a`;
+    const card = await (await onAlt(`${ALT_ORIGIN}/.well-known/agent-card.json`)).json();
+    assert.equal(card.capabilities.extensions[0].params.audience, altA2a);
+
+    await refused(await call(await caller.token(), { to: altA2a, via: onAlt }), 401, "invalid_jwt", ALT_ORIGIN);
+    await refused(await call(await caller.token(altA2a)), 401, "invalid_jwt");
+    await dispatched(await call(await caller.token(altA2a), { to: altA2a, via: onAlt }));
+  });
+
+  test("an agent registered before a2a existed is refused until it is granted the capability", async () => {
+    const old = await register(CAPABILITIES);
+    const db = await gatewayDb();
+    // Agent Auth saves a host's capabilities when it activates and never widens them.
+    await db.prepare('UPDATE "agentHost" SET "defaultCapabilities" = ? WHERE id = ?').bind(JSON.stringify(CAPABILITIES), old.hostId).run();
+    const request = () => old.client.requestCapability({ agentId: old.agentId, capabilities: ["a2a"] });
+    await request();
+    await assert.rejects(old.token(), { code: "capability_not_granted" });
+    await refused(await call(await old.forge()), 403, "capability_not_granted");
+
+    const migration = await readFile(join(gatewayDir, "migrations", "0016_a2a_capability.sql"), "utf8");
+    await db.batch(splitSql(migration).map((q) => db.prepare(q)));
+    await request();
+    await dispatched(await call(await old.token()));
+  });
+
+  test("the 61st request in a minute from one address is refused with 429, whichever agent sends it", async () => {
+    const ip = "203.0.113.61";
+    const other = await register();
+    for (let i = 0; i < 60; i++) await dispatched(await call(await (i % 2 ? caller : other).token(), { ip }));
+    const limited = await call(await caller.token(), { ip });
+    assert.equal(limited.status, 429);
+    assert.ok(Number(limited.headers.get("Retry-After")) > 0);
+    assert.equal((await limited.json()).error, "rate_limited");
+    await dispatched(await call(await caller.token()), "another address is not limited");
   });
 });
 

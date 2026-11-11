@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { handleA2a } from "../src/a2a";
+import { Caller, handleA2a, type Refusal } from "../src/a2a";
 import worker, { type Env } from "../src/index";
 
 const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
@@ -123,17 +123,6 @@ describe("/a2a through the gateway", () => {
     expect(await res.json()).toMatchObject({ error: "authentication_required" });
   });
 
-  it("refuses every bearer credential too: none can be verified yet", async () => {
-    const b64 = (o: object) => btoa(JSON.stringify(o)).replace(/=+$/, "");
-    const jwt = `${b64({ alg: "EdDSA", typ: "agent+jwt" })}.${b64({ sub: "agent_1", aud: "https://gateway.test/a2a", capabilities: ["a2a"], jti: "j1" })}.sig`;
-    for (const token of [jwt, "anything"]) {
-      const res = await worker.fetch(post({ ...V1, Authorization: `Bearer ${token}` }), on, ctx);
-      expect(res.status, token).toBe(401);
-      expect(res.headers.get("WWW-Authenticate")).toBe(CHALLENGE);
-      expect(await res.json()).toMatchObject({ error: "invalid_jwt" });
-    }
-  });
-
   it("answers a request without A2A-Version: 1.0 with VersionNotSupportedError, credentials or not", async () => {
     const others: Record<string, string>[] = [{}, { "A2A-Version": "0.3" }, { "A2A-Version": "2.0", Authorization: "Bearer anything" }];
     for (const headers of others) {
@@ -157,9 +146,41 @@ describe("/a2a through the gateway", () => {
   });
 });
 
-/** What /a2a answers once a credential is accepted, which only a verifier passed in can do so far. */
+describe("/a2a for a caller the verifier refuses", () => {
+  const AUTH = { ...V1, Authorization: "Bearer refused" };
+  const refuse = (refusal: Refusal) => handleA2a(post(AUTH), on, async () => refusal);
+
+  it("answers 401 with the Agent Auth discovery challenge for a token that is not good here", async () => {
+    const res = await refuse({ status: 401, code: "invalid_jwt", message: "no" });
+    expect(res.status).toBe(401);
+    expect(res.headers.get("WWW-Authenticate")).toBe(CHALLENGE);
+    expect(await res.json()).toEqual({ error: "invalid_jwt", message: "no" });
+  });
+
+  it("answers 403 without a challenge for a caller that may not use /a2a", async () => {
+    const res = await refuse({ status: 403, code: "capability_not_granted", message: "no" });
+    expect(res.status).toBe(403);
+    expect(res.headers.get("WWW-Authenticate")).toBeNull();
+    expect(await res.json()).toEqual({ error: "capability_not_granted", message: "no" });
+  });
+
+  it("answers 429 and says when to come back for a caller over the rate limit", async () => {
+    const res = await refuse({ status: 429, code: "rate_limited", message: "slow down", retryAfter: "17" });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("17");
+  });
+
+  it("never reads the body or reaches JSON-RPC", async () => {
+    const request = post(AUTH, "{");
+    const res = await handleA2a(request, on, async () => ({ status: 401, code: "invalid_jwt", message: "no" }));
+    expect(await res.json()).not.toHaveProperty("jsonrpc");
+    expect(request.bodyUsed).toBe(false);
+  });
+});
+
+/** What /a2a answers once the verifier says who is calling. */
 describe("/a2a for a verified caller", () => {
-  const accept = async () => true;
+  const accept = async () => new Caller("host_1", new Set(["a2a"]));
   const AUTH = { ...V1, Authorization: "Bearer verified" };
   const call = async (body: string) => {
     const res = await handleA2a(post(AUTH, body), on, accept);
@@ -216,7 +237,7 @@ describe("/a2a for a verified caller", () => {
 
   it("asks the verifier only about requests that carry a credential and speak 1.0", async () => {
     let asked = 0;
-    const counting = async () => (asked++, true);
+    const counting = async () => (asked++, accept());
     expect((await handleA2a(post(V1), on, counting)).status).toBe(401);
     expect((await handleA2a(post({ Authorization: "Bearer verified" }), on, counting)).status).toBe(200);
     expect(asked).toBe(0);

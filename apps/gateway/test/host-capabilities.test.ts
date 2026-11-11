@@ -6,7 +6,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
-import { capabilityNames } from "../src/capabilities";
+import { hostCapabilityNames } from "../src/auth";
 
 const DIR = join(dirname(fileURLToPath(import.meta.url)), "../migrations");
 
@@ -15,5 +15,5 @@ it("the newest host-capabilities migration grants every capability", () => {
     .sort()
     .flatMap((f) => [...readFileSync(join(DIR, f), "utf8").matchAll(/SET "defaultCapabilities" = '([^']*)'/g)].map((m) => m[1]!));
   expect(lists.length).toBeGreaterThan(0);
-  expect(JSON.parse(lists.at(-1)!)).toEqual(capabilityNames);
+  expect(JSON.parse(lists.at(-1)!)).toEqual(hostCapabilityNames);
 });

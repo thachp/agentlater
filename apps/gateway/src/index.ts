@@ -6,7 +6,7 @@
 import { OAuthProvider, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { a2aEnabled, agentCard, handleA2a, type A2aEnv } from "./a2a";
 import { importSigningKey } from "./api";
-import { BASE_PATH, createAuth, type AuthEnv } from "./auth";
+import { BASE_PATH, createAuth, firstUse, type AuthEnv } from "./auth";
 import { handleStripeWebhook, type BillingEnv } from "./billing";
 import { llmsTxt, openApi } from "./discovery";
 import { readLimited } from "./body";
@@ -55,30 +55,10 @@ const AGENT_ROUTES = new Set([
 
 /** A schedule_http body can be 64 KiB of string; leave room for JSON escaping. */
 const MAX_BODY_BYTES = 192 * 1024;
-/** Plugin JWTs live 60 s plus 30 s clock skew; replay claims must outlast them. */
-const JTI_TTL_SECS = 90;
 
 const json = (body: unknown, status = 200) =>
   Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
 const error = (status: number, code: string, message: string) => json({ error: code, message }, status);
-
-/**
- * The replay key for a bearer JWT, read without verifying it. Better Auth verifies the
- * token afterwards; this only lets the gateway reject a second use atomically, which the
- * plugin's own separate check-then-store cannot do under concurrency.
- */
-function replayKey(request: Request): string | null {
-  const token = request.headers.get("Authorization")?.match(/^Bearer\s+(\S+)$/i)?.[1];
-  const payload = token?.split(".")[1];
-  if (!payload) return null;
-  try {
-    const claims = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/"))) as Record<string, unknown>;
-    if (typeof claims.jti !== "string" || claims.jti.length === 0 || claims.jti.length > 128) return null;
-    return `replay:${String(claims.iss ?? "")}:${String(claims.sub ?? "")}:${claims.jti}`;
-  } catch {
-    return null;
-  }
-}
 
 let keyCache: { seed: string; key: Promise<CryptoKey> } | undefined;
 function signingKey(env: Env): Promise<CryptoKey> {
@@ -118,7 +98,9 @@ const gateway = {
     if (a2aEnabled(env) && request.method === "GET" && url.pathname === "/.well-known/agent-card.json") {
       return Response.json(agentCard(env), { headers: { "Cache-Control": "public, max-age=300", "Access-Control-Allow-Origin": "*" } });
     }
-    if (a2aEnabled(env) && url.pathname === "/a2a") return handleA2a(request, env);
+    if (a2aEnabled(env) && url.pathname === "/a2a") {
+      return handleA2a(request, env, async (r) => createAuth(env, ctx, await signingKey(env)).a2aCaller(r));
+    }
 
     if (request.method === "GET" && url.pathname === "/health") {
       const api = await env.API.fetch("https://api.internal/health");
@@ -162,13 +144,8 @@ const gateway = {
       return json(config);
     }
 
-    const replay = replayKey(request);
-    if (replay) {
-      const store = env.AUTH_STORE.get(env.AUTH_STORE.idFromName("auth-store"));
-      if (!(await store.claim(replay, JTI_TTL_SECS))) {
-        return error(401, "invalid_jwt", "this token has already been used");
-      }
-    }
+    // Before Better Auth verifies the token, so that of two copies sent at once only one gets that far.
+    if (!(await firstUse(env, request))) return error(401, "invalid_jwt", "this token has already been used");
     const buffered = new Request(request.url, {
       method: request.method,
       headers: request.headers,

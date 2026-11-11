@@ -3,7 +3,7 @@
 
 import { A2A_VERSION_HEADER, AgentCard } from "@a2a-js/sdk";
 import { A2A_ERROR_CODE, PushNotificationNotSupportedError, UnsupportedOperationError } from "@a2a-js/sdk/errors";
-import { JsonRpcTransportHandler, ServerCallContext, validateVersion, type A2ARequestHandler } from "@a2a-js/sdk/server";
+import { JsonRpcTransportHandler, ServerCallContext, validateVersion, type A2ARequestHandler, type User } from "@a2a-js/sdk/server";
 import { readLimited } from "./body";
 import { SITE } from "./discovery";
 
@@ -15,12 +15,15 @@ export interface A2aEnv {
 
 export const a2aEnabled = (env: A2aEnv) => env.A2A_ENABLED === "true";
 
+/** The JSON-RPC endpoint's URL on the host that was asked: also the audience a caller signs its token for. */
+export const a2aUrl = (env: { PUBLIC_URL: string }) => `${env.PUBLIC_URL}/a2a`;
+
 /** Where an agent registers before it can call /a2a. */
 const discoveryUrl = (env: A2aEnv) => `${env.PUBLIC_URL}/.well-known/agent-configuration`;
 
 /** The card for the host that was asked. Its skills list only what /a2a will do. */
 function card(env: A2aEnv): AgentCard {
-  const endpoint = `${env.PUBLIC_URL}/a2a`;
+  const endpoint = a2aUrl(env);
   return AgentCard.fromJSON({
     name: "AgentLater",
     description: "Makes an HTTP request later for an agent, retries it when the destination fails, and records whether it happened.",
@@ -48,7 +51,8 @@ function card(env: A2aEnv): AgentCard {
           bearerFormat: "JWT",
           description:
             "An Agent Auth agent JWT (typ agent+jwt, Ed25519) whose aud is this interface's URL and whose capabilities are [\"a2a\"]. " +
-            "A token lives at most 60 seconds and is accepted once, so sign a new one for every request.",
+            "A token lives at most 60 seconds and is accepted once, so sign a new one for every request. " +
+            "At most 60 requests a minute are accepted from one IP address; past that the answer is HTTP 429 with Retry-After.",
         },
       },
     },
@@ -74,12 +78,41 @@ function card(env: A2aEnv): AgentCard {
 /** The Agent Card as served at /.well-known/agent-card.json. */
 export const agentCard = (env: A2aEnv) => AgentCard.toJSON(card(env));
 
-/** 401 with the Agent Auth challenge (its specification, 5.14), so a caller can find where to register. */
-const unauthorized = (env: A2aEnv, code: string, message: string) =>
-  Response.json(
-    { error: code, message },
-    { status: 401, headers: { "Cache-Control": "no-store", "WWW-Authenticate": `AgentAuth discovery="${discoveryUrl(env)}"` } },
-  );
+/**
+ * Who is calling, once the token is verified: the Agent Auth host the agent belongs to, which owns
+ * the project, and the capabilities the agent holds. The SDK hands it to each operation as the
+ * call's `user`.
+ */
+export class Caller implements User {
+  readonly isAuthenticated = true;
+  constructor(
+    readonly hostId: string,
+    readonly grants: ReadonlySet<string>,
+  ) {}
+  get userName() {
+    return this.hostId;
+  }
+}
+
+/** Why a caller is turned away before JSON-RPC: 401 for a token that is not good here, 403 for one that is but may not call. */
+export interface Refusal {
+  status: 401 | 403 | 429 | 503;
+  code: string;
+  message: string;
+  /** Seconds to wait, for a 429. */
+  retryAfter?: string;
+}
+
+/** Says who a request's bearer credential belongs to, or why it is refused. */
+type Verify = (request: Request) => Promise<Caller | Refusal>;
+
+/** A refusal as HTTP. A 401 carries the Agent Auth challenge (its specification, 5.14), so a caller can find where to register. */
+function refuse(env: A2aEnv, { status, code, message, retryAfter }: Refusal): Response {
+  const headers = new Headers({ "Cache-Control": "no-store" });
+  if (status === 401) headers.set("WWW-Authenticate", `AgentAuth discovery="${discoveryUrl(env)}"`);
+  if (retryAfter) headers.set("Retry-After", retryAfter);
+  return Response.json({ error: code, message }, { status, headers });
+}
 
 const unsupported = (what: string) => () => {
   throw new UnsupportedOperationError(`${what} is not supported`);
@@ -120,33 +153,28 @@ const isRpcRequest = (value: unknown): value is Record<string, unknown> =>
 const rpcResponse = (body: unknown) => Response.json(body, { headers: { "Cache-Control": "no-store" } });
 const rpcError = (error: unknown) => rpcResponse({ jsonrpc: "2.0", id: null, error });
 
-/** Says whether a request's bearer credential is good. */
-type Verify = (request: Request) => Promise<boolean>;
-/** Nothing verifies agent JWTs yet, so no credential is good and /a2a runs nothing for anyone. */
-const acceptNone: Verify = async () => false;
-
 /**
  * Answers a request to /a2a: the protocol version first (a header, so nothing is read for a caller
- * that speaks another version), then credentials, refused with HTTP 401, and only then JSON-RPC.
+ * that speaks another version), then credentials, refused with HTTP 401 or 403, and only then JSON-RPC.
  */
-export async function handleA2a(request: Request, env: A2aEnv, verify: Verify = acceptNone): Promise<Response> {
+export async function handleA2a(request: Request, env: A2aEnv, verify: Verify): Promise<Response> {
   if (request.method !== "POST") {
     return Response.json({ error: "method_not_allowed", message: "POST a JSON-RPC request" }, { status: 405, headers: { Allow: "POST" } });
   }
 
   // No version means 0.3 (specification 3.6), which the card does not offer.
-  const version = request.headers.get(A2A_VERSION_HEADER) ?? new URL(request.url).searchParams.get(A2A_VERSION_HEADER) ?? undefined;
-  const context = new ServerCallContext({ requestedVersion: version });
+  const requestedVersion = request.headers.get(A2A_VERSION_HEADER) ?? new URL(request.url).searchParams.get(A2A_VERSION_HEADER) ?? undefined;
   try {
-    validateVersion(context.requestedVersion, card(env), "JSONRPC");
+    validateVersion(new ServerCallContext({ requestedVersion }).requestedVersion, card(env), "JSONRPC");
   } catch (e) {
     return rpcError(JsonRpcTransportHandler.mapToJSONRPCError(e));
   }
 
   if (!/^Bearer\s+\S+$/i.test(request.headers.get("Authorization") ?? "")) {
-    return unauthorized(env, "authentication_required", "send an Agent Auth agent JWT as a Bearer token");
+    return refuse(env, { status: 401, code: "authentication_required", message: "send an Agent Auth agent JWT as a Bearer token" });
   }
-  if (!(await verify(request))) return unauthorized(env, "invalid_jwt", "this token is not accepted on /a2a");
+  const caller = await verify(request);
+  if (!(caller instanceof Caller)) return refuse(env, caller);
 
   const body = await readLimited(request, MAX_BODY_BYTES);
   if (body === null) return Response.json({ error: "too_large", message: "request body is too large" }, { status: 413 });
@@ -159,5 +187,5 @@ export async function handleA2a(request: Request, env: A2aEnv, verify: Verify = 
   // The SDK's handler answers both of these with -32602; the specification (9.5) gives each its own code.
   if (!isRpcRequest(rpc)) return rpcError({ code: A2A_ERROR_CODE.INVALID_REQUEST, message: "Request payload validation error" });
   // Always one answer, never a stream: both streaming methods throw before a stream exists.
-  return rpcResponse(await transport.handle(rpc, context));
+  return rpcResponse(await transport.handle(rpc, new ServerCallContext({ requestedVersion, user: caller })));
 }
