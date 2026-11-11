@@ -441,3 +441,502 @@ impl<D: Db> Ledger<'_, D> {
         Ok(rows.first().and_then(|d| d.t))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::sqlite::Memory;
+    use crate::ledger::testing::*;
+
+    #[test]
+    fn a_cron_run_is_late_from_its_slot() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.put_cron(daily("backup"), T0).unwrap();
+        // An alarm an hour late is real lateness, even though the task was due when created.
+        assert_eq!(l.fire_crons(SIX + 3_600_000).unwrap(), 1);
+        let id = l.cron("backup").unwrap().last_run_task_id.unwrap();
+        let d = l
+            .publish_due(P, SIX + 3_600_000)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.task_id == id)
+            .unwrap();
+        assert_eq!(deliver(&l, &d, SIX + 3_600_040).late_ms, Some(3_600_040));
+    }
+
+    fn run_cron_task(l: &Ledger<'_, Memory>, name: &str, status: u16, now: i64) -> String {
+        let id = l.cron(name).unwrap().last_run_task_id.unwrap();
+        drive(l, &id, http(status), None, now);
+        id
+    }
+
+    #[test]
+    fn a_cron_runs_on_schedule_as_ordinary_tasks() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let (c, created) = l.put_cron(daily("backup"), T0).unwrap();
+        assert!(created);
+        assert_eq!((c.next_run_ms, c.health), (Some(SIX), Health::Pending));
+        assert_eq!(l.next_wake().unwrap(), Some(SIX));
+
+        assert_eq!(l.fire_crons(SIX - 1).unwrap(), 0);
+        assert_eq!(l.fire_crons(SIX).unwrap(), 1);
+        assert_eq!(l.fire_crons(SIX).unwrap(), 0, "once per slot");
+        let c = l.cron("backup").unwrap();
+        assert_eq!(c.next_run_ms, Some(SIX + DAY));
+        let run = l.task(c.last_run_task_id.as_deref().unwrap()).unwrap();
+        assert_eq!(run.cron.as_deref(), Some("backup"));
+        assert_eq!(
+            (run.url.as_str(), run.run_at_ms),
+            ("https://a.example.com/backup", SIX)
+        );
+
+        run_cron_task(&l, "backup", 200, SIX + 5);
+        let c = l.cron("backup").unwrap();
+        assert_eq!(
+            (c.health, c.last_success_ms),
+            (Health::Healthy, Some(SIX + 5))
+        );
+        assert!(alerts(&db, "backup").is_empty(), "no news is good news");
+    }
+
+    #[test]
+    fn alerts_when_a_cron_starts_failing_and_when_it_recovers() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.put_cron(daily("backup"), T0).unwrap();
+        l.fire_crons(SIX).unwrap();
+        let failed_run = run_cron_task(&l, "backup", 500, SIX);
+        let c = l.cron("backup").unwrap();
+        assert_eq!(c.health, Health::Failing);
+        assert_eq!(c.health_reason.as_deref(), Some("run_failed"));
+        assert_eq!(c.failing_since_ms, Some(SIX));
+
+        // Failing again does not alert again.
+        l.fire_crons(SIX + DAY).unwrap();
+        run_cron_task(&l, "backup", 500, SIX + DAY);
+        l.fire_crons(SIX + 2 * DAY).unwrap();
+        run_cron_task(&l, "backup", 200, SIX + 2 * DAY);
+
+        let sent = alerts(&db, "backup");
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0]["event"], "cron.failing");
+        assert_eq!(sent[0]["reason"], "run_failed");
+        assert_eq!(sent[0]["task_id"], failed_run.as_str());
+        assert_eq!(sent[0]["cron"]["health"], "failing");
+        assert_eq!(sent[1]["event"], "cron.recovered");
+        assert_eq!(sent[1]["cron"]["health"], "healthy");
+
+        let alert_id: String =
+            db.0.query_row(
+                "SELECT id FROM tasks WHERE alert_for = 'backup' ORDER BY seq LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let alert = l.task(&alert_id).unwrap();
+        assert_eq!(alert.url, "https://alerts.example.com/hook");
+        assert_eq!(alert.alert_for.as_deref(), Some("backup"));
+    }
+
+    #[test]
+    fn missed_slots_are_not_made_up() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.put_cron(daily("backup"), T0).unwrap();
+        assert_eq!(l.fire_crons(SIX + 3 * DAY + 1).unwrap(), 1);
+        assert_eq!(l.cron("backup").unwrap().next_run_ms, Some(SIX + 4 * DAY));
+    }
+
+    #[test]
+    fn a_run_that_cannot_start_is_a_failure() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.put_cron(daily("backup"), T0).unwrap();
+        db.0.execute("UPDATE project SET attempts_used = attempt_budget", [])
+            .unwrap();
+        assert_eq!(l.fire_crons(SIX).unwrap(), 0);
+        let c = l.cron("backup").unwrap();
+        assert_eq!(c.health_reason.as_deref(), Some("budget_exhausted"));
+        assert_eq!(c.last_run_task_id, None);
+        assert_eq!(c.next_run_ms, Some(SIX + DAY), "keeps trying on schedule");
+        // The alert still gets its one try.
+        let sent = alerts(&db, "backup");
+        assert_eq!(sent[0]["reason"], "budget_exhausted");
+        let d = &l.publish_due(P, SIX).unwrap()[0];
+        assert!(matches!(
+            l.claim(&d.task_id, d.generation, SIX).unwrap(),
+            Claimed::Deliver(_)
+        ));
+    }
+
+    #[test]
+    fn a_cron_stops_when_the_trial_ends() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.put_cron(daily("backup"), T0).unwrap();
+        let end = T0 + TRIAL_DURATION_MS;
+        l.fire_crons(end).unwrap();
+        let c = l.cron("backup").unwrap();
+        assert_eq!(c.next_run_ms, None);
+        assert_eq!(c.health_reason.as_deref(), Some("trial_expired"));
+        assert_eq!(alerts(&db, "backup").len(), 1);
+        assert_eq!(
+            l.put_cron(daily("other"), end).unwrap_err().code,
+            "trial_expired"
+        );
+    }
+
+    #[test]
+    fn replaces_lists_and_deletes_crons() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.put_cron(daily("b"), T0).unwrap();
+        l.put_cron(daily("a"), T0).unwrap();
+        let hourly = CronRequest {
+            schedule: "0 * * * *".into(),
+            ..daily("b")
+        };
+        let (c, created) = l.put_cron(hourly, T0 + 1).unwrap();
+        assert!(!created);
+        assert_eq!(
+            (c.schedule.as_str(), c.next_run_ms),
+            ("0 * * * *", Some(T0 + 3_600_000))
+        );
+        let names: Vec<_> = l
+            .crons()
+            .unwrap()
+            .crons
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, ["a", "b"]);
+
+        l.delete_cron("b").unwrap();
+        assert_eq!(l.cron("b").unwrap_err().code, "cron_not_found");
+        assert_eq!(l.delete_cron("b").unwrap_err().status, 404);
+        assert_eq!(l.next_wake().unwrap(), Some(SIX));
+
+        let err = l
+            .put_cron(
+                CronRequest {
+                    schedule: "*/5 * * * *".into(),
+                    ..daily("c")
+                },
+                T0,
+            )
+            .unwrap_err();
+        assert_eq!((err.status, err.field), (400, Some("schedule")));
+        for i in 1..MAX_CRONS {
+            l.put_cron(daily(&format!("n{i}")), T0).unwrap();
+        }
+        assert_eq!(
+            l.put_cron(daily("full"), T0).unwrap_err().code,
+            "cron_limit"
+        );
+        l.put_cron(daily("a"), T0).expect("replacing is not adding");
+    }
+
+    #[test]
+    fn a_deleted_crons_run_still_finishes_quietly() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.put_cron(daily("backup"), T0).unwrap();
+        l.fire_crons(SIX).unwrap();
+        let id = l.cron("backup").unwrap().last_run_task_id.unwrap();
+        l.delete_cron("backup").unwrap();
+        let d = &l.publish_due(P, SIX).unwrap()[0];
+        let a = deliver(&l, d, SIX);
+        l.finish(&id, a.fence, http(500), SIX, 0.0).unwrap();
+        assert_eq!(l.task(&id).unwrap().status, Status::Failed);
+        assert!(alerts(&db, "backup").is_empty());
+    }
+
+    #[test]
+    fn a_recreated_cron_ignores_its_predecessors_runs() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.put_cron(daily("backup"), T0).unwrap();
+        l.fire_crons(SIX).unwrap();
+        let old = l.cron("backup").unwrap().last_run_task_id.unwrap();
+        l.delete_cron("backup").unwrap();
+        l.put_cron(daily("backup"), SIX + 1).unwrap();
+        let d = &l.publish_due(P, SIX + 2).unwrap()[0];
+        assert_eq!(d.task_id, old);
+        let a = deliver(&l, d, SIX + 2);
+        l.finish(&old, a.fence, http(500), SIX + 2, 0.0).unwrap();
+        assert_eq!(l.cron("backup").unwrap().health, Health::Pending);
+        assert!(alerts(&db, "backup").is_empty());
+    }
+
+    #[test]
+    fn an_older_run_cannot_overrule_a_newer_one() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let hourly = CronRequest {
+            schedule: "0 * * * *".into(),
+            max_attempts: Some(2),
+            ..daily("h")
+        };
+        l.put_cron(hourly, T0).unwrap();
+        let hour = 3_600_000;
+        l.fire_crons(T0 + hour).unwrap();
+        let first = l.cron("h").unwrap().last_run_task_id.unwrap();
+        l.fire_crons(T0 + 2 * hour).unwrap();
+        let second = l.cron("h").unwrap().last_run_task_id.unwrap();
+        let due = l.publish_due(P, T0 + 2 * hour).unwrap();
+        let attempt = |id: &str| {
+            let d = due.iter().find(|d| d.task_id == id).unwrap();
+            deliver(&l, d, T0 + 2 * hour)
+        };
+        let (a1, a2) = (attempt(&first), attempt(&second));
+        // The newer run succeeds first; the older one failing afterwards is old news.
+        l.finish(&second, a2.fence, http(200), T0 + 2 * hour + 1, 0.0)
+            .unwrap();
+        l.finish(&first, a1.fence, http(404), T0 + 2 * hour + 2, 0.0)
+            .unwrap();
+        assert_eq!(l.cron("h").unwrap().health, Health::Healthy);
+        assert!(alerts(&db, "h").is_empty());
+    }
+
+    #[test]
+    fn the_trial_ending_stops_crons_promptly() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let yearly = CronRequest {
+            schedule: "0 0 1 1 *".into(),
+            ..daily("yearly")
+        };
+        l.put_cron(yearly, T0).unwrap();
+        let end = T0 + TRIAL_DURATION_MS;
+        assert_eq!(
+            l.next_wake().unwrap(),
+            Some(end),
+            "wakes at the trial's end"
+        );
+        l.fire_crons(end).unwrap();
+        let c = l.cron("yearly").unwrap();
+        assert_eq!(
+            (c.next_run_ms, c.health_reason.as_deref()),
+            (None, Some("trial_expired"))
+        );
+        assert_eq!(l.next_wake().unwrap(), alerts_wake(&db));
+    }
+
+    /// The only thing left to wake for: the alert just queued.
+    fn alerts_wake(db: &Memory) -> Option<i64> {
+        db.0.query_row(
+            "SELECT MIN(due_ms) FROM tasks WHERE alert_for IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_cron_can_alert_to_the_inbox() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let cron = CronRequest {
+            alert_url: Some(INBOX.into()),
+            ..daily("backup")
+        };
+        assert_eq!(
+            l.put_cron(cron, T0).unwrap().0.alert_url.as_deref(),
+            Some("inbox")
+        );
+        l.fire_crons(SIX).unwrap();
+        let run = run_cron_task(&l, "backup", 500, SIX);
+        assert_eq!(
+            alerts(&db, "backup"),
+            Vec::<serde_json::Value>::new(),
+            "no alert task"
+        );
+        let e = &inbox(&l).events[0];
+        assert_eq!(e["event"], "cron.failing");
+        assert_eq!(e["reason"], "run_failed");
+        assert_eq!(e["task_id"], run.as_str());
+        assert_eq!(e["cron"]["name"], "backup");
+    }
+
+    fn reporting(name: &str, extra: serde_json::Value) -> CronRequest {
+        let mut r = serde_json::json!({
+            "name": name,
+            "schedule": "0 6 * * *",
+            "url": "https://a.example.com/status",
+            "method": "GET",
+            "max_attempts": 1,
+            "callback_url": "inbox",
+            "capture": true,
+        });
+        r.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(r).unwrap()
+    }
+
+    fn run_id(l: &Ledger<'_, Memory>, name: &str) -> String {
+        l.cron(name).unwrap().last_run_task_id.unwrap()
+    }
+
+    #[test]
+    fn a_cron_run_reports_to_the_inbox_with_its_response() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let (c, _) = l
+            .put_cron(reporting("health", serde_json::json!({})), T0)
+            .unwrap();
+        assert_eq!(
+            (c.callback_url.as_deref(), c.report, c.capture),
+            (Some("inbox"), Report::Always, true)
+        );
+        l.fire_crons(SIX).unwrap();
+        let id = run_id(&l, "health");
+        let t = l.task(&id).unwrap();
+        assert_eq!(
+            (t.callback_url.as_deref(), t.capture),
+            (Some("inbox"), true)
+        );
+        answer(&l, &id, 200, r#"{"deploy":"failed"}"#, &[], SIX);
+        let e = &inbox(&l).events[0];
+        assert_eq!(e["event"], "task.finished");
+        assert_eq!(e["task"]["cron"], "health");
+        assert_eq!(e["task"]["response"]["body"], r#"{"deploy":"failed"}"#);
+        // The next day's run reports again.
+        l.fire_crons(SIX + DAY).unwrap();
+        answer(&l, &run_id(&l, "health"), 200, "{}", &[], SIX + DAY);
+        assert_eq!(inbox(&l).events.len(), 2);
+    }
+
+    #[test]
+    fn report_failures_keeps_a_healthy_cron_quiet() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.put_cron(
+            reporting("health", serde_json::json!({ "report": "failures" })),
+            T0,
+        )
+        .unwrap();
+        l.set_wake(waking(serde_json::json!({})), T0).unwrap();
+        l.fire_crons(SIX).unwrap();
+        answer(&l, &run_id(&l, "health"), 200, "fine", &[], SIX);
+        assert_eq!(inbox(&l).events.len(), 0, "a success says nothing");
+        assert_eq!(wake_tasks(&db), 0, "and wakes nobody");
+
+        l.fire_crons(SIX + DAY).unwrap();
+        let failed = run_id(&l, "health");
+        answer(&l, &failed, 500, "broken", &[], SIX + DAY);
+        let e = &inbox(&l).events[0];
+        assert_eq!(
+            (e["task"]["id"].as_str(), e["task"]["status"].as_str()),
+            (Some(failed.as_str()), Some("failed"))
+        );
+        assert_eq!(e["task"]["response"]["body"], "broken");
+        assert_eq!(wake_tasks(&db), 1, "the failure wakes the agent");
+    }
+
+    #[test]
+    fn a_cron_reporting_to_a_url_reserves_its_callback() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.put_cron(
+            reporting(
+                "health",
+                serde_json::json!({ "callback_url": "https://cb.example.com/runs" }),
+            ),
+            T0,
+        )
+        .unwrap();
+        db.0.execute("UPDATE project SET attempt_budget = 1", [])
+            .unwrap();
+        l.fire_crons(SIX).unwrap();
+        let c = l.cron("health").unwrap();
+        assert_eq!(
+            (c.last_run_task_id, c.health_reason.as_deref()),
+            (None, Some("budget_exhausted")),
+            "a run and its callback need two attempts"
+        );
+
+        db.0.execute("UPDATE project SET attempt_budget = 10", [])
+            .unwrap();
+        l.fire_crons(SIX + DAY).unwrap();
+        let id = run_id(&l, "health");
+        answer(&l, &id, 200, "ok", &[], SIX + DAY);
+        let cb = l
+            .task(&id)
+            .unwrap()
+            .callback_task_id
+            .expect("a callback task");
+        assert_eq!(l.task(&cb).unwrap().url, "https://cb.example.com/runs");
+    }
+
+    #[test]
+    fn replacing_a_cron_changes_how_it_reports_and_old_crons_stay_quiet() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let (c, _) = l.put_cron(daily("backup"), T0).unwrap();
+        assert_eq!(
+            (c.callback_url, c.report, c.capture),
+            (None, Report::Always, false)
+        );
+        let (c, created) = l
+            .put_cron(
+                reporting("backup", serde_json::json!({ "report": "failures" })),
+                T0,
+            )
+            .unwrap();
+        assert!(!created);
+        assert_eq!(
+            (c.callback_url.as_deref(), c.report),
+            (Some("inbox"), Report::Failures)
+        );
+        let e = l
+            .put_cron(
+                CronRequest {
+                    report: Some(Report::Failures),
+                    ..daily("x")
+                },
+                T0,
+            )
+            .unwrap_err();
+        assert_eq!((e.status, e.field), (400, Some("report")));
+    }
+
+    #[test]
+    fn a_failures_only_run_reports_when_abandoned_but_not_when_canceled() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.put_cron(
+            reporting("health", serde_json::json!({ "report": "failures" })),
+            T0,
+        )
+        .unwrap();
+        l.fire_crons(SIX).unwrap();
+        let canceled = run_id(&l, "health");
+        let t = l.cancel(&canceled, SIX).unwrap();
+        assert!(t.report_failures_only);
+        assert_eq!(inbox(&l).events.len(), 0, "a canceled run did not fail");
+
+        // Started, then out of attempts before it could be sent: that run failed, so it reports.
+        l.fire_crons(SIX + DAY).unwrap();
+        let starved = run_id(&l, "health");
+        db.0.execute("UPDATE project SET attempts_used = attempt_budget", [])
+            .unwrap();
+        let d = l
+            .publish_due(P, SIX + DAY)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.task_id == starved)
+            .unwrap();
+        assert_eq!(
+            l.claim(&d.task_id, d.generation, SIX + DAY).unwrap(),
+            Claimed::Skip("budget_exhausted")
+        );
+        let e = &inbox(&l).events[0];
+        assert_eq!(
+            (e["task"]["id"].as_str(), e["task"]["status"].as_str()),
+            (Some(starved.as_str()), Some("failed"))
+        );
+    }
+}

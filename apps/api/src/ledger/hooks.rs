@@ -577,6 +577,7 @@ struct DayRow {
 mod tests {
     use super::*;
     use crate::db::sqlite::Memory;
+    use crate::ledger::testing::*;
     use runlater_core::limits::{CAPTURE_RETENTION_MS, MAX_INBOX_EVENTS, TRIAL_DURATION_MS};
     use runlater_core::{HookRequest, WakeRequest};
 
@@ -589,17 +590,7 @@ mod tests {
         );
     }
 
-    const T0: i64 = 1_767_225_600_000;
-    const P: &str = "proj_1";
     const TOKEN: &str = "hk_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-    fn setup(db: &Memory) -> Ledger<'_, Memory> {
-        let l = Ledger::open(db)
-            .unwrap()
-            .with_sealer(Some(secrets::test_sealer()));
-        l.create_project(P, "secret", T0).unwrap();
-        l
-    }
 
     fn spec(v: serde_json::Value) -> HookSpec {
         serde_json::from_value::<HookRequest>(v)

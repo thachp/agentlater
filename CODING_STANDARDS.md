@@ -6,7 +6,8 @@ enforces; domain words are defined in [GLOSSARY.md](GLOSSARY.md).
 ## Rules
 
 1. **Tests live beside the module they test**, in its own `#[cfg(test)] mod tests`.
-   Debt: the cron, watch and inbox tests still sit in `apps/api/src/ledger.rs`.
+   Helpers that several of the ledger's test modules share live once, in
+   `apps/api/src/ledger/testing.rs`.
 2. **One error constructor per shape.** A validation error becomes a response through
    `ApiError::invalid`; any other error names the request field at fault with
    `ApiError::in_field`. Don't hand-build an `ApiError` literal or add a second mapping.
