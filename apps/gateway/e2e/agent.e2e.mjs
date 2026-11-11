@@ -1685,7 +1685,7 @@ describe("A2A at /a2a", () => {
       ],
     );
     assert.match(report, /Result: \*\*PASS\*\*, 12 of 12 scenarios/);
-    for (const row of rows.slice(1, 7)) assert.match(report, new RegExp(`\\| ${row.name.replace(/[()]/g, "\\$&")} \\| pass \\| [0-9.]+ \\| \`task_[0-9a-f]{20}\` \\|`));
+    for (const row of rows.slice(1, 7)) assert.match(report, new RegExp(`\\| ${row.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\| pass \\| [0-9.]+ \\| \`task_[0-9a-f]{20}\` \\|`));
 
     // A destination that answers 200 to everything: the two failures that were expected do not happen, and the report says so.
     const wrong = await runA2aReport({ ...options, receiverUrl: "https://dest.example.com/a2a-report", receiverToken: undefined });
