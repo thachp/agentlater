@@ -183,7 +183,7 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     }
     let route = verb(&method).and_then(|v| Route::parse(v, &path));
     let Some(scope) = route.and_then(Route::scope) else {
-        return simple_error(404, "not_found", "no such route");
+        return error(ApiError::not_found("not_found", "no such route"));
     };
     let Some(key) = gateway_key(&env) else {
         return simple_error(500, "misconfigured", "gateway public key is not configured");
@@ -365,7 +365,7 @@ impl TaskLedger {
 
     async fn route(&self, req: &mut Request, ledger: &Ledger<'_, Sql>) -> Result<Response> {
         let Some(project_id) = req.headers().get(PROJECT_HEADER)? else {
-            return simple_error(400, "invalid_request", "missing project");
+            return error(ApiError::bad_request("missing project"));
         };
         let url = req.url()?;
         let segs = segments(&url);
@@ -373,7 +373,7 @@ impl TaskLedger {
         let t = now();
 
         let Some(route) = verb(&req.method()).and_then(|v| Route::parse(v, &path)) else {
-            return simple_error(404, "not_found", "no such route");
+            return error(ApiError::not_found("not_found", "no such route"));
         };
         let answer: Answer = async {
             match route {

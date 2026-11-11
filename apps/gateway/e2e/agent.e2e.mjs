@@ -19,11 +19,11 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createHash } from "node:crypto";
 import { Challenge, Credential, Receipt } from "mppx";
+import { apiWorker } from "../../api/test/api-worker.mjs";
 import { runJourney } from "./journey.mjs";
 import { REDIRECT, connectHosted } from "./oauth.mjs";
 
 const gatewayDir = fileURLToPath(new URL("..", import.meta.url));
-const apiDir = fileURLToPath(new URL("../../api/", import.meta.url));
 const receiverDir = fileURLToPath(new URL("../../receiver/", import.meta.url));
 const RECEIVER_HOST = "receiver.example.com";
 const receiverToken = randomBytes(16).toString("hex");
@@ -141,17 +141,7 @@ before(async () => {
         },
         {
           name: "api",
-          modulesRoot: apiDir,
-          modules: [
-            { type: "ESModule", path: join(apiDir, "build/index.js") },
-            { type: "CompiledWasm", path: join(apiDir, "build/index_bg.wasm") },
-          ],
-          compatibilityDate: "2026-10-27",
-          durableObjects: { LEDGER: { className: "TaskLedger", useSQLite: true } },
-          queueProducers: { READY: { queueName: "runlater-ready" } },
-          queueConsumers: { "runlater-ready": { maxBatchTimeout: 1 } },
-          analyticsEngineDatasets: { STATS: { dataset: "runlater_stats" } },
-          bindings: { GATEWAY_PUBLIC_KEY: publicHex, SECRETS_KEY: randomBytes(32).toString("hex") },
+          ...apiWorker(publicHex),
           outboundService: async (req) => {
             if (new URL(req.url).hostname === RECEIVER_HOST) {
               const body = ["GET", "HEAD"].includes(req.method) ? undefined : await req.arrayBuffer();
