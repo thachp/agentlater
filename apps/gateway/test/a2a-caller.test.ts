@@ -89,7 +89,8 @@ async function register(
     const res = await gateway(`${ORIGIN}/a2a`, {
       method: "POST",
       headers: { "A2A-Version": "1.0", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "GetTask", params: { id: "task_1" } }),
+      // An operation that uses no capability, so the answer is the same whatever the agent holds.
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "SubscribeToTask", params: { id: "task_1" } }),
     });
     const context = handle.mock.calls.at(-1)?.[1] as ServerCallContext | undefined;
     handle.mockRestore();

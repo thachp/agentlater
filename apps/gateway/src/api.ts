@@ -5,6 +5,12 @@
 import type { ApiScope } from "@runlater/contracts/capabilities";
 
 export type Scope = ApiScope;
+/**
+ * Set on calls the gateway makes for a request to its A2A interface. The ledger marks a task
+ * scheduled by such a call, and finds only marked tasks for one. Only code here sets it: no
+ * capability argument reaches the assertion.
+ */
+export type Via = "a2a" | undefined;
 
 const AUDIENCE = "runlater-api";
 const LIFETIME_SECS = 60;
@@ -38,6 +44,7 @@ export async function signAssertion(
   projectId: string,
   scopes: Scope[],
   nowSecs = Math.floor(Date.now() / 1000),
+  via?: Via,
 ): Promise<string> {
   const claims = {
     aud: AUDIENCE,
@@ -45,6 +52,7 @@ export async function signAssertion(
     scope: scopes.join(" "),
     iat: nowSecs,
     exp: nowSecs + LIFETIME_SECS,
+    ...(via ? { via } : {}),
   };
   const payload = b64url(new TextEncoder().encode(JSON.stringify(claims)));
   const sig = await crypto.subtle.sign("Ed25519", key, new TextEncoder().encode(payload));
@@ -66,6 +74,7 @@ export class ApiClient {
     private readonly api: Fetcher,
     private readonly key: CryptoKey,
     private readonly projectId: string,
+    private readonly via?: Via,
   ) {}
 
   async call<T>(method: "GET" | "POST", path: string, scope: Scope, body?: unknown): Promise<T> {
@@ -73,7 +82,7 @@ export class ApiClient {
       method,
       headers: {
         "Content-Type": "application/json",
-        "RunLater-Assertion": await signAssertion(this.key, this.projectId, [scope]),
+        "RunLater-Assertion": await signAssertion(this.key, this.projectId, [scope], undefined, this.via),
       },
       body: body === undefined ? null : JSON.stringify(body),
     });

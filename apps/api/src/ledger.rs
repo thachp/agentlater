@@ -82,6 +82,9 @@ pub struct Ledger<'a, D: Db> {
     /// The keys secrets are sealed with. Without them nothing can be sealed, and work that
     /// needs a secret fails before it is attempted rather than spending an attempt it can't make.
     sealer: Option<Sealer>,
+    /// Whether the request being answered came through A2A. Such a request marks the task it
+    /// schedules, and finds only tasks that carry the mark.
+    a2a: bool,
 }
 
 impl<'a, D: Db> Ledger<'a, D> {
@@ -107,7 +110,16 @@ impl<'a, D: Db> Ledger<'a, D> {
                 vec![(MIGRATIONS.len() as i64).into()],
             )?;
         }
-        Ok(Self { db, sealer: None })
+        Ok(Self {
+            db,
+            sealer: None,
+            a2a: false,
+        })
+    }
+
+    /// The ledger as a request that came through A2A sees it, or not.
+    pub fn through_a2a(self, a2a: bool) -> Self {
+        Self { a2a, ..self }
     }
 
     /// The ledger for a deployment that has keys to seal secrets with.
@@ -319,6 +331,43 @@ mod tests {
         assert_eq!(rotated.previous_valid_until_ms, Some(T0 + DAY));
     }
 
+    #[test]
+    fn a_ledger_from_before_a2a_keeps_its_tasks_and_none_is_read_through_a2a() {
+        let db = Memory::new();
+        let before = MIGRATIONS[..13].iter().copied().flatten();
+        for statement in SCHEMA.iter().chain(before) {
+            db.0.execute(statement, []).unwrap();
+        }
+        db.0.execute("INSERT INTO meta (key, value) VALUES ('schema', 13)", [])
+            .unwrap();
+        db.0.execute(
+            "INSERT INTO project (id, created_ms, expires_ms, attempt_budget, attempts_used, \
+             signing_secret) VALUES (?1, ?2, ?3, 1000, 0, 'old')",
+            (P, T0, T0 + DAY),
+        )
+        .unwrap();
+        db.0.execute(
+            "INSERT INTO tasks (id, status, due_ms, max_attempts, run_attempts, total_attempts, \
+             generation, fence, cancel_requested, method, url, headers, run_at_ms, fingerprint, \
+             created_ms, updated_ms) VALUES ('old', 'scheduled', ?1, 3, 0, 0, 0, 0, 0, 'POST', \
+             'https://a.example.com/', '[]', ?1, 'f', ?1, ?1)",
+            [T0],
+        )
+        .unwrap();
+
+        let l = Ledger::open(&db).unwrap();
+        assert_eq!(l.task("old").unwrap().status, Status::Scheduled);
+        assert_eq!(
+            drive(&l, "old", http(200), None, T0).1,
+            Some(Status::Succeeded)
+        );
+        let a2a = Ledger::open(&db).unwrap().through_a2a(true);
+        assert_eq!(a2a.task("old").unwrap_err().code, "task_not_found");
+        a2a.schedule(req("https://a.example.com/"), "new", T0)
+            .unwrap();
+        assert_eq!(a2a.task("new").unwrap().id, "new");
+    }
+
     /// One tick does the alarm's work in order: a cron run started in it is dispatched in it,
     /// and so is the alert for a run it found lost.
     #[test]
@@ -358,6 +407,24 @@ mod tests {
         assert_eq!(l.purge(T0 + RETENTION_MS).unwrap(), 1);
         assert_eq!(l.task("t1").unwrap_err().code, "task_not_found");
         assert_eq!(l.next_wake().unwrap(), None);
+    }
+
+    #[test]
+    fn through_a2a_a_purged_task_reads_like_one_that_never_was_or_was_made_another_way() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let a2a = Ledger::open(&db).unwrap().through_a2a(true);
+        a2a.schedule(req("https://a.example.com/"), "t1", T0)
+            .unwrap();
+        drive(&a2a, "t1", http(200), None, T0);
+        l.schedule(req("https://a.example.com/"), "t2", T0).unwrap();
+        assert_eq!(a2a.task("t1").unwrap().status, Status::Succeeded);
+
+        assert_eq!(l.purge(T0 + RETENTION_MS).unwrap(), 1);
+        let purged = a2a.task("t1").unwrap_err();
+        assert_eq!((purged.status, purged.code), (404, "task_not_found"));
+        assert_eq!(a2a.task("t2").unwrap_err(), purged);
+        assert_eq!(a2a.task("t3").unwrap_err(), purged);
     }
 
     #[test]

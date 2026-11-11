@@ -71,6 +71,16 @@ describe("ApiClient", () => {
     expect(await seen[0]!.json()).toEqual({ url: "x" });
   });
 
+  it("says a call came through A2A only when it is made for A2A", async () => {
+    const seen: Request[] = [];
+    const key = await importSigningKey(SEED);
+    await new ApiClient(fetcher(200, {}, seen), key, "prj_1").call("GET", "/v1/tasks/t", "read");
+    await new ApiClient(fetcher(200, {}, seen), key, "prj_1", "a2a").call("GET", "/v1/tasks/t", "read");
+    const claims = seen.map((r) => decode(r.headers.get("RunLater-Assertion")!.split(".")[0]!));
+    expect(claims.map((c) => c.via)).toEqual([undefined, "a2a"]);
+    expect(Object.keys(claims[0])).toEqual(["aud", "sub", "scope", "iat", "exp"]);
+  });
+
   it("passes API errors through", async () => {
     const body = { error: { code: "invalid_request", message: "bad", field: "url" } };
     const client = new ApiClient(fetcher(400, body), await importSigningKey(SEED), "prj_1");

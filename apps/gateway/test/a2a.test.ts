@@ -113,6 +113,10 @@ const rpc = (method: string, params: unknown = {}) => JSON.stringify({ jsonrpc: 
 const post = (headers: Record<string, string>, body = rpc("GetTask", { id: "task_1" })) =>
   new Request("https://gateway.test/a2a", { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body });
 const V1 = { "A2A-Version": "1.0" };
+/** Stands in for running a capability in tests where none may run. */
+const nothing = async (): Promise<never> => {
+  throw new Error("no capability runs here");
+};
 const CHALLENGE = 'AgentAuth discovery="https://gateway.test/.well-known/agent-configuration"';
 
 describe("/a2a through the gateway", () => {
@@ -148,7 +152,7 @@ describe("/a2a through the gateway", () => {
 
 describe("/a2a for a caller the verifier refuses", () => {
   const AUTH = { ...V1, Authorization: "Bearer refused" };
-  const refuse = (refusal: Refusal) => handleA2a(post(AUTH), on, async () => refusal);
+  const refuse = (refusal: Refusal) => handleA2a(post(AUTH), on, async () => refusal, nothing);
 
   it("answers 401 with the Agent Auth discovery challenge for a token that is not good here", async () => {
     const res = await refuse({ status: 401, code: "invalid_jwt", message: "no" });
@@ -172,7 +176,7 @@ describe("/a2a for a caller the verifier refuses", () => {
 
   it("never reads the body or reaches JSON-RPC", async () => {
     const request = post(AUTH, "{");
-    const res = await handleA2a(request, on, async () => ({ status: 401, code: "invalid_jwt", message: "no" }));
+    const res = await handleA2a(request, on, async () => ({ status: 401, code: "invalid_jwt", message: "no" }), nothing);
     expect(await res.json()).not.toHaveProperty("jsonrpc");
     expect(request.bodyUsed).toBe(false);
   });
@@ -183,7 +187,7 @@ describe("/a2a for a verified caller", () => {
   const accept = async () => new Caller("host_1", new Set(["a2a"]));
   const AUTH = { ...V1, Authorization: "Bearer verified" };
   const call = async (body: string) => {
-    const res = await handleA2a(post(AUTH, body), on, accept);
+    const res = await handleA2a(post(AUTH, body), on, accept, nothing);
     expect(res.status).toBe(200);
     return (await res.json()) as Json;
   };
@@ -208,10 +212,9 @@ describe("/a2a for a verified caller", () => {
     for (const method of ["Nope", "message/send", "tasks/get", "getTask"]) expect(await codeOf(method), method).toBe(-32601);
   });
 
-  it("runs nothing yet: sending, reading, listing and cancelling are unsupported", async () => {
-    const message = { messageId: "m1", role: "ROLE_USER", parts: [{ data: { url: "https://example.com" }, mediaType: "application/json" }] };
-    expect(await codeOf("SendMessage", { message })).toBe(-32004);
-    for (const method of ["GetTask", "CancelTask"]) expect(await codeOf(method, { id: "task_1" }), method).toBe(-32004);
+  // Sending and reading run capabilities: test/a2a-tasks.test.ts.
+  it("does not list or cancel yet: both are unsupported", async () => {
+    expect(await codeOf("CancelTask", { id: "task_1" })).toBe(-32004);
     expect(await codeOf("ListTasks")).toBe(-32004);
   });
 
@@ -231,15 +234,15 @@ describe("/a2a for a verified caller", () => {
   });
 
   it("refuses a body over the gateway's limit", async () => {
-    const res = await handleA2a(post(AUTH, rpc("SendMessage", { pad: "x".repeat(200 * 1024) })), on, accept);
+    const res = await handleA2a(post(AUTH, rpc("SendMessage", { pad: "x".repeat(200 * 1024) })), on, accept, nothing);
     expect(res.status).toBe(413);
   });
 
   it("asks the verifier only about requests that carry a credential and speak 1.0", async () => {
     let asked = 0;
     const counting = async () => (asked++, accept());
-    expect((await handleA2a(post(V1), on, counting)).status).toBe(401);
-    expect((await handleA2a(post({ Authorization: "Bearer verified" }), on, counting)).status).toBe(200);
+    expect((await handleA2a(post(V1), on, counting, nothing)).status).toBe(401);
+    expect((await handleA2a(post({ Authorization: "Bearer verified" }), on, counting, nothing)).status).toBe(200);
     expect(asked).toBe(0);
   });
 });

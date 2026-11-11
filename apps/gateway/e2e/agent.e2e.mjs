@@ -13,8 +13,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
+import { SendMessageRequest, TaskState } from "@a2a-js/sdk";
 import { AgentCardResolver, ClientFactory, JsonRpcTransportFactory } from "@a2a-js/sdk/client";
-import { UnsupportedOperationError } from "@a2a-js/sdk/errors";
+import { ContentTypeNotSupportedError, TaskNotFoundError, UnsupportedOperationError } from "@a2a-js/sdk/errors";
 import { AgentAuthClient, MemoryStorage } from "@auth/agent";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -561,15 +562,18 @@ describe("A2A at /a2a", () => {
 
   const a2a = () => `${origin}/a2a`;
   const execute = () => `${origin}/api/auth/capability/execute`;
+  /** A new client address for each of the delivery tests' requests, so none spends another's rate limit. */
+  let hosts = 0;
+  const address = () => `100.64.${++hosts >> 8}.${hosts & 255}`;
   /** Each call comes from its own address unless told otherwise, so one test's requests don't spend another's rate limit. */
   let addresses = 0;
   const call = (token, { ip = `198.51.100.${++addresses}`, to = a2a(), via = fetch } = {}) =>
     via(to, {
       method: "POST",
       headers: { "Content-Type": "application/json", "A2A-Version": "1.0", "CF-Connecting-IP": ip, ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "SendMessage", params: { message: { messageId: "m-1", role: "ROLE_USER", parts: [{ data: { url: "https://dest.example.com/a2a" }, mediaType: "application/json" }] } } }),
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "SubscribeToTask", params: { id: "task_00000000000000000000" } }),
     });
-  /** The request reached the SDK's dispatcher, which has no SendMessage yet. */
+  /** The request reached the SDK's dispatcher, which answers it with an operation that uses no capability and is not supported. */
   const dispatched = async (res, why = "") => {
     const body = await res.json();
     assert.equal(res.status, 200, `${why} ${JSON.stringify(body)}`);
@@ -621,14 +625,18 @@ describe("A2A at /a2a", () => {
     caller = await register();
   });
 
-  test("an agent JWT signed for /a2a with the a2a capability reaches the SDK's dispatcher, which answers SendMessage with -32004", async () => {
+  /** The official A2A client for an agent, with a fetch that signs a new token for every request, as the card says to. */
+  async function a2aClient(agent) {
     const card = await AgentCardResolver.default.resolve(origin);
     const { audience, capability } = card.capabilities.extensions[0].params;
-    // The official client, with a fetch that signs a new token for every request, as the card says to.
-    const fetchImpl = async (url, init) => fetch(url, { ...init, headers: { ...Object.fromEntries(new Headers(init.headers)), Authorization: `Bearer ${await caller.token(audience, [capability])}` } });
-    const client = await new ClientFactory({ transports: [new JsonRpcTransportFactory({ fetchImpl })] }).createFromAgentCard(card);
-    const message = { messageId: "m-1", role: "ROLE_USER", parts: [{ data: { url: "https://dest.example.com/a2a" }, mediaType: "application/json" }] };
-    await assert.rejects(client.sendMessage({ message }), UnsupportedOperationError);
+    const fetchImpl = async (url, init) =>
+      fetch(url, { ...init, headers: { ...Object.fromEntries(new Headers(init.headers)), "CF-Connecting-IP": address(), Authorization: `Bearer ${await agent.token(audience, [capability])}` } });
+    return new ClientFactory({ transports: [new JsonRpcTransportFactory({ fetchImpl })] }).createFromAgentCard(card);
+  }
+
+  test("an agent JWT signed for /a2a with the a2a capability reaches the SDK's dispatcher", async () => {
+    const client = await a2aClient(caller);
+    await assert.rejects(client.cancelTask({ id: "task_00000000000000000000" }), UnsupportedOperationError);
     await dispatched(await call(await caller.token()));
     await dispatched(await call(await caller.forge()), "a hand-signed token with the same claims is the same token");
   });
@@ -828,6 +836,284 @@ describe("A2A at /a2a", () => {
     await db.batch(splitSql(migration).map((q) => db.prepare(q)));
     await request();
     await dispatched(await call(await old.token()));
+  });
+
+  // ---- Delivery tasks: SendMessage and GetTask ----
+
+  /** One JSON-RPC call to /a2a for an agent: the HTTP status and the body. */
+  async function rpcAs(agent, method, params) {
+    const res = await fetch(a2a(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "A2A-Version": "1.0", "CF-Connecting-IP": address(), Authorization: `Bearer ${await agent.token()}` },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+    });
+    return { status: res.status, body: await res.json() };
+  }
+  const message = (data, over = {}) => ({ message: { messageId: randomUUID(), role: "ROLE_USER", parts: [{ data, mediaType: "application/json" }], ...over } });
+  /** Sends a payload and returns the task, which must have been made. */
+  async function sendAs(agent, data, over) {
+    const { status, body } = await rpcAs(agent, "SendMessage", message(data, over));
+    assert.equal(status, 200, JSON.stringify(body));
+    assert.ok(body.result?.task, JSON.stringify(body));
+    return body.result.task;
+  }
+  const getAs = async (agent, id) => (await rpcAs(agent, "GetTask", { id })).body;
+  /** What the task's one artifact says of its delivery. */
+  const delivery = (task) => task.artifacts[0].parts[0].data;
+  const TERMINAL = ["TASK_STATE_COMPLETED", "TASK_STATE_FAILED", "TASK_STATE_CANCELED"];
+  const settledAs = (agent, id) => until(async () => { const { result } = await getAs(agent, id); return TERMINAL.includes(result.status.state) && result; }, 40_000);
+  /** A capability run over Agent Auth, the interface that existed before A2A. */
+  const run = async (agent, capability, args = {}) => data(await agent.client.executeCapability({ agentId: agent.agentId, capability, arguments: args }));
+  /** A registered agent whose host has a project. */
+  async function withProject(capabilities) {
+    const agent = await register(capabilities);
+    agent.project = await run(agent, "create_project");
+    return agent;
+  }
+  const deliveriesTo = (path) => received.filter((r) => new URL(r.url).pathname === path);
+
+  test("the official A2A client schedules a delayed delivery and queues an immediate one, gets each task at once, and reads it until it is terminal", async () => {
+    const agent = await withProject();
+    const client = await a2aClient(agent);
+    const request = (data, configuration) => SendMessageRequest.fromJSON({ ...message(data), configuration });
+
+    // An hour away, and the client asks to wait for the end (its default): the task still comes back at once.
+    const started = Date.now();
+    const later = await client.sendMessage(request({ url: "https://dest.example.com/a2a-later", delay: "1h" }));
+    assert.ok(Date.now() - started < 10_000);
+    assert.match(later.id, /^task_[0-9a-f]{20}$/);
+    assert.equal(later.contextId, later.id);
+    assert.equal(later.status.state, TaskState.TASK_STATE_SUBMITTED);
+    const laterDelivery = later.artifacts[0].parts[0].content.value;
+    assert.equal(laterDelivery.status, "scheduled");
+    assert.ok(Math.abs(laterDelivery.run_at_ms - (started + 3_600_000)) < 60_000);
+    assert.equal((await client.getTask({ id: later.id })).status.state, TaskState.TASK_STATE_SUBMITTED);
+    assert.equal(deliveriesTo("/a2a-later").length, 0);
+
+    // Now, with and without returnImmediately: the same, a task that is not finished yet.
+    for (const [path, configuration] of [["/a2a-now", { returnImmediately: true }], ["/a2a-now-blocking", { returnImmediately: false }]]) {
+      const now = await client.sendMessage(request({ url: `https://dest.example.com${path}`, method: "PUT", headers: { "X-Order": "42" }, body: '{"order":42}', capture: true }, configuration));
+      assert.ok([TaskState.TASK_STATE_SUBMITTED, TaskState.TASK_STATE_WORKING].includes(now.status.state));
+      const done = await until(async () => { const task = await client.getTask({ id: now.id }); return task.status.state === TaskState.TASK_STATE_COMPLETED && task; });
+      const result = done.artifacts[0].parts[0].content.value;
+      assert.equal(result.task_id, now.id);
+      assert.equal(result.status, "succeeded");
+      assert.equal(result.attempt_count, 1);
+      assert.equal(result.attempts[0].http_status, 200);
+      assert.ok(result.created_ms <= result.finished_ms);
+      assert.equal(result.response.status, 200);
+      assert.equal(new Date(done.status.timestamp).getTime(), result.updated_ms);
+      const [sent] = deliveriesTo(path);
+      assert.equal(sent.headers["x-order"], "42");
+      assert.equal(sent.body, '{"order":42}');
+      assert.equal(sent.headers["runlater-task-id"], now.id);
+    }
+    // The same task over the interface that was there before, with nothing added to what it returns.
+    const viaAgentAuth = await run(agent, "get_task", { task_id: later.id });
+    assert.equal(viaAgentAuth.status, "scheduled");
+    assert.equal("via" in viaAgentAuth, false);
+  });
+
+  test("the payload schema is served at the URL the card's skill names, and says what the examples the card gives are", async () => {
+    const card = await (await fetch(`${origin}/.well-known/agent-card.json`)).json();
+    const url = `${origin}/a2a/schemas/deliver-http/v1.json`;
+    assert.ok(card.skills[0].description.includes(url));
+    const schema = await (await fetch(url)).json();
+    assert.equal(schema.$id, url);
+    assert.deepEqual(Object.keys(schema.properties), ["url", "method", "headers", "body", "run_at_ms", "delay", "idempotency_key", "max_attempts", "capture"]);
+    for (const example of card.skills[0].examples) assert.deepEqual(Object.keys(JSON.parse(example)).filter((k) => !(k in schema.properties)), []);
+  });
+
+  test("a text-only or ambiguous message schedules nothing and says what to send; an invalid field is named", async () => {
+    const agent = await withProject();
+    const client = await a2aClient(agent);
+    const text = SendMessageRequest.fromJSON({ message: { messageId: randomUUID(), role: "ROLE_USER", parts: [{ text: "POST to https://dest.example.com/a2a-text in 15 minutes" }] } });
+    await assert.rejects(client.sendMessage(text), (e) => e instanceof ContentTypeNotSupportedError && e.message.includes(`${origin}/a2a/schemas/deliver-http/v1.json`));
+
+    const refusedField = async (data, field, over) => {
+      const { status, body } = await rpcAs(agent, "SendMessage", message(data, over));
+      assert.equal(status, 200);
+      assert.equal(body.error?.code, -32602, JSON.stringify(body));
+      assert.equal(body.error.data[0].metadata.field, field, JSON.stringify(body));
+      return body.error;
+    };
+    const two = await rpcAs(agent, "SendMessage", message(null, { parts: [{ data: { url: "https://dest.example.com/a2a-text" } }, { data: { delay: "15m" } }] }));
+    assert.equal(two.body.error.code, -32602);
+    assert.equal(two.body.error.data[0].metadata.field, "message.parts");
+    // The API's own validation, with its message, under the field's place in the request.
+    const insecure = await refusedField({ url: "http://dest.example.com/a2a-text" }, "message.parts[0].data.url");
+    assert.equal(insecure.message, "URL must use https://");
+    await refusedField({ url: "https://dest.example.com/a2a-text", delay: "soon" }, "message.parts[0].data.delay");
+    await refusedField({ url: "https://dest.example.com/a2a-text", max_attempts: 99 }, "message.parts[0].data.max_attempts");
+    await refusedField({ url: "https://127.0.0.1/a2a-text" }, "message.parts[0].data.url");
+    // A request the API cannot read at all has no field of its own; its message says what is missing.
+    const noUrl = await rpcAs(agent, "SendMessage", message({ delay: "1m" }));
+    assert.equal(noUrl.body.error.code, -32602);
+    assert.match(noUrl.body.error.message, /url/);
+    // Fields of schedule_http that this version of the payload does not have.
+    await refusedField({ url: "https://dest.example.com/a2a-text", callback_url: "inbox" }, "message.parts[0].data.callback_url");
+    await refusedField({ url: "https://dest.example.com/a2a-text", lane: "a" }, "message.parts[0].data.lane");
+    await refusedField({ url: "https://dest.example.com/a2a-text" }, "message.contextId", { contextId: randomUUID() });
+
+    assert.deepEqual((await run(agent, "list_tasks")).tasks, []);
+    assert.equal(deliveriesTo("/a2a-text").length, 0);
+  });
+
+  test("a message for a task is refused: the caller's own takes no further message, another host's or interface's is not found", async () => {
+    const agent = await withProject();
+    const stranger = await withProject();
+    const client = await a2aClient(agent);
+    const mine = await sendAs(agent, { url: "https://dest.example.com/a2a-follow-up", delay: "1h" });
+    const theirs = await sendAs(stranger, { url: "https://dest.example.com/a2a-follow-up", delay: "1h" });
+    const other = await run(agent, "schedule_http", { url: "https://dest.example.com/a2a-follow-up", delay: "1h" });
+    const followUp = (taskId) => SendMessageRequest.fromJSON(message({ url: "https://dest.example.com/a2a-follow-up" }, { taskId }));
+
+    await assert.rejects(client.sendMessage(followUp(mine.id)), UnsupportedOperationError);
+    for (const id of [theirs.id, other.id, "task_00000000000000000000", "not-a-task-id"]) await assert.rejects(client.sendMessage(followUp(id)), TaskNotFoundError, id);
+    assert.equal((await run(agent, "list_tasks")).tasks.length, 2);
+    assert.equal(deliveriesTo("/a2a-follow-up").length, 0);
+  });
+
+  test("the same submission sent again returns the same task with one delivery; the same key with a different payload is refused with -32602", async () => {
+    const agent = await withProject();
+    const payload = { url: "https://dest.example.com/a2a-once", body: "once" };
+    // No key in the payload: the messageId is the key, here one a key could not be as it is.
+    const again = message(payload, { messageId: "urn:uuid:" + randomUUID() });
+    const first = await rpcAs(agent, "SendMessage", again);
+    const second = await rpcAs(agent, "SendMessage", again);
+    assert.equal(second.body.result.task.id, first.body.result.task.id);
+    const changed = await rpcAs(agent, "SendMessage", { message: { ...again.message, parts: [{ data: { ...payload, body: "twice" }, mediaType: "application/json" }] } });
+    assert.equal(changed.status, 200);
+    assert.equal(changed.body.error.code, -32602);
+    assert.match(changed.body.error.message, /already used for a different request/);
+    assert.deepEqual(changed.body.error.data[0].metadata, { field: "message.messageId", code: "idempotency_conflict" });
+
+    // A key in the payload wins over the messageId: two messages, one task.
+    const keyed = { url: "https://dest.example.com/a2a-once-keyed", delay: "1h", idempotency_key: "order-42" };
+    const a = await sendAs(agent, keyed);
+    const b = await sendAs(agent, keyed);
+    assert.equal(b.id, a.id);
+    const conflict = await rpcAs(agent, "SendMessage", message({ ...keyed, url: "https://dest.example.com/a2a-once-other" }));
+    assert.equal(conflict.body.error.code, -32602);
+    assert.deepEqual(conflict.body.error.data[0].metadata, { field: "message.parts[0].data.idempotency_key", code: "idempotency_conflict" });
+    // A key another interface already used is not A2A's task to return.
+    await run(agent, "schedule_http", { url: "https://dest.example.com/a2a-once-keyed", delay: "1h", idempotency_key: "order-43" });
+    const elsewhere = await rpcAs(agent, "SendMessage", message({ ...keyed, idempotency_key: "order-43" }));
+    assert.equal(elsewhere.body.error.code, -32602);
+
+    await settledAs(agent, first.body.result.task.id);
+    assert.equal((await run(agent, "list_tasks")).tasks.length, 3);
+    assert.equal(deliveriesTo("/a2a-once").length, 1);
+    assert.equal(deliveriesTo("/a2a-once")[0].body, "once");
+    assert.equal(deliveriesTo("/a2a-once-other").length, 0);
+  });
+
+  test("a delivery being retried is working, never completed; one the destination refuses is failed; every attempt is charged and no read is", async () => {
+    const agent = await withProject();
+    const remaining = async () => (await run(agent, "get_project")).attempts_remaining;
+    const before = await remaining();
+    replies.set("/a2a-flaky", [503]);
+    replies.set("/a2a-gone", [404]);
+    const flaky = await sendAs(agent, { url: "https://dest.example.com/a2a-flaky", max_attempts: 2 });
+    const gone = await sendAs(agent, { url: "https://dest.example.com/a2a-gone" });
+
+    const retrying = await until(async () => { const { result } = await getAs(agent, flaky.id); return delivery(result).status === "retrying" && result; });
+    assert.equal(retrying.status.state, "TASK_STATE_WORKING");
+    assert.equal(delivery(retrying).attempt_count, 1);
+    assert.equal(delivery(retrying).attempts[0].outcome, "http_503");
+    assert.ok(delivery(retrying).next_attempt_ms > Date.now() - 1000);
+
+    const failed = await settledAs(agent, gone.id);
+    assert.equal(failed.status.state, "TASK_STATE_FAILED");
+    assert.deepEqual([delivery(failed).status, delivery(failed).attempt_count, delivery(failed).attempts[0].http_status], ["failed", 1, 404]);
+    const completed = await settledAs(agent, flaky.id);
+    assert.equal(completed.status.state, "TASK_STATE_COMPLETED");
+    assert.deepEqual(delivery(completed).attempts.map((a) => a.http_status), [503, 200]);
+
+    // Three attempts were made, and charged as they are for any task; the reads above cost nothing.
+    assert.equal(await remaining(), before - 3);
+    for (let i = 0; i < 10; i++) await getAs(agent, flaky.id);
+    assert.equal(await remaining(), before - 3);
+    assert.equal(deliveriesTo("/a2a-flaky").length, 2);
+  });
+
+  test("no signing secret, credential header or stored secret value appears in any A2A answer", async () => {
+    const agent = await withProject();
+    const stored = `stored-${randomBytes(12).toString("hex")}`;
+    const literal = `literal-${randomBytes(12).toString("hex")}`;
+    const inUrl = `url-${randomBytes(12).toString("hex")}`;
+    await run(agent, "set_secret", { name: "A2A_TOKEN", value: stored, allowed_hosts: ["dest.example.com"] });
+    const payload = { url: `https://dest.example.com/a2a-secret/${inUrl}?key=${inUrl}`, headers: { Authorization: "Bearer {{secret:A2A_TOKEN}}", "X-Api-Key": literal }, body: literal, capture: true };
+    const answers = [await rpcAs(agent, "SendMessage", message(payload))];
+    const done = await settledAs(agent, answers[0].body.result.task.id);
+    answers.push(done, await rpcAs(agent, "SendMessage", message(payload, { messageId: "another" })), await rpcAs(agent, "SendMessage", message({ ...payload, delay: "soon" })));
+    assert.equal(done.status.state, "TASK_STATE_COMPLETED");
+    // The destination did get the credentials.
+    const sent = received.find((r) => r.url === payload.url);
+    assert.equal(sent.headers.authorization, `Bearer ${stored}`);
+    assert.equal(sent.headers["x-api-key"], literal);
+
+    const text = JSON.stringify(answers);
+    for (const secret of [agent.project.signing_secret, stored, literal, inUrl, "A2A_TOKEN", "Authorization"]) assert.equal(text.includes(secret), false, secret);
+  });
+
+  test("an agent needs the grant for the capability each operation uses; without it nothing is scheduled or read", async () => {
+    const owner = await withProject();
+    const task = await sendAs(owner, { url: "https://dest.example.com/a2a-grants", delay: "1h" });
+    const refusedFor = async (agent, capability, method, params) => {
+      const { status, body } = await rpcAs(agent, method, params);
+      assert.equal(status, 403, JSON.stringify(body));
+      assert.deepEqual(body, { error: "capability_not_granted", message: `this agent does not hold the ${capability} capability; request it, or register an agent with it` });
+    };
+    // Agents of the same host, so of the same project, each holding less.
+    const reader = await register(["a2a", "get_task"], owner.client);
+    await refusedFor(reader, "schedule_http", "SendMessage", message({ url: "https://dest.example.com/a2a-grants", delay: "1h" }));
+    await refusedFor(reader, "queue_http", "SendMessage", message({ url: "https://dest.example.com/a2a-grants" }));
+    assert.equal((await getAs(reader, task.id)).result.id, task.id);
+
+    const queuer = await register(["a2a", "queue_http"], owner.client);
+    await refusedFor(queuer, "schedule_http", "SendMessage", message({ url: "https://dest.example.com/a2a-grants", delay: "1h" }));
+    await refusedFor(queuer, "get_task", "GetTask", { id: task.id });
+    await refusedFor(queuer, "get_task", "GetTask", { id: "task_00000000000000000000" });
+    await refusedFor(queuer, "get_task", "SendMessage", message({ url: "https://dest.example.com/a2a-grants" }, { taskId: task.id }));
+
+    // A grant that is revoked stops counting at once.
+    const revoked = await register(["a2a", "schedule_http", "queue_http", "get_task"], owner.client);
+    await (await gatewayDb()).prepare('UPDATE "agentCapabilityGrant" SET status = ? WHERE "agentId" = ? AND capability = ?').bind("revoked", revoked.agentId, "queue_http").run();
+    await refusedFor(revoked, "queue_http", "SendMessage", message({ url: "https://dest.example.com/a2a-grants" }));
+
+    assert.equal((await run(owner, "list_tasks")).tasks.length, 1);
+    assert.equal(deliveriesTo("/a2a-grants").length, 0);
+    const queued = await sendAs(queuer, { url: "https://dest.example.com/a2a-grants" });
+    assert.match(queued.id, /^task_/);
+  });
+
+  test("a task made by another host or through another interface is answered with TaskNotFoundError, like one that never was", async () => {
+    const agent = await withProject();
+    const stranger = await withProject();
+    const client = await a2aClient(agent);
+    const mine = await sendAs(agent, { url: "https://dest.example.com/a2a-mine", delay: "1h" });
+    const theirs = await sendAs(stranger, { url: "https://dest.example.com/a2a-theirs", delay: "1h" });
+    // The same host, over Agent Auth: an ordinary task, and a watch.
+    const scheduled = await run(agent, "schedule_http", { url: "https://dest.example.com/a2a-other", delay: "1h" });
+    const queued = await run(agent, "queue_http", { url: "https://dest.example.com/a2a-other", queue: "a2a" });
+    // The mark is not an argument of any capability.
+    await assert.rejects(run(agent, "schedule_http", { url: "https://dest.example.com/a2a-other", delay: "1h", via: "a2a" }), { code: "invalid_request", status: 400 });
+    await assert.rejects(run(agent, "queue_http", { url: "https://dest.example.com/a2a-other", via: "a2a" }), { code: "invalid_request", status: 400 });
+
+    assert.equal((await client.getTask({ id: mine.id })).id, mine.id);
+    const never = await getAs(agent, "task_00000000000000000000");
+    assert.equal(never.error.code, -32001);
+    assert.deepEqual(never.error.data, [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "TASK_NOT_FOUND", domain: "a2a-protocol.org" }]);
+    for (const id of [theirs.id, scheduled.id, queued.id, "not-a-task-id", "", "task_0000000000000000000g"]) {
+      assert.deepEqual(await getAs(agent, id), never, id);
+      await assert.rejects(client.getTask({ id }), TaskNotFoundError, id);
+    }
+    // A caller with no project at all is told the same.
+    assert.deepEqual(await getAs(await register(), mine.id), never);
+    // Each task is still there for whoever may read it: its own host through A2A, and the host's every task over Agent Auth.
+    assert.equal((await getAs(stranger, theirs.id)).result.id, theirs.id);
+    assert.deepEqual((await run(agent, "list_tasks")).tasks.map((t) => t.id).sort(), [mine.id, scheduled.id, queued.id].sort());
   });
 
   test("the 61st request in a minute from one address is refused with 429, whichever agent sends it", async () => {

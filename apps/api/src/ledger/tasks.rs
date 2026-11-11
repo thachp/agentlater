@@ -11,6 +11,8 @@
 
 use super::*;
 
+/// What `tasks.via` holds for a task whose request came through A2A; null for every other.
+const A2A: &str = "a2a";
 const DEFAULT_PAGE: usize = 20;
 const MAX_PAGE: usize = 100;
 
@@ -129,6 +131,8 @@ pub(super) struct NewTask<'s> {
     pub reporting: Reporting<'s>,
     /// What admission reserved for a watch's action and its callback.
     pub action_reserve: i64,
+    /// Whether the request for it came through A2A.
+    pub a2a: bool,
 }
 
 impl<'s> NewTask<'s> {
@@ -156,6 +160,7 @@ impl<'s> NewTask<'s> {
             fingerprint: kind.fingerprint(),
             reporting: Reporting::default(),
             action_reserve: 0,
+            a2a: false,
         }
     }
 }
@@ -331,6 +336,7 @@ pub(super) struct TaskRow {
     failure: Option<String>,
     pub(super) on_match: Option<String>,
     triggered_by: Option<String>,
+    via: Option<String>,
     pub(super) created_ms: i64,
     updated_ms: i64,
 }
@@ -418,8 +424,8 @@ pub(super) const TASK_COLUMNS: &str = "seq, id, status, due_ms, max_attempts, ru
     total_attempts, generation, fence, lease_until_ms, cancel_requested, terminal_ms, \
     method, url, headers, body, run_at_ms, idempotency_key, callback_url, callback_task_id, \
     callback_for, lane, cron, alert_for, watch, watch_errors, watch_state, capture, response, \
-    inbox_seq, wake_call, report_failures_only, failure, on_match, triggered_by, created_ms, \
-    updated_ms";
+    inbox_seq, wake_call, report_failures_only, failure, on_match, triggered_by, via, \
+    created_ms, updated_ms";
 
 impl TaskRow {
     /// Who made this task. A row whose columns name more than one maker, or carry data its
@@ -536,6 +542,7 @@ impl<D: Db> Ledger<'_, D> {
                     capture: spec.capture,
                 },
                 action_reserve: 0,
+                a2a: self.a2a,
             },
             now,
         )?;
@@ -543,7 +550,7 @@ impl<D: Db> Ledger<'_, D> {
     }
 
     /// The task an idempotency key already made, if any; a different request under the same
-    /// key is a conflict.
+    /// key is a conflict, and so, through A2A, is a task that was not made through A2A.
     pub(super) fn replay(
         &self,
         key: Option<&str>,
@@ -553,13 +560,13 @@ impl<D: Db> Ledger<'_, D> {
             return Ok(None);
         };
         let existing: Vec<KeyRow> = self.db.query(
-            "SELECT id, fingerprint FROM tasks WHERE idempotency_key = ?",
+            "SELECT id, fingerprint, via FROM tasks WHERE idempotency_key = ?",
             vec![key.into()],
         )?;
         let Some(existing) = existing.first() else {
             return Ok(None);
         };
-        if existing.fingerprint != fingerprint {
+        if existing.fingerprint != fingerprint || (self.a2a && existing.via.is_none()) {
             return Err(ApiError::new(
                 409,
                 "idempotency_conflict",
@@ -570,7 +577,7 @@ impl<D: Db> Ledger<'_, D> {
     }
 
     pub fn cancel(&self, task_id: &str, now: i64) -> Result<TaskView, ApiError> {
-        let row = self.task_row(task_id)?.ok_or_else(no_task)?;
+        let row = self.named(task_id)?;
         let mut task = row.task()?;
         match task.cancel(now) {
             Ok(_) => {}
@@ -589,7 +596,7 @@ impl<D: Db> Ledger<'_, D> {
     /// Gives a failed task a fresh set of attempts, starting now.
     pub fn redrive(&self, task_id: &str, now: i64) -> Result<TaskView, ApiError> {
         let project = self.project_row()?.ok_or_else(no_project)?;
-        let row = self.task_row(task_id)?.ok_or_else(no_task)?;
+        let row = self.named(task_id)?;
         if let Some(refusal) = row.kind()?.redrive_refusal() {
             return Err(refusal);
         }
@@ -623,10 +630,19 @@ impl<D: Db> Ledger<'_, D> {
             .pop())
     }
 
+    /// The task a caller named. Through A2A that is only a task made through A2A: any other
+    /// is as absent as one that never existed.
+    fn named(&self, task_id: &str) -> Result<TaskRow, ApiError> {
+        let row = self.task_row(task_id)?.ok_or_else(no_task)?;
+        if self.a2a && row.via.is_none() {
+            return Err(no_task());
+        }
+        Ok(row)
+    }
+
     /// One task with its attempt history.
     pub fn task(&self, task_id: &str) -> Result<TaskView, ApiError> {
-        let row = self.task_row(task_id)?.ok_or_else(no_task)?;
-        Ok(self.full_view(&row)?)
+        Ok(self.full_view(&self.named(task_id)?)?)
     }
 
     fn full_view(&self, row: &TaskRow) -> Result<TaskView, DbError> {
@@ -666,6 +682,10 @@ impl<D: Db> Ledger<'_, D> {
         };
         let mut sql = format!("SELECT {TASK_COLUMNS} FROM tasks WHERE seq < ?");
         let mut params: Vec<Param> = vec![before.into()];
+        if self.a2a {
+            sql.push_str(" AND via = ?");
+            params.push(A2A.into());
+        }
         if let Some(status) = status {
             sql.push_str(" AND status = ?");
             params.push(text(&status).into());
@@ -709,10 +729,10 @@ impl<D: Db> Ledger<'_, D> {
              total_attempts, generation, fence, lease_until_ms, cancel_requested, terminal_ms, \
              published_ms, method, url, headers, body, run_at_ms, idempotency_key, fingerprint, \
              callback_url, callback_for, capture, lane, cron, alert_for, wake_call, \
-             report_failures_only, watch, on_match, action_reserve, triggered_by, created_ms, \
-             updated_ms) \
+             report_failures_only, watch, on_match, action_reserve, triggered_by, via, \
+             created_ms, updated_ms) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
-             ?, ?, ?, ?, ?, ?, ?)"
+             ?, ?, ?, ?, ?, ?, ?, ?)"
             ),
             vec![
                 (*id).into(),
@@ -745,6 +765,7 @@ impl<D: Db> Ledger<'_, D> {
                 kind.on_match.into(),
                 new.action_reserve.into(),
                 kind.triggered_by.into(),
+                new.a2a.then_some(A2A).into(),
                 now.into(),
                 now.into(),
             ],
@@ -872,6 +893,7 @@ impl<D: Db> Ledger<'_, D> {
 struct KeyRow {
     id: String,
     fingerprint: String,
+    via: Option<String>,
 }
 
 #[cfg(test)]
@@ -1028,6 +1050,109 @@ mod tests {
             l.schedule(r, "t3", T0).unwrap_err().code,
             "idempotency_conflict"
         );
+    }
+
+    /// The project's ledger as a request that came through A2A sees it.
+    fn through_a2a(db: &Memory) -> Ledger<'_, Memory> {
+        Ledger::open(db).unwrap().through_a2a(true)
+    }
+
+    #[test]
+    fn through_a2a_a_task_made_any_other_way_is_as_absent_as_one_that_never_was() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let a2a = through_a2a(&db);
+        let (made, created) = a2a
+            .schedule(req("https://a.example.com/"), "t1", T0)
+            .unwrap();
+        assert!(created);
+        l.schedule(req("https://a.example.com/"), "t2", T0).unwrap();
+
+        assert_eq!(a2a.task("t1").unwrap(), made);
+        let never = a2a.task("t9").unwrap_err();
+        assert_eq!((never.status, never.code), (404, "task_not_found"));
+        assert_eq!(a2a.task("t2").unwrap_err(), never);
+        assert_eq!(a2a.cancel("t2", T0).unwrap_err(), never);
+        assert_eq!(l.task("t2").unwrap().status, Status::Scheduled);
+
+        // A list through A2A has only those tasks, and pages over them alone.
+        a2a.schedule(req("https://a.example.com/"), "t3", T0)
+            .unwrap();
+        let ids = |page: &TaskPage| page.tasks.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            ids(&a2a.list(None, None, None, None).unwrap()),
+            ["t3", "t1"]
+        );
+        let first = a2a.list(None, None, None, Some(1)).unwrap();
+        let rest = a2a
+            .list(None, None, first.next_cursor.as_deref(), Some(1))
+            .unwrap();
+        assert_eq!(
+            (ids(&first), ids(&rest)),
+            (vec!["t3".into()], vec!["t1".to_string()])
+        );
+        assert_eq!(rest.next_cursor, None);
+        assert_eq!(
+            ids(&l.list(None, None, None, None).unwrap()),
+            ["t3", "t2", "t1"]
+        );
+    }
+
+    /// Existing callers see every task in the project, as before, and no mark on any.
+    #[test]
+    fn a_task_made_through_a2a_reads_the_same_as_any_other_from_elsewhere() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let (made, _) = through_a2a(&db)
+            .schedule(req("https://a.example.com/"), "t1", T0)
+            .unwrap();
+        let (plain, _) = l.schedule(req("https://a.example.com/"), "t2", T0).unwrap();
+        assert_eq!(l.task("t1").unwrap(), made);
+        let (a, b) = (
+            serde_json::to_value(&made).unwrap(),
+            serde_json::to_value(&plain).unwrap(),
+        );
+        let keys =
+            |v: &serde_json::Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys(&a), keys(&b));
+        assert_eq!(l.list(None, None, None, None).unwrap().tasks.len(), 2);
+    }
+
+    #[test]
+    fn through_a2a_a_key_replays_only_a_task_made_through_a2a() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let a2a = through_a2a(&db);
+        let keyed = |key: &str| ScheduleRequest {
+            idempotency_key: Some(key.into()),
+            ..req("https://a.example.com/")
+        };
+        let (first, _) = a2a.schedule(keyed("k1"), "t1", T0).unwrap();
+        let (again, created) = a2a.schedule(keyed("k1"), "t2", T0 + 1000).unwrap();
+        assert_eq!((again.id.as_str(), created), (first.id.as_str(), false));
+
+        // The same request under a key another interface used: its task is not A2A's to return.
+        l.schedule(keyed("k2"), "t3", T0).unwrap();
+        let conflict = a2a.schedule(keyed("k2"), "t4", T0).unwrap_err();
+        assert_eq!(
+            (conflict.status, conflict.code),
+            (409, "idempotency_conflict")
+        );
+        assert!(l.task("t4").is_err(), "nothing was scheduled");
+        // The other way round is a replay, as between any two existing callers.
+        assert_eq!(l.schedule(keyed("k1"), "t5", T0).unwrap().0.id, first.id);
+    }
+
+    #[test]
+    fn only_the_request_made_through_a2a_is_marked_not_what_the_ledger_makes_for_it() {
+        let db = Memory::new();
+        setup(&db);
+        let a2a = through_a2a(&db);
+        a2a.schedule(with_callback("https://a.example.com/"), "t1", T0)
+            .unwrap();
+        drive(&a2a, "t1", http(200), None, T0);
+        let callback = a2a.task("t1").unwrap().callback_task_id.unwrap();
+        assert_eq!(a2a.task(&callback).unwrap_err().code, "task_not_found");
     }
 
     #[test]

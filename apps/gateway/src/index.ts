@@ -4,7 +4,7 @@
 // A2A_ENABLED is on, the A2A Agent Card and /a2a.
 
 import { OAuthProvider, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
-import { a2aEnabled, agentCard, handleA2a, type A2aEnv } from "./a2a";
+import { a2aEnabled, agentCard, handleA2a, PAYLOAD_SCHEMA_PATH, payloadSchema, type A2aEnv } from "./a2a";
 import { importSigningKey } from "./api";
 import { BASE_PATH, createAuth, firstUse, type AuthEnv } from "./auth";
 import { handleStripeWebhook, type BillingEnv } from "./billing";
@@ -15,6 +15,7 @@ import { handleHook, isHookPath, type HooksEnv } from "./hooks";
 import { envForHost, isHooksOnlyHost, type HostEnv } from "./hosts";
 import { handleMcp, type McpProps } from "./mcp";
 import { handleMpp } from "./mpp";
+import { runCapability } from "./projects";
 import { d1SweepStore, resealOver, sweep } from "./rotation";
 
 export { AuthStore } from "./store";
@@ -98,8 +99,19 @@ const gateway = {
     if (a2aEnabled(env) && request.method === "GET" && url.pathname === "/.well-known/agent-card.json") {
       return Response.json(agentCard(env), { headers: { "Cache-Control": "public, max-age=300", "Access-Control-Allow-Origin": "*" } });
     }
+    if (a2aEnabled(env) && request.method === "GET" && url.pathname === PAYLOAD_SCHEMA_PATH) {
+      return Response.json(payloadSchema(env), {
+        headers: { "Content-Type": "application/schema+json", "Cache-Control": "public, max-age=300", "Access-Control-Allow-Origin": "*" },
+      });
+    }
     if (a2aEnabled(env) && url.pathname === "/a2a") {
-      return handleA2a(request, env, async (r) => createAuth(env, ctx, await signingKey(env)).a2aCaller(r));
+      return handleA2a(
+        request,
+        env,
+        async (r) => createAuth(env, ctx, await signingKey(env)).a2aCaller(r),
+        // The only place a call is marked as made through A2A.
+        async (hostId, capability, args) => runCapability(env, await signingKey(env), hostId, capability, args, "a2a"),
+      );
     }
 
     if (request.method === "GET" && url.pathname === "/health") {

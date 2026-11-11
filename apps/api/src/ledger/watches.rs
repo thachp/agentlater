@@ -190,6 +190,7 @@ impl<D: Db> Ledger<'_, D> {
                     ..Reporting::default()
                 },
                 action_reserve,
+                a2a: false,
             },
             now,
         )?;

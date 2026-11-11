@@ -206,4 +206,7 @@ pub(super) const MIGRATIONS: &[&[&str]] = &[
         "ALTER TABLE project ADD COLUMN signing_secret_previous TEXT",
         "ALTER TABLE project ADD COLUMN signing_secret_previous_until_ms INTEGER",
     ],
+    // 14: A2A. `via` is 'a2a' on a task whose request came through A2A, the only tasks A2A
+    // reads; null on every other task, and on all made before this.
+    &["ALTER TABLE tasks ADD COLUMN via TEXT"],
 ];

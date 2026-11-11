@@ -515,7 +515,8 @@ components:
         base64url(claims JSON) "." base64url(Ed25519 signature over the first segment).
         Claims: aud "runlater-api", sub (project id, [A-Za-z0-9_-]{1,64}), scope
         (space-separated: project schedule read cancel billing secrets hooks.receive maintain), iat and exp in unix seconds,
-        lifetime at most 300 s.
+        lifetime at most 300 s. Optional: via "a2a", on a call made for the gateway's A2A interface; the task it
+        schedules is marked, and it finds only marked tasks.
   parameters:
     TaskId:
       name: id
