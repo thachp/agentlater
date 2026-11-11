@@ -357,12 +357,11 @@ impl<D: Db> Ledger<'_, D> {
 mod tests {
     use super::*;
     use crate::db::sqlite::Memory;
-
-    const T0: i64 = 1_767_225_600_000;
+    use crate::ledger::testing::{P, T0};
 
     fn ledger(db: &Memory) -> Ledger<'_, Memory> {
         let l = Ledger::open(db).unwrap();
-        l.create_project("proj_1", "secret", T0).unwrap();
+        l.create_project(P, "secret", T0).unwrap();
         l
     }
 

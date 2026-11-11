@@ -556,3 +556,667 @@ impl InboxRow {
         Ok(event)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::sqlite::Memory;
+    use crate::ledger::testing::*;
+
+    #[test]
+    fn a_finished_task_reports_to_the_inbox() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let (t, _) = l
+            .schedule(
+                captured(serde_json::json!({ "callback_url": "inbox" })),
+                "t1",
+                T0,
+            )
+            .unwrap();
+        assert_eq!(
+            (t.callback_url.as_deref(), t.inbox_seq),
+            (Some("inbox"), None)
+        );
+        assert_eq!(inbox(&l).events, Vec::<serde_json::Value>::new());
+
+        answer(
+            &l,
+            "t1",
+            200,
+            r#"{"status":"failed","step":"migrate"}"#,
+            &[],
+            T0 + 5,
+        );
+        let t = l.task("t1").unwrap();
+        assert_eq!(
+            (t.callback_task_id, t.inbox_seq),
+            (None, Some(1)),
+            "no callback task"
+        );
+        assert_eq!(l.project().unwrap().inbox_unread, 1);
+        assert_eq!(l.project().unwrap().attempts_used, 1);
+
+        let page = inbox(&l);
+        assert_eq!((page.acked_seq, page.unread, page.dropped), (0, 1, 0));
+        let e = &page.events[0];
+        assert_eq!(
+            (e["seq"].as_i64(), e["at_ms"].as_i64()),
+            (Some(1), Some(T0 + 5))
+        );
+        assert_eq!(e["event"], "task.finished");
+        assert_eq!(e["task"]["id"], "t1");
+        assert_eq!(e["task"]["inbox_seq"], 1);
+        assert_eq!(e["task"]["response"]["status"], 200);
+        assert_eq!(
+            e["task"]["response"]["body"],
+            r#"{"status":"failed","step":"migrate"}"#
+        );
+        assert_eq!(e["task"]["attempts"][0]["http_status"], 200);
+
+        // Reading does not move the cursor; acking does.
+        assert_eq!(inbox(&l).events.len(), 1);
+        assert_eq!(
+            l.ack_inbox(1).unwrap(),
+            InboxCursor {
+                acked_seq: 1,
+                unread: 0
+            }
+        );
+        assert_eq!(inbox(&l).events.len(), 0);
+        assert_eq!(l.project().unwrap().inbox_unread, 0);
+        // Acked events can still be replayed for a while.
+        assert_eq!(l.read_inbox(Some(0), None, false).unwrap().events.len(), 1);
+    }
+
+    #[test]
+    fn every_finish_adds_an_event() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let to_inbox = |extra: serde_json::Value| {
+            let mut r =
+                serde_json::json!({ "url": "https://a.example.com/", "callback_url": "inbox" });
+            r.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<ScheduleRequest>(r).unwrap()
+        };
+        l.schedule(to_inbox(serde_json::json!({ "delay": "1h" })), "c", T0)
+            .unwrap();
+        l.cancel("c", T0).unwrap();
+        l.cancel("c", T0 + 1).unwrap();
+        l.schedule(to_inbox(serde_json::json!({ "max_attempts": 1 })), "f", T0)
+            .unwrap();
+        answer(&l, "f", 500, "", &[], T0);
+        l.redrive("f", T0 + 10).unwrap();
+        answer(&l, "f", 500, "", &[], T0 + 10);
+
+        let events = inbox(&l).events;
+        let seen: Vec<_> = events
+            .iter()
+            .map(|e| {
+                (
+                    e["seq"].as_i64().unwrap(),
+                    e["task"]["id"].as_str().unwrap(),
+                    e["task"]["status"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [(1, "c", "canceled"), (2, "f", "failed"), (3, "f", "failed")]
+        );
+        assert_eq!(l.task("f").unwrap().inbox_seq, Some(3));
+    }
+
+    #[test]
+    fn inbox_reports_cost_no_attempt_and_survive_the_budget() {
+        let db = Memory::new();
+        let l = setup(&db);
+        db.0.execute("UPDATE project SET attempt_budget = 2", [])
+            .unwrap();
+        let to_inbox = || ScheduleRequest {
+            callback_url: Some(INBOX.into()),
+            ..req("https://a.example.com/")
+        };
+        // A URL callback would reserve a second attempt; the inbox does not.
+        l.schedule(to_inbox(), "t1", T0).unwrap();
+        l.schedule(to_inbox(), "t2", T0).unwrap();
+        assert_eq!(
+            l.schedule(to_inbox(), "t3", T0).unwrap_err().code,
+            "budget_exhausted"
+        );
+
+        // Abandoned for lack of budget still reports.
+        db.0.execute("UPDATE project SET attempts_used = 2", [])
+            .unwrap();
+        let d = l.publish_due(P, T0).unwrap().remove(0);
+        assert_eq!(
+            l.claim(&d.task_id, d.generation, T0).unwrap(),
+            Claimed::Skip("budget_exhausted")
+        );
+        let e = &inbox(&l).events[0];
+        assert_eq!(e["task"]["id"], d.task_id.as_str());
+        assert_eq!(e["task"]["status"], "failed");
+    }
+
+    #[test]
+    fn the_inbox_cursor_only_moves_forward() {
+        let db = Memory::new();
+        let l = setup(&db);
+        for i in 0..5 {
+            l.post(T0, |_| Ok(serde_json::json!({ "event": "test", "i": i })))
+                .unwrap();
+        }
+        let e = l.ack_inbox(6).unwrap_err();
+        assert_eq!(
+            (e.status, e.code, e.field),
+            (400, "ack_beyond_inbox", Some("up_to"))
+        );
+        assert_eq!(l.ack_inbox(-1).unwrap_err().field, Some("up_to"));
+        assert_eq!(l.ack_inbox(3).unwrap().acked_seq, 3);
+        assert_eq!(
+            l.ack_inbox(1).unwrap(),
+            InboxCursor {
+                acked_seq: 3,
+                unread: 2
+            },
+            "a late ack changes nothing"
+        );
+
+        // read with ack: acks up to the last event returned, no further.
+        let page = l.read_inbox(None, Some(1), true).unwrap();
+        assert_eq!(page.events[0]["seq"], 4);
+        assert_eq!((page.acked_seq, page.unread), (4, 1));
+        let page = l.read_inbox(None, Some(500), true).unwrap();
+        assert_eq!((page.events.len(), page.acked_seq, page.unread), (1, 5, 0));
+        let page = l.read_inbox(None, None, true).unwrap();
+        assert_eq!(
+            (page.events.len(), page.acked_seq),
+            (0, 5),
+            "nothing left to ack"
+        );
+        assert_eq!(
+            l.read_inbox(Some(-1), None, false).unwrap_err().field,
+            Some("after")
+        );
+        assert_eq!(
+            l.read_inbox(Some(0), Some(0), false).unwrap().events.len(),
+            1,
+            "limit clamps to 1"
+        );
+    }
+
+    #[test]
+    fn a_full_inbox_drops_acked_events_first_and_says_so() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let add = |n: i64| {
+            for _ in 0..n {
+                l.post(T0, |_| Ok(serde_json::json!({ "event": "test" })))
+                    .unwrap();
+            }
+        };
+        add(MAX_INBOX_EVENTS);
+        l.ack_inbox(2).unwrap();
+        add(2);
+        let first = l.read_inbox(Some(0), Some(1), false).unwrap();
+        assert_eq!(
+            (first.events[0]["seq"].as_i64(), first.dropped),
+            (Some(3), 0)
+        );
+
+        add(1);
+        let page = l.read_inbox(None, Some(1), false).unwrap();
+        assert_eq!((page.events[0]["seq"].as_i64(), page.dropped), (Some(4), 1));
+        assert_eq!(page.unread, MAX_INBOX_EVENTS);
+        // Moving the cursor resets the count, but the reply that moved it still shows it.
+        assert_eq!(l.read_inbox(None, Some(1), true).unwrap().dropped, 1);
+        assert_eq!(inbox(&l).dropped, 0);
+    }
+
+    #[test]
+    fn old_inbox_events_are_purged() {
+        let db = Memory::new();
+        let l = setup(&db);
+        for at in [T0, T0 + 1] {
+            l.post(at, |_| Ok(serde_json::json!({ "event": "test" })))
+                .unwrap();
+        }
+        l.ack_inbox(1).unwrap();
+        assert_eq!(l.next_wake().unwrap(), Some(T0 + INBOX_ACKED_RETENTION_MS));
+        l.purge(T0 + INBOX_ACKED_RETENTION_MS).unwrap();
+        let page = l.read_inbox(Some(0), None, false).unwrap();
+        assert_eq!(page.events.len(), 1, "the acked event is gone");
+        assert_eq!(l.next_wake().unwrap(), Some(T0 + 1 + RETENTION_MS));
+        l.purge(T0 + 1 + RETENTION_MS).unwrap();
+        let page = inbox(&l);
+        assert_eq!((page.events.len(), page.unread, page.dropped), (0, 0, 1));
+        assert_eq!(l.next_wake().unwrap(), None);
+    }
+
+    #[test]
+    fn captured_bodies_leave_inbox_events_with_the_task() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.schedule(
+            captured(serde_json::json!({ "callback_url": "inbox" })),
+            "t1",
+            T0,
+        )
+        .unwrap();
+        answer(&l, "t1", 200, "token=abc", &[], T0);
+        assert_eq!(l.next_wake().unwrap(), Some(T0 + CAPTURE_RETENTION_MS));
+        l.purge(T0 + CAPTURE_RETENTION_MS).unwrap();
+        let e = &inbox(&l).events[0];
+        assert_eq!(e["task"]["response"]["status"], 200, "the status stays");
+        assert_eq!(e["task"]["response"]["body"], serde_json::Value::Null);
+        assert_eq!(l.task("t1").unwrap().response, None);
+        assert_eq!(l.next_wake().unwrap(), Some(T0 + RETENTION_MS));
+    }
+
+    #[test]
+    fn ack_never_skips_unread_events() {
+        let db = Memory::new();
+        let l = setup(&db);
+        for _ in 0..6 {
+            l.post(T0, |_| Ok(serde_json::json!({ "event": "test" })))
+                .unwrap();
+        }
+        let e = l.read_inbox(Some(4), None, true).unwrap_err();
+        assert_eq!((e.status, e.field), (400, Some("after")));
+        assert_eq!(inbox(&l).acked_seq, 0);
+        assert_eq!(l.read_inbox(Some(4), None, false).unwrap().events.len(), 2);
+        // From at or before the cursor, ack covers only what was returned.
+        l.ack_inbox(2).unwrap();
+        let page = l.read_inbox(Some(1), Some(2), true).unwrap();
+        assert_eq!(
+            (page.events[0]["seq"].as_i64(), page.acked_seq),
+            (Some(2), 3)
+        );
+    }
+
+    /// Schedules a task that reports to the inbox and lets it succeed at `now`.
+    fn finish_to_inbox(l: &Ledger<'_, Memory>, id: &str, now: i64) {
+        let r = ScheduleRequest {
+            callback_url: Some(INBOX.into()),
+            ..req("https://a.example.com/")
+        };
+        l.schedule(r, id, now).unwrap();
+        answer(l, id, 200, "", &[], now);
+    }
+
+    fn wake_id(l: &Ledger<'_, Memory>) -> Option<String> {
+        l.project().unwrap().wake.and_then(|w| w.last_wake_task_id)
+    }
+
+    /// When the pending wake is due.
+    fn wake_due(l: &Ledger<'_, Memory>) -> Option<i64> {
+        l.task(&wake_id(l)?).unwrap().next_attempt_ms
+    }
+
+    /// Sends the pending wake at `now` and answers it with `status`.
+    fn send_wake(l: &Ledger<'_, Memory>, status: u16, now: i64) -> Delivery {
+        let id = wake_id(l).expect("a wake was queued");
+        drive(l, &id, http(status), None, now).0
+    }
+
+    #[test]
+    fn a_pending_wake_holds_no_attempts_back_from_new_work() {
+        let db = Memory::new();
+        let l = setup(&db);
+        db.0.execute("UPDATE project SET attempt_budget = 2", [])
+            .unwrap();
+        l.set_wake(waking(serde_json::json!({})), T0).unwrap();
+        finish_to_inbox(&l, "t1", T0);
+        assert_eq!(wake_tasks(&db), 1);
+        // A wake only spends what nothing else was promised, so the last attempt is free.
+        l.schedule(req("https://a.example.com/"), "t2", T0).unwrap();
+    }
+
+    #[test]
+    fn no_wake_without_set_wake() {
+        let db = Memory::new();
+        let l = setup(&db);
+        finish_to_inbox(&l, "t1", T0);
+        assert_eq!(wake_tasks(&db), 0);
+        assert_eq!(l.project().unwrap().wake, None);
+        assert_eq!(l.delete_wake(T0).unwrap_err().code, "wake_not_set");
+    }
+
+    #[test]
+    fn an_inbox_event_wakes_the_agent_with_only_a_count() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let w = l.set_wake(waking(serde_json::json!({})), T0).unwrap();
+        assert_eq!((w.state.as_str(), w.debounce_ms), ("active", 15 * 60_000));
+        assert_eq!(w.header_names, ["Authorization"]);
+        assert_eq!(wake_tasks(&db), 0, "nothing unread yet");
+
+        finish_to_inbox(&l, "t1", T0 + 5);
+        let a = send_wake(&l, 202, T0 + 5);
+        assert_eq!(a.url, "https://agents.example.com/trigger");
+        assert_eq!(a.method, Method::Post);
+        assert!(a
+            .headers
+            .contains(&("Authorization".to_string(), "Bearer t0ken".to_string())));
+        let payload: serde_json::Value = serde_json::from_str(a.body.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({ "event": "inbox.unread", "project_id": P, "unread": 1 })
+        );
+        let t = l.task(&wake_id(&l).unwrap()).unwrap();
+        assert!(t.wake_call);
+        assert_eq!(t.status, Status::Succeeded);
+        assert_eq!(t.header_names, ["Authorization"], "values are never echoed");
+        assert_eq!(l.project().unwrap().wake.unwrap().consecutive_failures, 0);
+    }
+
+    #[test]
+    fn a_burst_of_events_shares_one_debounced_wake() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.set_wake(waking(serde_json::json!({ "debounce": "10m" })), T0)
+            .unwrap();
+        finish_to_inbox(&l, "t1", T0);
+        send_wake(&l, 200, T0);
+        // Two more while the window is open: one wake, at its end.
+        finish_to_inbox(&l, "t2", T0 + 60_000);
+        finish_to_inbox(&l, "t3", T0 + 120_000);
+        assert_eq!(wake_tasks(&db), 2);
+        assert_eq!(wake_due(&l), Some(T0 + 600_000));
+        let a = send_wake(&l, 200, T0 + 600_000);
+        let payload: serde_json::Value = serde_json::from_str(a.body.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["unread"], 3, "the count when it is sent");
+    }
+
+    #[test]
+    fn a_wake_due_after_the_agent_read_everything_is_dropped() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.set_wake(waking(serde_json::json!({})), T0).unwrap();
+        finish_to_inbox(&l, "t1", T0);
+        send_wake(&l, 200, T0);
+        finish_to_inbox(&l, "t2", T0 + 1);
+        l.read_inbox(None, None, true).unwrap();
+        let id = wake_id(&l).unwrap();
+        let due = T0 + 15 * 60_000;
+        let d = l
+            .publish_due(P, due)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.task_id == id)
+            .unwrap();
+        let used = l.project().unwrap().attempts_used;
+        assert_eq!(
+            l.claim(&d.task_id, d.generation, due).unwrap(),
+            Claimed::Skip("inbox_read")
+        );
+        assert_eq!(l.task(&id).unwrap().status, Status::Canceled);
+        assert_eq!(l.project().unwrap().attempts_used, used, "costs nothing");
+    }
+
+    #[test]
+    fn events_after_a_wake_was_sent_get_the_next_one() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.set_wake(waking(serde_json::json!({ "debounce": "1m" })), T0)
+            .unwrap();
+        finish_to_inbox(&l, "t1", T0);
+        let id = wake_id(&l).unwrap();
+        let d = l
+            .publish_due(P, T0)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.task_id == id)
+            .unwrap();
+        let a = deliver(&l, &d, T0);
+        // While the wake is in flight, another event arrives; the agent may miss it.
+        finish_to_inbox(&l, "t2", T0 + 1);
+        assert_eq!(wake_tasks(&db), 1, "no second wake while one is in flight");
+        l.finish(&id, a.fence, http(200), T0 + 2, 0.0).unwrap();
+        assert_eq!(wake_tasks(&db), 2);
+        assert_eq!(
+            wake_due(&l),
+            Some(T0 + 60_000),
+            "a minute after it was sent"
+        );
+
+        // A delivered wake with nothing new after it queues nothing more.
+        send_wake(&l, 200, T0 + 60_000);
+        assert_eq!(wake_tasks(&db), 2);
+    }
+
+    #[test]
+    fn a_wake_that_keeps_failing_turns_itself_off() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.set_wake(waking(serde_json::json!({ "debounce": "1m" })), T0)
+            .unwrap();
+        finish_to_inbox(&l, "t1", T0);
+        let mut now = T0;
+        for failures in 1..=MAX_WAKE_FAILURES {
+            let id = wake_id(&l).unwrap();
+            // A 404 fails at once, without retries.
+            send_wake(&l, 404, now);
+            assert_eq!(l.task(&id).unwrap().status, Status::Failed);
+            let w = l.project().unwrap().wake.unwrap();
+            assert_eq!(w.consecutive_failures, failures);
+            if let Some(due) = wake_due(&l) {
+                now = due;
+            }
+        }
+        let w = l.project().unwrap().wake.unwrap();
+        assert_eq!(
+            (w.state.as_str(), w.disabled_reason.as_deref()),
+            ("disabled", Some("wake_failing"))
+        );
+        assert_eq!(wake_tasks(&db), MAX_WAKE_FAILURES, "no more wakes");
+        let events = l.read_inbox(None, None, false).unwrap().events;
+        let last = events.last().unwrap();
+        assert_eq!(last["event"], "wake.disabled");
+        assert_eq!(last["wake"]["state"], "disabled");
+
+        finish_to_inbox(&l, "t2", now + 1);
+        assert_eq!(wake_tasks(&db), MAX_WAKE_FAILURES);
+        // Setting it again turns it back on, and wakes for what is waiting.
+        let w = l
+            .set_wake(waking(serde_json::json!({ "debounce": "1m" })), now + 2)
+            .unwrap();
+        assert_eq!((w.state.as_str(), w.consecutive_failures), ("active", 0));
+        assert_eq!(wake_tasks(&db), MAX_WAKE_FAILURES + 1);
+    }
+
+    #[test]
+    fn delete_wake_cancels_the_one_not_yet_sent() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.set_wake(waking(serde_json::json!({})), T0).unwrap();
+        finish_to_inbox(&l, "t1", T0);
+        send_wake(&l, 200, T0);
+        finish_to_inbox(&l, "t2", T0 + 1);
+        let pending = wake_id(&l).unwrap();
+        let gone = l.delete_wake(T0 + 2).unwrap();
+        assert_eq!(gone.url, "https://agents.example.com/trigger");
+        assert_eq!(l.task(&pending).unwrap().status, Status::Canceled);
+        assert_eq!(l.project().unwrap().wake, None);
+        finish_to_inbox(&l, "t3", T0 + 3);
+        assert_eq!(wake_tasks(&db), 2);
+    }
+
+    #[test]
+    fn a_wake_gets_one_try_past_the_budget() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.set_wake(waking(serde_json::json!({})), T0).unwrap();
+        db.0.execute("UPDATE project SET attempt_budget = 1", [])
+            .unwrap();
+        finish_to_inbox(&l, "t1", T0);
+        assert_eq!(l.project().unwrap().attempts_remaining, 0);
+        let id = wake_id(&l).unwrap();
+        let d = l
+            .publish_due(P, T0)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.task_id == id)
+            .unwrap();
+        let a = deliver(&l, &d, T0);
+        assert_eq!(
+            l.finish(&id, a.fence, http(503), T0, 0.0).unwrap(),
+            Some(Status::Failed),
+            "one try, no retries"
+        );
+    }
+
+    #[test]
+    fn set_wake_checks_its_request_and_needs_a_project() {
+        let db = Memory::new();
+        let l = Ledger::open(&db).unwrap();
+        assert_eq!(
+            l.set_wake(waking(serde_json::json!({})), T0)
+                .unwrap_err()
+                .code,
+            "project_not_found"
+        );
+        l.create_project(P, "secret", T0).unwrap();
+        let e = l
+            .set_wake(waking(serde_json::json!({ "debounce": "10s" })), T0)
+            .unwrap_err();
+        assert_eq!((e.status, e.field), (400, Some("debounce")));
+        let e = l
+            .set_wake(
+                waking(serde_json::json!({ "url": "https://localhost/x" })),
+                T0,
+            )
+            .unwrap_err();
+        assert_eq!(e.field, Some("url"));
+        // Unread events already waiting get a wake as soon as it is set.
+        l.post(T0, |_| Ok(serde_json::json!({ "event": "test" })))
+            .unwrap();
+        l.set_wake(waking(serde_json::json!({})), T0).unwrap();
+        assert_eq!(wake_tasks(&db), 1);
+    }
+
+    #[test]
+    fn replacing_the_wake_while_one_is_in_flight_still_wakes_for_later_events() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.set_wake(waking(serde_json::json!({ "debounce": "1m" })), T0)
+            .unwrap();
+        finish_to_inbox(&l, "t1", T0);
+        let old = wake_id(&l).unwrap();
+        let d = l
+            .publish_due(P, T0)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.task_id == old)
+            .unwrap();
+        let a = deliver(&l, &d, T0);
+        finish_to_inbox(&l, "t2", T0 + 1);
+        l.delete_wake(T0 + 2).unwrap();
+        l.set_wake(
+            waking(serde_json::json!({ "url": "https://agents.example.com/v2", "debounce": "1m" })),
+            T0 + 3,
+        )
+        .unwrap();
+        assert_eq!(wake_tasks(&db), 1, "the old one is still in flight");
+        l.finish(&old, a.fence, http(200), T0 + 4, 0.0).unwrap();
+        let next = wake_id(&l).expect("t2 still needs a wake");
+        assert_ne!(next, old);
+        assert_eq!(l.task(&next).unwrap().url, "https://agents.example.com/v2");
+    }
+
+    #[test]
+    fn a_wake_cannot_be_redriven_and_forgets_its_token() {
+        let db = Memory::new();
+        let l = setup(&db);
+        l.set_wake(waking(serde_json::json!({})), T0).unwrap();
+        finish_to_inbox(&l, "t1", T0);
+        let id = wake_id(&l).unwrap();
+        send_wake(&l, 404, T0);
+        assert_eq!(
+            l.redrive(&id, T0 + 1).unwrap_err().code,
+            "wake_not_redrivable"
+        );
+        let stored: String =
+            db.0.query_row("SELECT headers FROM tasks WHERE id = ?", [&id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(!stored.contains("t0ken"), "{stored}");
+        assert_eq!(l.task(&id).unwrap().header_names, ["Authorization"]);
+    }
+
+    #[test]
+    fn a_wake_never_spends_attempts_promised_to_waiting_tasks() {
+        let db = Memory::new();
+        let l = setup(&db);
+        db.0.execute("UPDATE project SET attempt_budget = 3", [])
+            .unwrap();
+        l.set_wake(waking(serde_json::json!({})), T0).unwrap();
+        let later = ScheduleRequest {
+            delay: Some("1h".into()),
+            ..req("https://a.example.com/")
+        };
+        l.schedule(later, "t2", T0).unwrap();
+        finish_to_inbox(&l, "t1", T0);
+        // One attempt is spare: the wake may use it, and fails retryably.
+        send_wake(&l, 503, T0);
+        let id = wake_id(&l).unwrap();
+        let retry = l.task(&id).unwrap().next_attempt_ms.unwrap();
+        let d = l
+            .publish_due(P, retry)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.task_id == id)
+            .unwrap();
+        // The last attempt is t2's, so the wake stands down instead of retrying.
+        assert_eq!(
+            l.claim(&d.task_id, d.generation, retry).unwrap(),
+            Claimed::Skip("budget_reserved")
+        );
+        assert_eq!(l.task(&id).unwrap().status, Status::Canceled);
+        assert_eq!(
+            l.project().unwrap().wake.unwrap().consecutive_failures,
+            0,
+            "not a failure"
+        );
+        let t2 = T0 + 3_600_000;
+        answer(&l, "t2", 200, "", &[], t2);
+        assert_eq!(l.task("t2").unwrap().status, Status::Succeeded);
+    }
+
+    #[test]
+    fn the_debounce_counts_from_the_last_wake_sent() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let daily = || waking(serde_json::json!({ "debounce": "24h" }));
+        l.set_wake(daily(), T0).unwrap();
+        finish_to_inbox(&l, "t1", T0);
+        send_wake(&l, 200, T0);
+        finish_to_inbox(&l, "t2", T0 + 1);
+        assert_eq!(wake_due(&l), Some(T0 + DAY));
+        // Replacing the setting (say, a new token) does not push the pending wake out.
+        l.set_wake(daily(), T0 + 3_600_000).unwrap();
+        assert_eq!(wake_due(&l), Some(T0 + DAY));
+        // A wake dropped because everything was read does not count as sent.
+        l.read_inbox(None, None, true).unwrap();
+        let id = wake_id(&l).unwrap();
+        let d = l
+            .publish_due(P, T0 + DAY)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.task_id == id)
+            .unwrap();
+        assert_eq!(
+            l.claim(&d.task_id, d.generation, T0 + DAY).unwrap(),
+            Claimed::Skip("inbox_read")
+        );
+        finish_to_inbox(&l, "t3", T0 + DAY + 3_600_000);
+        assert_eq!(
+            wake_due(&l),
+            Some(T0 + DAY + 3_600_000),
+            "a day after the last one sent"
+        );
+    }
+}

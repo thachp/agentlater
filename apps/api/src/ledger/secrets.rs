@@ -392,11 +392,9 @@ pub(super) fn test_sealer() -> Sealer {
 mod tests {
     use super::*;
     use crate::db::sqlite::Memory;
+    use crate::ledger::testing::*;
     use crate::sealing::SealingKey;
     use runlater_core::HookRequest;
-
-    const T0: i64 = 1_767_225_600_000;
-    const P: &str = "proj_1";
 
     pub(super) fn key(byte: u8) -> SealingKey {
         SealingKey::parse(&hex::encode([byte; 32])).unwrap()
@@ -515,5 +513,275 @@ mod tests {
         let count = ledger(&db, 2, Some(1)).reseal().unwrap();
         assert_eq!((count.resealed, count.unreadable), (0, 0));
         assert!(count.rotation.is_some(), "the sweep still learns the keys");
+    }
+
+    fn with_secret_header(url: &str, value: &str) -> ScheduleRequest {
+        let mut r = req(url);
+        r.headers.insert("Authorization".into(), value.into());
+        r
+    }
+
+    #[test]
+    fn secrets_are_listed_without_values_and_capped() {
+        let db = Memory::new();
+        let l = setup(&db);
+        let (v, created) = put_secret(&l, "GH", 20, &["api.github.com"], T0).unwrap();
+        assert!(created);
+        assert_eq!(
+            (v.name.as_str(), v.allowed_hosts.clone()),
+            ("GH", hosts(&["api.github.com"]))
+        );
+        let (v, created) = put_secret(&l, "GH", 20, &["*.github.com"], T0 + 5).unwrap();
+        assert!(!created);
+        assert_eq!((v.created_ms, v.updated_ms), (T0, T0 + 5));
+        let listed = serde_json::to_string(&l.secrets().unwrap()).unwrap();
+        assert!(
+            !listed.contains("v1:") && !listed.contains("xxx"),
+            "{listed}"
+        );
+        for i in 1..MAX_SECRETS {
+            put_secret(&l, &format!("S{i}"), 20, &["a.example.com"], T0).unwrap();
+        }
+        let e = put_secret(&l, "ONE_MORE", 20, &["a.example.com"], T0).unwrap_err();
+        assert_eq!((e.status, e.code), (429, "secret_limit"));
+        put_secret(&l, "GH", 20, &["api.github.com"], T0).unwrap();
+        assert_eq!(l.delete_secret("GH").unwrap().name, "GH");
+        assert_eq!(l.delete_secret("GH").unwrap_err().code, "secret_not_found");
+    }
+
+    #[test]
+    fn new_work_may_only_send_a_secret_to_its_hosts() {
+        let db = Memory::new();
+        let l = setup(&db);
+        put_secret(&l, "GH", 20, &["api.github.com"], T0).unwrap();
+        let ok = with_secret_header("https://api.github.com/user", "Bearer {{secret:GH}}");
+        let (t, _) = l.schedule(ok, "t1", T0).unwrap();
+        assert_eq!(t.header_names, ["Authorization"]);
+
+        let e = l
+            .schedule(
+                with_secret_header("https://evil.example.com/", "{{secret:GH}}"),
+                "t2",
+                T0,
+            )
+            .unwrap_err();
+        assert_eq!(
+            (e.status, e.code, e.field),
+            (400, "secret_host_not_allowed", Some("url"))
+        );
+        let e = l
+            .schedule(
+                with_secret_header("https://api.github.com/", "{{secret:NOPE}}"),
+                "t3",
+                T0,
+            )
+            .unwrap_err();
+        assert_eq!((e.code, e.field), ("secret_not_found", Some("headers")));
+        let e = l
+            .schedule(
+                with_secret_header("https://api.github.com/", "{{secret:GH"),
+                "t4",
+                T0,
+            )
+            .unwrap_err();
+        assert_eq!(e.field, Some("headers"));
+        let mut in_body = req("https://api.github.com/");
+        in_body.body = Some("{{secret:GH}}".into());
+        assert_eq!(
+            l.schedule(in_body, "t5", T0).unwrap_err().field,
+            Some("body")
+        );
+
+        // Crons, watches and wakes are checked the same way.
+        let mut cron = daily("c");
+        cron.url = "https://evil.example.com/".into();
+        cron.headers
+            .insert("Authorization".into(), "{{secret:GH}}".into());
+        assert_eq!(
+            l.put_cron(cron, T0).unwrap_err().code,
+            "secret_host_not_allowed"
+        );
+        let w = watching(serde_json::json!({ "headers": { "Authorization": "{{secret:GH}}" } }));
+        assert_eq!(
+            l.watch(w, "w1", T0).unwrap_err().code,
+            "secret_host_not_allowed"
+        );
+        let wake = waking(serde_json::json!({ "headers": { "Authorization": "{{secret:GH}}" } }));
+        assert_eq!(
+            l.set_wake(wake, T0).unwrap_err().code,
+            "secret_host_not_allowed"
+        );
+    }
+
+    #[test]
+    fn the_consumer_gets_the_sealed_secret_and_the_reference() {
+        let db = Memory::new();
+        let l = setup(&db);
+        put_secret(&l, "GH", 20, &["api.github.com"], T0).unwrap();
+        l.schedule(
+            with_secret_header("https://api.github.com/user", "Bearer {{secret:GH}}"),
+            "t1",
+            T0,
+        )
+        .unwrap();
+        let d = l.publish_due(P, T0).unwrap().remove(0);
+        let a = deliver(&l, &d, T0);
+        assert_eq!(
+            a.headers,
+            [(
+                "Authorization".to_string(),
+                "Bearer {{secret:GH}}".to_string()
+            )],
+            "the reference, filled in by the consumer"
+        );
+        assert_eq!(a.secrets, [sealed("GH", 20)]);
+        let stored: String =
+            db.0.query_row("SELECT headers FROM tasks WHERE id = 't1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(stored.contains("{{secret:GH}}"));
+    }
+
+    #[test]
+    fn a_task_whose_secret_is_gone_or_narrowed_fails_without_an_attempt() {
+        let db = Memory::new();
+        let l = setup(&db);
+        put_secret(&l, "GH", 20, &["api.github.com"], T0).unwrap();
+        let mut r = with_secret_header("https://api.github.com/user", "Bearer {{secret:GH}}");
+        r.callback_url = Some(INBOX.into());
+        l.schedule(r, "gone", T0).unwrap();
+        l.schedule(
+            with_secret_header("https://api.github.com/x", "{{secret:GH}}"),
+            "narrowed",
+            T0,
+        )
+        .unwrap();
+        l.delete_secret("GH").unwrap();
+        let used = l.project().unwrap().attempts_used;
+        let due = l.publish_due(P, T0).unwrap();
+        let find = |id: &str| due.iter().find(|d| d.task_id == id).unwrap().clone();
+        let d = find("gone");
+        assert_eq!(
+            l.claim(&d.task_id, d.generation, T0).unwrap(),
+            Claimed::Skip("secret_missing")
+        );
+        let t = l.task("gone").unwrap();
+        assert_eq!(
+            (t.status, t.failure.as_deref(), t.attempt_count),
+            (Status::Failed, Some("secret_missing"), 0)
+        );
+        assert_eq!(l.project().unwrap().attempts_used, used, "costs nothing");
+        assert_eq!(
+            inbox(&l).events[0]["task"]["failure"],
+            "secret_missing",
+            "and it reports"
+        );
+
+        // Put back, but for other hosts only.
+        put_secret(&l, "GH", 20, &["uploads.github.com"], T0).unwrap();
+        let d = find("narrowed");
+        assert_eq!(
+            l.claim(&d.task_id, d.generation, T0).unwrap(),
+            Claimed::Skip("secret_host_not_allowed")
+        );
+        // Fixing the secret and redriving sends it, and clears the failure.
+        put_secret(&l, "GH", 20, &["api.github.com"], T0).unwrap();
+        let t = l.redrive("gone", T0 + 1).unwrap();
+        assert_eq!((t.status, t.failure), (Status::Scheduled, None));
+        let d = l
+            .publish_due(P, T0 + 1)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.task_id == "gone")
+            .unwrap();
+        assert_eq!(deliver(&l, &d, T0 + 1).secrets.len(), 1);
+    }
+
+    #[test]
+    fn headers_are_sized_with_their_secrets_filled_in() {
+        let db = Memory::new();
+        let l = setup(&db);
+        put_secret(&l, "BIG", 4_000, &["api.github.com"], T0).unwrap();
+        let mut r = req("https://api.github.com/");
+        r.headers.insert("A".into(), "{{secret:BIG}}".into());
+        r.headers.insert("B".into(), "{{secret:BIG}}".into());
+        r.headers.insert("C".into(), "{{secret:BIG}}".into());
+        let e = l.schedule(r, "t1", T0).unwrap_err();
+        assert_eq!((e.status, e.field), (400, Some("headers")));
+
+        // Accepted at its size, then the secret is replaced by a longer one.
+        put_secret(&l, "SMALL", 20, &["api.github.com"], T0).unwrap();
+        let mut r = req("https://api.github.com/");
+        r.headers.insert("A".into(), "{{secret:SMALL}}".into());
+        r.headers.insert("B".into(), "x".repeat(6_000));
+        l.schedule(r, "t2", T0).unwrap();
+        put_secret(&l, "SMALL", 4_000, &["api.github.com"], T0).unwrap();
+        let d = l.publish_due(P, T0).unwrap().remove(0);
+        assert_eq!(
+            l.claim(&d.task_id, d.generation, T0).unwrap(),
+            Claimed::Skip("secret_too_large")
+        );
+    }
+
+    #[test]
+    fn without_the_key_a_task_needing_a_secret_fails_before_its_attempt() {
+        let db = Memory::new();
+        let l = setup(&db);
+        put_secret(&l, "GH", 20, &["api.github.com"], T0).unwrap();
+        l.schedule(
+            with_secret_header("https://api.github.com/", "{{secret:GH}}"),
+            "t1",
+            T0,
+        )
+        .unwrap();
+        l.schedule(req("https://api.github.com/plain"), "plain", T0)
+            .unwrap();
+        let l = Ledger::open(&db).unwrap();
+        let due = l.publish_due(P, T0).unwrap();
+        let find = |id: &str| due.iter().find(|d| d.task_id == id).unwrap().clone();
+        let used = l.project().unwrap().attempts_used;
+        let d = find("t1");
+        assert_eq!(
+            l.claim(&d.task_id, d.generation, T0).unwrap(),
+            Claimed::Skip("secret_unavailable")
+        );
+        assert_eq!(
+            l.task("t1").unwrap().failure.as_deref(),
+            Some("secret_unavailable")
+        );
+        assert_eq!(l.project().unwrap().attempts_used, used);
+        let d = find("plain");
+        assert!(
+            matches!(
+                l.claim(&d.task_id, d.generation, T0).unwrap(),
+                Claimed::Deliver(_)
+            ),
+            "others still go"
+        );
+    }
+
+    #[test]
+    fn a_watch_whose_secret_is_gone_says_why() {
+        let db = Memory::new();
+        let l = setup(&db);
+        put_secret(&l, "API", 20, &["api.example.com"], T0).unwrap();
+        l.watch(
+            watching(serde_json::json!({ "headers": { "Authorization": "{{secret:API}}" } })),
+            "w1",
+            T0,
+        )
+        .unwrap();
+        l.delete_secret("API").unwrap();
+        let d = l.publish_due(P, T0).unwrap().remove(0);
+        assert_eq!(
+            l.claim(&d.task_id, d.generation, T0).unwrap(),
+            Claimed::Skip("secret_missing")
+        );
+        let w = l.task("w1").unwrap();
+        assert_eq!(
+            (w.status, w.watch.unwrap().reason.as_deref()),
+            (Status::Failed, Some("secret_missing"))
+        );
     }
 }
