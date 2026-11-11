@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ApiClient, ApiError, importSigningKey, signAssertion } from "../src/api";
+import { ArgumentError, execute } from "../src/capabilities";
 
 const SEED = "07".repeat(32);
 
@@ -21,7 +22,7 @@ const bytes = (s: string) =>
 describe("assertions", () => {
   it("signs claims the API accepts", async () => {
     const key = await importSigningKey(SEED);
-    const token = await signAssertion(key, "prj_1", ["read", "schedule"], 1_000);
+    const token = await signAssertion(key, "prj_1", ["read", "schedule"], { nowSecs: 1_000 });
     const [payload, sig] = token.split(".");
     expect(decode(payload!)).toEqual({
       aud: "runlater-api",
@@ -41,7 +42,7 @@ describe("assertions", () => {
 
   it("produces the exact token the Rust API's tests verify", async () => {
     // Pinned in apps/api/src/assertion.rs (accepts_a_token_signed_by_the_gateway).
-    const token = await signAssertion(await importSigningKey(SEED), "prj_1", ["read", "schedule"], 1_767_225_600);
+    const token = await signAssertion(await importSigningKey(SEED), "prj_1", ["read", "schedule"], { nowSecs: 1_767_225_600 });
     expect(token).toBe(
       "eyJhdWQiOiJydW5sYXRlci1hcGkiLCJzdWIiOiJwcmpfMSIsInNjb3BlIjoicmVhZCBzY2hlZHVsZSIsImlhdCI6MTc2NzIyNTYwMCwiZXhwIjoxNzY3MjI1NjYwfQ.M-yCfOuEo_oLgifHXheOnecRoRyAjPf8bOIvfB40Nn5gBX1nYyubLruWjKOqCQSJXjcv81ogOT6yvv0MbHNECQ",
     );
@@ -69,6 +70,26 @@ describe("ApiClient", () => {
     const token = seen[0]!.headers.get("RunLater-Assertion")!;
     expect(decode(token.split(".")[0]!).scope).toBe("schedule");
     expect(await seen[0]!.json()).toEqual({ url: "x" });
+  });
+
+  it("says a call came through A2A only when it is made for A2A", async () => {
+    const seen: Request[] = [];
+    const key = await importSigningKey(SEED);
+    await new ApiClient(fetcher(200, {}, seen), key, "prj_1").call("GET", "/v1/tasks/t", "read");
+    await new ApiClient(fetcher(200, {}, seen), key, "prj_1", "a2a").call("GET", "/v1/tasks/t", "read");
+    const claims = seen.map((r) => decode(r.headers.get("RunLater-Assertion")!.split(".")[0]!));
+    expect(claims.map((c) => c.via)).toEqual([undefined, "a2a"]);
+    expect(Object.keys(claims[0])).toEqual(["aud", "sub", "scope", "iat", "exp"]);
+  });
+
+  it("lets a capability take what is A2A's alone only when the call is made for A2A", async () => {
+    const seen: Request[] = [];
+    const key = await importSigningKey(SEED);
+    const args = { status: "delivering,retrying", updated_since_ms: 0, cursor: "1800000000000.42" };
+    await execute(new ApiClient(fetcher(200, {}, seen), key, "prj_1", "a2a"), "list_tasks", args);
+    expect(new URL(seen[0]!.url).search).toBe("?status=delivering%2Cretrying&cursor=1800000000000.42&updated_since_ms=0");
+    await expect(execute(new ApiClient(fetcher(200, {}, seen), key, "prj_1"), "list_tasks", args)).rejects.toBeInstanceOf(ArgumentError);
+    expect(seen).toHaveLength(1);
   });
 
   it("passes API errors through", async () => {

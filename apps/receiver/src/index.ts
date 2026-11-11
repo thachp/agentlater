@@ -3,6 +3,7 @@
 //   .../ok     200
 //   .../flaky  503 the first time, then 200
 //   .../gone   404
+//   .../down   503 every time
 // Reads (GET /runs/<run>) need the RECEIVER_TOKEN bearer token. Each run is its own Durable
 // Object and deletes itself an hour after its first request.
 
@@ -52,7 +53,7 @@ export class Inbox extends DurableObject<Env> {
     );
     if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + TTL_MS);
     if (d.name === "gone") return 404;
-    if (d.name === "flaky" && earlier === 0) return 503;
+    if (d.name === "down" || (d.name === "flaky" && earlier === 0)) return 503;
     return 200;
   }
 

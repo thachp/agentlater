@@ -89,6 +89,36 @@ describe("capabilities", () => {
     );
   });
 
+  // What the A2A interface's ListTasks asks of the API beyond what list_tasks advertises.
+  const A2A_LIST = { status: "delivering,retrying", updated_since_ms: 1_800_000_000_000, cursor: "1800000000000.42", limit: 50 };
+
+  it("build the list queries A2A needs, for a call made through A2A: several statuses, a time to list from, and the cursor of a list by change", () => {
+    expect(route("list_tasks", A2A_LIST, "a2a").path).toBe("/v1/tasks?status=delivering%2Cretrying&cursor=1800000000000.42&limit=50&updated_since_ms=1800000000000");
+    expect(route("list_tasks", { limit: 50 }, "a2a").path).toBe("/v1/tasks?limit=50");
+    // ListTasks has no lane, and nothing else rides along.
+    for (const args of [{ lane: "pay" }, { queue: "pay" }, { via: "a2a" }]) expect(() => route("list_tasks", args, "a2a"), JSON.stringify(args)).toThrow(ArgumentError);
+  });
+
+  it("take from any other interface only what list_tasks advertises, as before A2A", () => {
+    const refusal = (args: Record<string, unknown>) => {
+      try {
+        route("list_tasks", args);
+      } catch (e) {
+        if (e instanceof ArgumentError) return [e.message, e.field];
+      }
+      return "taken";
+    };
+    expect(refusal(A2A_LIST)).toEqual(['unknown argument "updated_since_ms"', "updated_since_ms"]);
+    expect(refusal({ updated_since_ms: 0 })).toEqual(['unknown argument "updated_since_ms"', "updated_since_ms"]);
+    for (const status of ["delivering,retrying", "failed,", "done", 7]) expect(refusal({ status }), String(status)).toEqual(["unknown status", "status"]);
+    for (const cursor of ["1800000000000.42", "1.", "x", "1".repeat(17), 42]) expect(refusal({ cursor }), String(cursor)).toEqual(["invalid cursor", "cursor"]);
+    // The input schema it advertises says the same.
+    const { properties } = capabilities.find((c) => c.name === "list_tasks")!.input;
+    expect(Object.keys(properties)).toEqual(["status", "queue", "lane", "cursor", "limit"]);
+    expect(properties.cursor!.pattern).toBe("^[0-9]{1,16}$");
+    expect(route("list_tasks", { status: "failed", lane: "pay", cursor: "42", limit: 5 }).path).toBe("/v1/tasks?status=failed&lane=pay&cursor=42&limit=5");
+  });
+
   it("refuse task ids that could escape the path", () => {
     for (const task_id of ["../projects/self", "task_x", ID + "/cancel", 7]) {
       expect(() => route("get_task", { task_id })).toThrow(ArgumentError);

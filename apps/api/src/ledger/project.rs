@@ -375,10 +375,10 @@ mod tests {
         let l = setup(&db);
         l.schedule(req("https://a.example.com/"), "t1", T0).unwrap();
         let before = l.project(T0).unwrap();
-        let tasks = l.list(None, None, None, None).unwrap();
+        let tasks = l.list(ListQuery::default()).unwrap();
         l.rotate_signing_secret("s2", Some("0s"), T0).unwrap();
         assert_eq!(l.project(T0).unwrap(), before);
-        assert_eq!(l.list(None, None, None, None).unwrap(), tasks);
+        assert_eq!(l.list(ListQuery::default()).unwrap(), tasks);
     }
 
     #[test]

@@ -14,9 +14,9 @@ import { apiWorker } from "./api-worker.mjs";
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
 const publicHex = Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url").toString("hex");
 
-function assertion(project, scope = "project schedule read cancel") {
+function assertion(project, scope = "project schedule read cancel", extra = {}) {
   const now = Math.floor(Date.now() / 1000);
-  const claims = { aud: "runlater-api", sub: project, scope, iat: now, exp: now + 60 };
+  const claims = { aud: "runlater-api", sub: project, scope, iat: now, exp: now + 60, ...extra };
   const payload = Buffer.from(JSON.stringify(claims)).toString("base64url");
   const sig = sign(null, Buffer.from(payload), privateKey).toString("base64url");
   return `${payload}.${sig}`;
@@ -588,5 +588,36 @@ describe("api", () => {
     assert.equal(theirs.status, 404);
     const list = await api("GET", "/v1/tasks", { project: "proj_b" });
     assert.deepEqual(list.json.tasks, []);
+  });
+
+  test("only the gateway's assertion makes a call one through A2A: it marks what it schedules and reads nothing else", async () => {
+    const project = "proj_a2a";
+    const throughA2a = () => ({ project, token: assertion(project, undefined, { via: "a2a" }) });
+    const request = { url: "https://dest.example.com/a2a", delay: "1h" };
+    await api("POST", "/v1/projects", { project });
+    const made = await api("POST", "/v1/tasks", { ...throughA2a(), body: request });
+    assert.equal(made.status, 201);
+    const plain = await api("POST", "/v1/tasks", { project, body: request });
+
+    assert.deepEqual((await api("GET", `/v1/tasks/${made.json.id}`, throughA2a())).json, made.json);
+    const never = await api("GET", "/v1/tasks/task_00000000000000000000", throughA2a());
+    assert.equal(never.status, 404);
+    assert.deepEqual(await api("GET", `/v1/tasks/${plain.json.id}`, throughA2a()), never);
+    // Every other caller sees both, with nothing in either that tells them apart.
+    const seen = await api("GET", `/v1/tasks/${made.json.id}`, { project });
+    assert.deepEqual(seen.json, made.json);
+    assert.deepEqual(Object.keys(seen.json), Object.keys(plain.json));
+
+    // Nothing a caller controls sets the mark: not a field of the request, not the header the
+    // entry Worker sets for the ledger, and no value of the claim but the one.
+    assert.equal((await api("POST", "/v1/tasks", { project, body: { ...request, via: "a2a" } })).status, 400);
+    const res = await mf.dispatchFetch("https://api.internal/v1/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "RunLater-Assertion": assertion(project), "RunLater-Via": "a2a" },
+      body: JSON.stringify(request),
+    });
+    assert.equal(res.status, 201);
+    assert.equal((await api("GET", `/v1/tasks/${(await res.json()).id}`, throughA2a())).status, 404);
+    assert.equal((await api("GET", "/v1/tasks", { project, token: assertion(project, undefined, { via: "mcp" }) })).status, 401);
   });
 });

@@ -282,7 +282,9 @@ export const capabilities: CapabilityDefinition[] = [
   {
     name: "redrive_task",
     api: { method: "POST", path: "/v1/tasks/{task_id}/redrive", scope: "schedule" },
-    description: "Retry a failed task from now, with a fresh set of attempts. Its attempt history is kept.",
+    description:
+      "Retry a failed task from now, with a fresh set of attempts. Its attempt history is kept. " +
+      "Refused (a2a_task_not_redrivable) for a task made through the A2A interface: schedule its request again as a new task.",
     input: taskArgs,
   },
   {

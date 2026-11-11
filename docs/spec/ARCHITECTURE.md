@@ -63,33 +63,34 @@ flowchart LR
 | --- | --- | --- |
 | `/mcp` | Hosted MCP: Streamable HTTP, stateless, POST only. Tools are the capabilities. | OAuth 2.1 bearer token (`@cloudflare/workers-oauth-provider`) |
 | `/authorize`, `/oauth/*` | Dynamic client registration, PKCE, the one-click consent page | `/authorize` and `/oauth/register` are rate limited per IP; `/oauth/token` isn't |
-| `/.well-known/agent-configuration`, Agent Auth routes under its base path | Discovery, registration, capability execution | Agent Auth JWTs, single-use `jti` |
+| `/.well-known/agent-configuration`, Agent Auth routes under its base path | Discovery, registration, capability execution | Agent Auth JWTs, single-use `jti`. On these routes and on `/a2a`, an `Authorization` header that is not exactly `Bearer`, one space and a compact JWT is refused with 401 before the plugin sees it (`malformedCredential` in `src/auth.ts`), so the gateway and the plugin read the same token |
 | `/h/{project}/{token}` | Inbound hooks. The only thing the hooks host serves. | The token, checked in the ledger |
 | `/billing/webhook` | Stripe events | `Stripe-Signature` |
 | `/billing/mpp/{link}` | An agent buying a pack | HMAC in the link, then the payment challenge |
-| `/openapi.json`, `/llms.txt`, `/health` | Discovery documents; `/health` also checks the API | None |
+| `/openapi.json`, `/llms.txt`, `/health` | Discovery documents; `/llms.txt` names the A2A card only when `A2A_ENABLED` is on; `/health` also checks the API | None |
+| `/.well-known/agent-card.json`, `/a2a/schemas/deliver-http/v1.json`, `/a2a` | The A2A Agent Card, the JSON Schema of the request it takes, and its JSON-RPC endpoint (`src/a2a.ts`). All answer 404 unless `A2A_ENABLED` is `"true"`: on in staging, off in production. `/a2a` negotiates the version, verifies the caller and hands it to the dispatcher with its host and grants. It is an adapter over the capabilities: `SendMessage` runs `schedule_http` (a `run_at_ms` or `delay` given) or `queue_http`, `GetTask` runs `get_task`, `ListTasks` runs `list_tasks` and `CancelTask` runs `cancel_task`, each only if the agent holds that capability (else HTTP 403). The task returned is the delivery task under its own id, never held until it finishes. `CancelTask` cancels a task with no attempt out, answers `TaskNotCancelableError` for one that succeeded or failed, and returns one whose attempt is out as working, with a status message saying the attempt decides. `ListTasks` pages by the ledger's cursor, filters by state and `statusTimestampAfter`, and refuses `contextId` by name, since each task is its own context. Calls made for `/a2a` are marked in the assertion, so the ledger marks the tasks they make and finds only those for them (see Assertions) | The card: none. `/a2a`: an Agent Auth agent JWT whose `aud` is the `/a2a` URL of the host asked and whose `capabilities` are `["a2a"]`, single-use. The Agent Auth plugin verifies it (through its `/agent/session` route, which is not served publicly); `src/auth.ts` then requires that audience exactly, an active host and the agent's `a2a` grant. A hook after the plugin's refuses such a token on every Agent Auth route |
 
 - **Two identities, one path.** `runCapability` (`src/projects.ts`) takes an owner, either an Agent Auth host id or `mcp:<id>` from a grant, finds its project in `runlater_project`, and makes the one API call named by the capability's `api` binding in `packages/contracts` (`src/capabilities.ts`). The exception is `get_payment_link`, which the gateway answers itself. A project id is never taken from the caller.
 - **The local bridge.** `@auth/agent-cli mcp --url <gateway>` is a stdio MCP server that holds an agent's keys and exposes generic tools (`execute_capability`, …). Nothing in the gateway is specific to it.
-- **Rate limits** are Workers Rate Limiting bindings, alongside Better Auth's own limiter on the Agent Auth routes: registration 10/min per IP; OAuth registration and consent 20/min per IP and path; MPP 10/min; hooks 120/min per IP and 600/min per project; tool calls 300/min per owner (one Agent Auth host or one MCP connection), checked in `runCapability` before the API is called (`429 rate_limited`).
+- **Rate limits** are Workers Rate Limiting bindings, alongside Better Auth's own limiter on the Agent Auth routes: registration 10/min per IP; OAuth registration and consent 20/min per IP and path; MPP 10/min; hooks 120/min per IP and 600/min per project; tool calls 300/min per owner (one Agent Auth host or one MCP connection), checked in `runCapability` before the API is called (`429 rate_limited`). Better Auth's limiter counts every `/a2a` request that carries a token, because verifying it is a call to `/agent/session`: 60 a minute per client IP, shared by all agents and all A2A operations from that address, so that is the ceiling for polling `GetTask`.
 - **Billing.** `get_payment_link` creates a Checkout Session and returns `agentlater.io/pay#key=…&secret=…` and an `mpp_url`. Payments reach the ledger through `POST /v1/projects/self/credits` (scope `billing`), keyed by session or PaymentIntent id, so a retried webhook adds nothing. `payment_intent.succeeded` is the backstop if an MPP credit fails after the charge.
 
 ### `apps/api`: the task authority
 
 Not on any public route (`workers_dev: false`, no custom domain). It is reached only through a service binding from the gateway.
 
-- **Assertions.** Each request carries `RunLater-Assertion`: `{aud, sub: project_id, scope, iat, exp}` signed with Ed25519 by the gateway, living at most 5 minutes. The route table in `routes.rs` names the scope each route needs; `openapi.yaml` states the same scope as `x-scope`, and tests on both sides fail if they disagree. Scopes: `project`, `schedule`, `read`, `cancel`, `secrets`, plus three no agent is granted: `billing`, `hooks.receive` and `maintain` (the gateway's reseal sweep). A shared test vector pins the format across TypeScript and Rust.
+- **Assertions.** Each request carries `RunLater-Assertion`: `{aud, sub: project_id, scope, iat, exp}` signed with Ed25519 by the gateway, living at most 5 minutes. A call the gateway makes for its A2A interface also carries `via: "a2a"`: the entry Worker passes that to the ledger, which marks a task scheduled by such a call (`tasks.via`) and, for such a call, treats every unmarked task as absent and lists the marked ones most recently changed first, with a total. `redrive_task` on a marked task is refused from every interface (`409 a2a_task_not_redrivable`), so a finished A2A task never starts again. No capability argument reaches the assertion, so no caller can set or drop the mark, and no capability's result shows it; only that refusal tells a marked task from another. The route table in `routes.rs` names the scope each route needs; `openapi.yaml` states the same scope as `x-scope`, and tests on both sides fail if they disagree. Scopes: `project`, `schedule`, `read`, `cancel`, `secrets`, plus three no agent is granted: `billing`, `hooks.receive` and `maintain` (the gateway's reseal sweep). A shared test vector pins the format across TypeScript and Rust.
 - **The ledger.** `src/ledger.rs` is plain synchronous Rust behind a small `Db` trait, so the same code runs against rusqlite in `cargo test` and against Durable Object SQLite in workerd. A run of storage calls with no `await` between them commits atomically, and that is what makes "record the match and queue the action" one transaction.
 - **Sealing.** `src/sealing.rs` holds AES-256-GCM with a per-project key derived by HKDF from `SECRETS_KEY`. While it is rotated, `SECRETS_KEY_PREVIOUS` also opens (never seals), and the gateway's hourly cron (`src/rotation.ts`) has each ledger reseal under the new key (ADR 1). The API seals before the ledger stores, so `ledger.rs` never holds plaintext. Two places open sealed values: the consumer at send time, and the Durable Object's entry code when it checks a hook's signature.
 - **Glue.** `src/worker_entry.rs` is the HTTP entry, the `TaskLedger` class, its alarm and the queue consumer. The delivery attempt itself is `src/delivery.rs`, which takes the network as a `Transport` so `cargo test` can run it.
 
 ### `apps/web`
 
-Landing page, docs (`/docs`, `/docs/capabilities`, `/docs/delivery`), `/pay`, `/terms`, `/privacy`. No auth and no server state. The capabilities page renders the same definitions the gateway serves.
+Landing page, docs (`/docs`, `/docs/capabilities`, `/docs/delivery`, `/docs/a2a`), `/pay`, `/terms`, `/privacy`. No auth and no server state. The capabilities page renders the same definitions the gateway serves.
 
 ### `apps/receiver`
 
-A staging-only fixture: it records what the journey delivers and scripts replies (`ok`, `flaky`, `gone`). Never deployed to production.
+A staging-only fixture: it records what the journey and the A2A run deliver and scripts replies (`ok`, `flaky`, `gone`, `down`). Never deployed to production.
 
 ## Where data lives
 
@@ -177,7 +178,8 @@ runlater/
 │   │   ├── src/             index, mcp, consent, auth, store, projects, capabilities,
 │   │   │                    api, hooks, billing, mpp, discovery, body
 │   │   ├── migrations/      D1 SQL
-│   │   └── e2e/             agent.e2e, journey, staging, oauth
+│   │   ├── examples/        a2a-client (the A2A example the docs show), a2a-wire
+│   │   └── e2e/             agent.e2e, journey, staging, a2a-staging, oauth
 │   ├── receiver/            TS Worker: staging fixture
 │   └── web/                 Next.js + OpenNext: app/, components/, lib/
 ├── crates/
@@ -204,7 +206,7 @@ runlater/
 2. Define it in `packages/contracts/src/capabilities.ts`. That is what agents read and what the docs render.
 3. Give it an `api` binding (method, path, scope) in the same file, unless the gateway can answer it alone, as with `get_payment_link`. Only an unusual argument shape needs a `prepare` entry in `apps/gateway/src/capabilities.ts`.
 4. Add the route and its scope in `apps/api/src/routes.rs`, the operation with its `x-scope` in `openapi.yaml`, the logic in the ledger, and any schema change as a new `MIGRATIONS` entry.
-5. Add a D1 migration granting it to existing hosts. `test/host-capabilities.test.ts` fails until there is one.
+5. Add a D1 migration granting it to existing hosts. `test/host-capabilities.test.ts` fails until there is one. The list it writes is every capability in order, then `a2a`, which lets an agent call `/a2a` and is defined in `apps/gateway/src/auth.ts` because it is not a tool.
 6. Update the delivery docs and `lib/site.ts` (the web test checks the stated limits against `crates/core`), then the plugin's `SKILL.md` and `reference.md`, bumping its version in both manifests.
 7. Follow the rules for agent-facing design in [DESIGN.md](DESIGN.md#designing-for-agents).
 
@@ -219,6 +221,7 @@ One `wrangler.jsonc` per app with `env.staging` and `env.production` (the receiv
 | `crates/*`, ledger | `cargo test`, native. The test database enforces workerd's limits (for example, `SQLITE_LIMIT_COMPOUND_SELECT = 5`). |
 | `apps/api` | `npm run test:e2e`: the built Worker in local workerd, with DO SQLite, alarms and Queues |
 | `apps/gateway` | `vitest` units; `npm run test:e2e`: gateway, API and receiver together, driven by the real `@auth/agent` SDK, the MCP bridge and scripted OAuth |
+| A2A | In the gateway e2e: the official `@a2a-js/sdk` client drives send, get, list and cancel; `examples/a2a-client.mjs` runs from nothing, restarts, and replaces an expired or revoked agent; `examples/a2a-wire.json` is sent as it is. `apps/web/test/snippets.test.ts` fails when the docs page shows a line or a number that is not in them. `e2e/a2a-staging.mjs` runs its scenarios locally in the same suite, and by hand against staging ([DEPLOY.md](../DEPLOY.md#a2a-end-to-end-run)) |
 | Journey | `e2e/journey.mjs`: one agent's whole path, run locally in CI, on staging after each deploy, and daily against production |
 | `apps/web` | `vitest`: the docs' Node and Python signature samples are executed against the `crates/egress` vector, and the stated limits are checked against `crates/core`. `npm run check` builds with OpenNext. There are no browser tests. |
 | `apps/receiver` | `vitest` |
@@ -229,6 +232,7 @@ One `wrangler.jsonc` per app with `env.staging` and `env.production` (the receiv
 - **`deploy.yml`** after CI passes on `main`, if `DEPLOY_ENABLED`: staging, then production behind the environment's required reviewer. Order within an environment: API, D1 migrations, gateway, web, receiver (staging only), health check, journey (staging only). A failed journey stops production.
 - **`monitor.yml`**: health, the main, pay and legal pages, and billing configuration every 15 minutes, the journey against production daily. A failed scheduled check opens a `Monitor: <check> is failing` issue for the repository's watchers, and the next passing run of that check closes it; the daily run also re-enables the workflow, which in practice (undocumented) resets GitHub's 60-day inactivity pause. Workers Logs are on for the API, gateway and web Workers.
 - **Numbers**: the API writes a row to Workers Analytics Engine for each attempt (project id, real or probe, lateness) and each new payment, with no URLs or contents. `scripts/stats.mjs` reports them; the data lasts about three months.
+- **A2A**: each request to `/a2a` writes one JSON line to the gateway's Workers Logs (`logged` in `src/a2a.ts`): `{"event":"a2a_request","method","outcome","status","ms","ray","host"}`. `outcome` is `"ok"`, a JSON-RPC error's code or the code of a refusal at HTTP; `ray` is Cloudflare's ray id, to find the request by; `host` is the Agent Auth host, once the token is verified. It holds no token, payload, URL, header value or error text, and an operation that fails inside AgentLater writes no other line: it is found by `outcome` `-32603` with its method and ray id. What becomes of the task is not recorded a second time for A2A: the API records every attempt of every task the same way, whichever interface made it. The attempt's lateness goes into the row under Numbers (`record_stat` in `process`, `worker_entry.rs`), and its outcome and the task's final status into the project's ledger (`attempts.outcome`, `tasks.status`), where `GetTask` reads them.
 
 ## Risks
 

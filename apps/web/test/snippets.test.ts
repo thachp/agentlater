@@ -8,8 +8,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import { ATTEMPT_PACK } from "@runlater/contracts/billing";
-import { LIMITS, RETRIES } from "../lib/site";
-import { verifyNode, verifyPython } from "../lib/snippets";
+import { A2A_LIMITS, A2A_PAYLOAD, A2A_STATES, LIMITS, RETRIES } from "../lib/site";
+import { a2aConnect, a2aRequest, a2aResponse, a2aRun, a2aSend, verifyNode, verifyPython } from "../lib/snippets";
 
 const SIG = "78034213583182231b9638987a3393e0a8a1a8ba1fa5810e5822c53d835a2eb2";
 const headers = (signature: string, ts = "1767225600") => ({
@@ -156,5 +156,60 @@ describe("stated limits", () => {
     expect(constant("HOOK_UNVERIFIED_EVENTS_PER_DAY")).toBe("100");
     expect(stated["Hooks"]).toContain("20 per project; 60 requests a minute each; 1,000 events a day (10,000 once paid)");
     expect(stated["Wake"]).toBe("At most one per 1 minute to 24 hours (default 15 minutes); off after 3 failures in a row");
+  });
+});
+
+// The A2A page shows what the gateway's e2e suite runs (apps/gateway/e2e/agent.e2e.mjs): the
+// example client and the wire sample. These tests keep what is shown the same as what is run.
+describe("A2A samples", () => {
+  const gateway = (file: string) => readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../../gateway", file), "utf8");
+  const example = gateway("examples/a2a-client.mjs").split("\n").map((line) => line.trim());
+
+  it("are lines of the example client, in its order", () => {
+    for (const snippet of [a2aRun, a2aConnect, a2aSend]) {
+      let from = 0;
+      for (const line of snippet.split("\n").map((l) => l.trim())) {
+        if (line === "" || line === "// …") continue;
+        // The commands are in the file's opening comment.
+        const at = example.findIndex((l, i) => i >= from && (l === line || l.replace(/^\/\/\s+/, "") === line));
+        expect(at, line).toBeGreaterThanOrEqual(0);
+        from = at + 1;
+      }
+    }
+  });
+
+  it("are the JSON-RPC request the e2e suite sends and the shape of answer it checks", () => {
+    const wire = JSON.parse(gateway("examples/a2a-wire.json")) as { request: unknown; response: unknown };
+    expect(JSON.parse(a2aRequest.slice(a2aRequest.indexOf("\n\n")))).toEqual(wire.request);
+    expect(a2aRequest).toContain("A2A-Version: 1.0");
+    expect(JSON.parse(a2aResponse)).toEqual(wire.response);
+  });
+});
+
+describe("stated A2A facts", () => {
+  const src = (file: string) => readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../../gateway/src", file), "utf8");
+  const a2a = src("a2a.ts");
+  const auth = src("auth.ts");
+  const stated = Object.fromEntries(A2A_LIMITS);
+
+  it("match the gateway: states, payload fields and limits", () => {
+    const states = a2a.slice(a2a.indexOf("const STATES"), a2a.indexOf("};", a2a.indexOf("const STATES")));
+    expect([...states.matchAll(/(\w+): TaskState\.(\w+),/g)].map((m) => [m[1], m[2]])).toEqual(A2A_STATES.map(([status, state]) => [status, state]));
+    expect(a2a).toContain(`const PAYLOAD_FIELDS = ${JSON.stringify(A2A_PAYLOAD.map(([field]) => field)).replaceAll(",", ", ")};`);
+
+    expect(a2a).toContain("At most 60 requests a minute are accepted from one IP address");
+    expect(stated["Requests to /a2a"]).toContain("60 a minute from one IP address");
+    expect(src("projects.ts")).toContain("export const TOOL_CALLS_PER_MINUTE = 300;");
+    expect(stated["Capability calls"]).toContain("300 a minute per host");
+    expect(auth).toContain("jwtMaxAge: 60,");
+    expect(stated["Token"]).toBe("Lives 60 seconds and is accepted once");
+    expect(auth).toContain("const WEEK_SECS = 7 * 24 * 3600;");
+    expect(auth).toContain("absoluteLifetime: WEEK_SECS,");
+    expect(stated["Agent"]).toContain("Revoked 7 days after it is registered");
+    expect(a2a).toContain("const MAX_BODY_BYTES = 192 * 1024;");
+    expect(stated["Request size"]).toBe("192 KiB");
+    expect(a2a).toContain("pageSize = 50,");
+    expect(a2a).toContain("pageSize < 1 || pageSize > 100");
+    expect(stated["ListTasks page"]).toBe("1 to 100 tasks (default 50)");
   });
 });

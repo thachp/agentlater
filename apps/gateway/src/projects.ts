@@ -1,7 +1,7 @@
 // Maps an owner to its AgentLater project: an Agent Auth host id, or `mcp:<id>` for a hosted MCP
 // connection. One project per owner, never reassigned.
 
-import { ApiClient, ApiError } from "./api";
+import { ApiClient, ApiError, type Via } from "./api";
 import { billingEnabled, paymentLink, type BillingEnv } from "./billing";
 import { ArgumentError, execute } from "./capabilities";
 
@@ -62,13 +62,17 @@ export interface CapabilityEnv extends BillingEnv {
   TOOL_RATE: RateLimit;
 }
 
-/** Runs a capability for an owner: create_project allocates its project, anything else needs one. */
+/**
+ * Runs a capability for an owner: create_project allocates its project, anything else needs one.
+ * `via` is set only by the A2A interface, for the calls it makes.
+ */
 export async function runCapability(
   env: CapabilityEnv,
   key: CryptoKey,
   owner: string,
   capability: string,
   args: Record<string, unknown>,
+  via?: Via,
 ): Promise<unknown> {
   // Budgets bound what costs attempts; this bounds the rest (reads, and calls the API refuses).
   if (!(await env.TOOL_RATE.limit({ key: owner })).success) {
@@ -89,7 +93,7 @@ export async function runCapability(
     return paymentLink(env, owner, projectId);
   }
   try {
-    const result = await execute(new ApiClient(env.API, key, projectId), capability, args);
+    const result = await execute(new ApiClient(env.API, key, projectId, via), capability, args);
     if (capability === "create_hook") {
       // The API knows only the path; the URL is shown this once and never stored.
       const { url_path, ...hook } = result as { url_path?: unknown } & Record<string, unknown>;

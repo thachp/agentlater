@@ -7,6 +7,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker";
 import { ApiError } from "./api";
+import { MAX_BODY_BYTES } from "./body";
 import { ArgumentError, capabilities, capabilityNames } from "./capabilities";
 import { runCapability, type CapabilityEnv } from "./projects";
 
@@ -28,9 +29,6 @@ const INSTRUCTIONS =
   "(GitHub, Stripe, CI), register a create_hook URL with it instead of polling; requests arrive in the inbox. Never paste a credential into a request: store it " +
   "with set_secret (bound to the hosts it is for) and use {{secret:NAME}} in a header. Check a single task with get_task. " +
   "When the project runs out of attempts, get_payment_link gives your user a link to buy more.";
-
-/** A schedule_http body can be 64 KiB of string; leave room for JSON-RPC and escaping. */
-const MAX_BODY_BYTES = 192 * 1024;
 
 const tools = capabilities.map((c) => ({ name: c.name, description: c.description, inputSchema: c.input }));
 

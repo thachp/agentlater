@@ -7,6 +7,7 @@ const PAGES = [
   ["/docs", "Quickstart"],
   ["/docs/capabilities", "Capabilities"],
   ["/docs/delivery", "Delivery & signatures"],
+  ["/docs/a2a", "A2A"],
 ] as const;
 
 export function DocsNav() {

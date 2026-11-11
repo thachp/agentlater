@@ -190,6 +190,7 @@ impl<D: Db> Ledger<'_, D> {
                     ..Reporting::default()
                 },
                 action_reserve,
+                a2a: false,
             },
             now,
         )?;
@@ -436,7 +437,7 @@ mod tests {
         l.watch(watching(serde_json::json!({})), "w1", T0).unwrap();
         poll(&l, "w1", http(200), Some(r#"{"status":"running"}"#), T0);
         let listed = l
-            .list(None, None, None, None)
+            .list(ListQuery::default())
             .unwrap()
             .tasks
             .remove(0)

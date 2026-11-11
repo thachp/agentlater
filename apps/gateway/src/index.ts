@@ -1,23 +1,26 @@
 // Public entry for agents. Serves Agent Auth discovery and the agent endpoints, the hosted MCP
 // server at /mcp behind OAuth, Stripe's payment webhook and MPP purchases, and turns capability executions into signed calls on the
-// private Rust API (API binding). Also serves inbound hooks (/h/…), on the hooks host.
+// private Rust API (API binding). Also serves inbound hooks (/h/…), on the hooks host, and, where
+// A2A_ENABLED is on, the A2A Agent Card and /a2a.
 
 import { OAuthProvider, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
+import { a2aEnabled, serveA2a, type A2aEnv } from "./a2a";
 import { importSigningKey } from "./api";
-import { BASE_PATH, createAuth, type AuthEnv } from "./auth";
+import { BASE_PATH, createAuth, malformedCredential, replayed, type AuthEnv } from "./auth";
 import { handleStripeWebhook, type BillingEnv } from "./billing";
 import { llmsTxt, openApi } from "./discovery";
-import { readLimited } from "./body";
+import { error, json, MAX_BODY_BYTES, readLimited, tooLarge } from "./body";
 import { handleAuthorize } from "./consent";
 import { handleHook, isHookPath, type HooksEnv } from "./hooks";
 import { envForHost, isHooksOnlyHost, type HostEnv } from "./hosts";
 import { handleMcp, type McpProps } from "./mcp";
 import { handleMpp } from "./mpp";
+import { runCapability } from "./projects";
 import { d1SweepStore, resealOver, sweep } from "./rotation";
 
 export { AuthStore } from "./store";
 
-export interface Env extends AuthEnv, BillingEnv, HooksEnv, HostEnv {
+export interface Env extends A2aEnv, AuthEnv, BillingEnv, HooksEnv, HostEnv {
   /** How many new trials may start in 24 hours across the service. Unset means no cap. */
   NEW_TRIALS_PER_DAY?: string;
   /** Hex-encoded 32-byte Ed25519 seed; its public key is the API's GATEWAY_PUBLIC_KEY. */
@@ -51,33 +54,6 @@ const AGENT_ROUTES = new Set([
   "/host/rotate-key",
 ]);
 
-/** A schedule_http body can be 64 KiB of string; leave room for JSON escaping. */
-const MAX_BODY_BYTES = 192 * 1024;
-/** Plugin JWTs live 60 s plus 30 s clock skew; replay claims must outlast them. */
-const JTI_TTL_SECS = 90;
-
-const json = (body: unknown, status = 200) =>
-  Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
-const error = (status: number, code: string, message: string) => json({ error: code, message }, status);
-
-/**
- * The replay key for a bearer JWT, read without verifying it. Better Auth verifies the
- * token afterwards; this only lets the gateway reject a second use atomically, which the
- * plugin's own separate check-then-store cannot do under concurrency.
- */
-function replayKey(request: Request): string | null {
-  const token = request.headers.get("Authorization")?.match(/^Bearer\s+(\S+)$/i)?.[1];
-  const payload = token?.split(".")[1];
-  if (!payload) return null;
-  try {
-    const claims = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/"))) as Record<string, unknown>;
-    if (typeof claims.jti !== "string" || claims.jti.length === 0 || claims.jti.length > 128) return null;
-    return `replay:${String(claims.iss ?? "")}:${String(claims.sub ?? "")}:${claims.jti}`;
-  } catch {
-    return null;
-  }
-}
-
 let keyCache: { seed: string; key: Promise<CryptoKey> } | undefined;
 function signingKey(env: Env): Promise<CryptoKey> {
   if (keyCache?.seed !== env.ASSERTION_PRIVATE_KEY) {
@@ -108,10 +84,19 @@ const gateway = {
       return Response.json(openApi(env), { headers: { "Cache-Control": "public, max-age=300", "Access-Control-Allow-Origin": "*" } });
     }
     if (request.method === "GET" && url.pathname === "/llms.txt") {
-      return new Response(llmsTxt(env), {
+      return new Response(llmsTxt(env, a2aEnabled(env)), {
         headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "public, max-age=300", "Access-Control-Allow-Origin": "*" },
       });
     }
+
+    const a2a = serveA2a(
+      request,
+      env,
+      async (r) => createAuth(env, ctx, await signingKey(env)).a2aCaller(r),
+      // The only place a call is marked as made through A2A.
+      async (hostId, capability, args) => runCapability(env, await signingKey(env), hostId, capability, args, "a2a"),
+    );
+    if (a2a) return a2a;
 
     if (request.method === "GET" && url.pathname === "/health") {
       const api = await env.API.fetch("https://api.internal/health");
@@ -124,8 +109,10 @@ const gateway = {
     const isDiscovery = url.pathname === "/.well-known/agent-configuration";
     const route = url.pathname.startsWith(BASE_PATH + "/") ? url.pathname.slice(BASE_PATH.length) : null;
     if (!isDiscovery && !(route && AGENT_ROUTES.has(route))) return error(404, "not_found", "no such route");
+    // Every route below that the Agent Auth plugin answers takes a host's or an agent's JWT, or no credential.
+    const malformed = isDiscovery ? null : malformedCredential(request.headers);
+    if (malformed) return error(401, "invalid_jwt", malformed);
 
-    const tooLarge = () => error(413, "too_large", "request body is too large");
     if (Number(request.headers.get("Content-Length") ?? 0) > MAX_BODY_BYTES) return tooLarge();
     const body = await readLimited(request, MAX_BODY_BYTES);
     if (body === null) return tooLarge();
@@ -155,13 +142,9 @@ const gateway = {
       return json(config);
     }
 
-    const replay = replayKey(request);
-    if (replay) {
-      const store = env.AUTH_STORE.get(env.AUTH_STORE.idFromName("auth-store"));
-      if (!(await store.claim(replay, JTI_TTL_SECS))) {
-        return error(401, "invalid_jwt", "this token has already been used");
-      }
-    }
+    // Before Better Auth verifies the token, so that of two copies sent at once only one gets that far.
+    const used = await replayed(env, request);
+    if (used) return error(401, "invalid_jwt", used);
     const buffered = new Request(request.url, {
       method: request.method,
       headers: request.headers,
