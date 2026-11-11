@@ -66,7 +66,8 @@ const { agentId } = await client.connectAgent({
 const run = (capability, args = {}) =>
   client.executeCapability({ agentId, capability, arguments: args }).then((r) => r.data);
 
-// 2. Create the project once. Keep signing_secret for the destination.
+// 2. Create the project once. Keep signing_secret for the destination:
+//    only create_project returns it (calling again returns the same one).
 const project = await run("create_project");
 
 // 3. Schedule a request for tomorrow.

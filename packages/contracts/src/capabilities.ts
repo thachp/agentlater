@@ -143,14 +143,15 @@ export const capabilities: CapabilityDefinition[] = [
     description:
       "Create this agent's AgentLater project with a free trial (1,000 delivery attempts, 7 days). " +
       "Call once before scheduling; calling again returns the same project and never resets the trial. " +
-      "The returned signing_secret lets the destination verify RunLater-Signature on each delivery.",
+      "The returned signing_secret lets the destination verify RunLater-Signature on each delivery. " +
+      "Only this call returns it: call again when the destination needs it, not get_project.",
     input: noArgs,
   },
   {
     name: "get_project",
     api: { method: "GET", path: "/v1/projects/self", scope: "read" },
     description:
-      "Show this agent's project: trial expiry, delivery attempts used and remaining, the signing secret, inbox_unread " +
+      "Show this agent's project: trial expiry, delivery attempts used and remaining, inbox_unread " +
       "(inbox events waiting for read_inbox), and wake (see set_wake). Calling it at the start of a session tells you whether anything finished while you were away.",
     input: noArgs,
   },
