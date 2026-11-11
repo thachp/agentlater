@@ -75,8 +75,7 @@
         "ALT_PUBLIC_URL": "https://gateway.runlater.io",
         "ALT_HOOKS_URL": "https://hooks.runlater.io",
         "NEW_TRIALS_PER_DAY": "100",
-        // Anything but "true": the Agent Card, the payload schema and /a2a answer 404 here.
-        "A2A_ENABLED": "false"
+        "A2A_ENABLED": "true"
       },
       "routes": [
         { "pattern": "gateway.runlater.io", "custom_domain": true },

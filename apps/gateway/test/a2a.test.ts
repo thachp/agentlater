@@ -369,7 +369,7 @@ describe("with A2A_ENABLED off", () => {
 });
 
 describe("A2A_ENABLED in wrangler.jsonc", () => {
-  it("is on in staging and off in production", async () => {
+  it("is on in staging and in production", async () => {
     const { readFileSync } = await import("node:fs");
     const { dirname, join } = await import("node:path");
     const { fileURLToPath } = await import("node:url");
@@ -377,6 +377,6 @@ describe("A2A_ENABLED in wrangler.jsonc", () => {
     const [beforeProduction, production] = config.split('"production": {') as [string, string];
     const staging = beforeProduction.split('"staging": {')[1];
     expect(staging).toContain('"A2A_ENABLED": "true"');
-    expect(production).not.toContain('"A2A_ENABLED": "true"');
+    expect(production).toContain('"A2A_ENABLED": "true"');
   });
 });
