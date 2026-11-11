@@ -6,9 +6,12 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
-import { hostCapabilityNames } from "../src/auth";
+import { authOptions } from "../src/auth";
 
 const DIR = join(dirname(fileURLToPath(import.meta.url)), "../migrations");
+/** What the Agent Auth plugin is told to give a new host. */
+const [agentAuth] = authOptions({ baseURL: "https://gateway.test", database: undefined, secret: "not-a-real-secret" }).plugins!;
+const hostCapabilityNames = (agentAuth as unknown as { options: { defaultHostCapabilities: string[] } }).options.defaultHostCapabilities;
 
 it("the newest host-capabilities migration grants every capability", () => {
   const lists = readdirSync(DIR)

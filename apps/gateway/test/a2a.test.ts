@@ -164,6 +164,7 @@ describe("/a2a through the gateway", () => {
     const res = await get("https://gateway.test/a2a");
     expect(res.status).toBe(405);
     expect(res.headers.get("Allow")).toBe("POST");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
   });
 });
 
@@ -247,6 +248,7 @@ describe("/a2a for a verified caller", () => {
   it("refuses a body over the gateway's limit", async () => {
     const res = await handleA2a(post(AUTH, rpc("SendMessage", { pad: "x".repeat(200 * 1024) })), on, accept, nothing);
     expect(res.status).toBe(413);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
   });
 
   it("asks the verifier only about requests that carry a credential and speak 1.0", async () => {

@@ -4,7 +4,7 @@
 import { agentAuth, agentError, type Capability } from "@better-auth/agent-auth";
 import { betterAuth, type BetterAuthOptions, type BetterAuthPlugin } from "better-auth";
 import { createAuthMiddleware } from "better-auth/api";
-import { a2aUrl, Caller, type Refusal } from "./a2a";
+import { A2A_CAPABILITY, a2aUrl, Caller, notGranted, type Refusal } from "./a2a";
 import { ApiError } from "./api";
 import { ArgumentError, capabilities, capabilityNames } from "./capabilities";
 import { runCapability, type CapabilityEnv } from "./projects";
@@ -16,10 +16,8 @@ const WEEK_SECS = 7 * 24 * 3600;
 /** Plugin JWTs live 60 s plus 30 s clock skew; replay claims must outlast them. */
 const JTI_TTL_SECS = 90;
 
-/** The capability that lets an agent call the A2A interface. Not a tool: its location is /a2a, and nothing executes it. */
-const A2A_CAPABILITY = "a2a";
 /** What a host may grant its agents: every tool, and a2a. */
-export const hostCapabilityNames = [...capabilityNames, A2A_CAPABILITY];
+const hostCapabilityNames = [...capabilityNames, A2A_CAPABILITY];
 
 export interface AuthEnv extends CapabilityEnv {
   AUTH_STORE: DurableObjectNamespace<AuthStore>;
@@ -289,9 +287,7 @@ export function createAuth(env: AuthEnv, ctx: ExecutionContext, signingKey: Cryp
     if (used) return invalid(used);
     if (!hostActive({ host })) return { status: 403, ...HOST_REVOKED };
     // The session lists the agent's grants among those the token names, so this is both.
-    if (!agent.capabilityGrants.some((g) => g.capability === A2A_CAPABILITY && g.status === "active")) {
-      return { status: 403, code: "capability_not_granted", message: "this agent does not hold the a2a capability; request it, or register an agent with it" };
-    }
+    if (!agent.capabilityGrants.some((g) => g.capability === A2A_CAPABILITY && g.status === "active")) return notGranted(A2A_CAPABILITY);
     return new Caller(agent.hostId, await grantsOf(env.DB, agent.id));
   }
 

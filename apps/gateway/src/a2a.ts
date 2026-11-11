@@ -20,7 +20,7 @@ import {
 } from "@a2a-js/sdk/errors";
 import { JsonRpcTransportHandler, ServerCallContext, validateVersion, type A2ARequestHandler, type User } from "@a2a-js/sdk/server";
 import { ApiError } from "./api";
-import { readLimited } from "./body";
+import { error, json, readLimited, tooLarge } from "./body";
 import { ArgumentError, capabilities } from "./capabilities";
 import { SITE } from "./discovery";
 
@@ -31,6 +31,9 @@ export interface A2aEnv {
 }
 
 export const a2aEnabled = (env: A2aEnv) => env.A2A_ENABLED === "true";
+
+/** The capability that lets an agent call the A2A interface. Not a tool: its location is /a2a, and nothing executes it. */
+export const A2A_CAPABILITY = "a2a";
 
 /** The JSON-RPC endpoint's URL on the host that was asked: also the audience a caller signs its token for. */
 export const a2aUrl = (env: { PUBLIC_URL: string }) => `${env.PUBLIC_URL}/a2a`;
@@ -115,7 +118,7 @@ function card(env: A2aEnv): AgentCard {
           params: {
             discovery: discoveryUrl(env),
             audience: endpoint,
-            capability: "a2a",
+            capability: A2A_CAPABILITY,
             operations: Object.fromEntries(Object.entries(RUNS).map(([operation, runs]) => [operation, typeof runs === "string" ? [runs] : Object.values(runs)])),
           },
         },
@@ -127,7 +130,7 @@ function card(env: A2aEnv): AgentCard {
           scheme: "Bearer",
           bearerFormat: "JWT",
           description:
-            "An Agent Auth agent JWT (typ agent+jwt, Ed25519) whose aud is this interface's URL and whose capabilities are [\"a2a\"]. " +
+            `An Agent Auth agent JWT (typ agent+jwt, Ed25519) whose aud is this interface's URL and whose capabilities are ["${A2A_CAPABILITY}"]. ` +
             `The agent must also hold the capability each operation runs: ${RUNS_IN_WORDS}. ` +
             "A token lives at most 60 seconds and is accepted once, so sign a new one for every request. " +
             "At most 60 requests a minute are accepted from one IP address; past that the answer is HTTP 429 with Retry-After.",
@@ -181,15 +184,22 @@ export interface Refusal {
   retryAfter?: string;
 }
 
+/** The refusal of an agent that does not hold a capability it needs: a2a itself, or the one an operation runs. */
+export const notGranted = (capability: string): Refusal => ({
+  status: 403,
+  code: "capability_not_granted",
+  message: `this agent does not hold the ${capability} capability; request it, or register an agent with it`,
+});
+
 /** Says who a request's bearer credential belongs to, or why it is refused. */
 type Verify = (request: Request) => Promise<Caller | Refusal>;
 
 /** A refusal as HTTP. A 401 carries the Agent Auth challenge (its specification, 5.14), so a caller can find where to register. */
 function refuse(env: A2aEnv, { status, code, message, retryAfter }: Refusal): Response {
-  const headers = new Headers({ "Cache-Control": "no-store" });
-  if (status === 401) headers.set("WWW-Authenticate", `AgentAuth discovery="${discoveryUrl(env)}"`);
-  if (retryAfter) headers.set("Retry-After", retryAfter);
-  return Response.json({ error: code, message }, { status, headers });
+  return error(status, code, message, {
+    ...(status === 401 ? { "WWW-Authenticate": `AgentAuth discovery="${discoveryUrl(env)}"` } : {}),
+    ...(retryAfter ? { "Retry-After": retryAfter } : {}),
+  });
 }
 
 const unsupported = (what: string) => () => {
@@ -286,17 +296,14 @@ async function keyFor(messageId: string): Promise<string> {
 }
 
 /**
- * What each A2A operation does for one caller. An operation that uses a capability the agent
- * does not hold runs nothing and leaves the refusal in `refused`, for an HTTP answer.
+ * What each A2A operation does for one caller. An operation that uses a capability the agent does
+ * not hold runs nothing and stops at `refused`, which takes the refusal and does not return: the
+ * answer to it is HTTP's, not JSON-RPC's.
  */
-function operationsFor(env: A2aEnv, caller: Caller, run: Run) {
-  let refused: Refusal | undefined;
-
+function operationsFor(env: A2aEnv, caller: Caller, run: Run, refused: (refusal: Refusal) => never): A2ARequestHandler {
   /** Stops an operation that uses a capability the agent does not hold. */
   function allow(capability: string): void {
-    if (caller.grants.has(capability)) return;
-    refused = { status: 403, code: "capability_not_granted", message: `this agent does not hold the ${capability} capability; request it, or register an agent with it` };
-    throw new Error(refused.message);
+    if (!caller.grants.has(capability)) refused(notGranted(capability));
   }
 
   /**
@@ -374,7 +381,7 @@ function operationsFor(env: A2aEnv, caller: Caller, run: Run) {
     return { tasks: page.tasks.map((task) => a2aTask(task, { artifacts: includeArtifacts ?? false })), nextPageToken: page.next_cursor ?? "", pageSize, totalSize: page.total };
   }
 
-  const operations: A2ARequestHandler = {
+  return {
     // Part of the SDK's interface, but its JSON-RPC handler never asks; serveA2a serves the card.
     getAgentCard: unsupported("this operation"),
     getAuthenticatedExtendedAgentCard: unsupported("the extended Agent Card"),
@@ -393,7 +400,6 @@ function operationsFor(env: A2aEnv, caller: Caller, run: Run) {
     listTaskPushNotificationConfigs: noPush,
     deleteTaskPushNotificationConfig: noPush,
   };
-  return { operations, refused: () => refused };
 }
 
 // ---- The HTTP transport
@@ -405,18 +411,15 @@ const MAX_BODY_BYTES = 192 * 1024;
 const isRpcRequest = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value) && "jsonrpc" in value && value.jsonrpc === "2.0" && "method" in value && typeof value.method === "string";
 
-/** A JSON-RPC answer. Protocol errors travel in the body, so the HTTP status is 200. */
-const rpcResponse = (body: unknown) => Response.json(body, { headers: { "Cache-Control": "no-store" } });
-const rpcError = (error: unknown) => rpcResponse({ jsonrpc: "2.0", id: null, error });
+/** A JSON-RPC error. Protocol errors travel in the body, so the HTTP status is 200. */
+const rpcError = (problem: unknown) => json({ jsonrpc: "2.0", id: null, error: problem });
 
 /**
  * Answers a request to /a2a: the protocol version first (a header, so nothing is read for a caller
  * that speaks another version), then credentials, refused with HTTP 401 or 403, and only then JSON-RPC.
  */
 async function handleA2a(request: Request, env: A2aEnv, verify: Verify, run: Run): Promise<Response> {
-  if (request.method !== "POST") {
-    return Response.json({ error: "method_not_allowed", message: "POST a JSON-RPC request" }, { status: 405, headers: { Allow: "POST" } });
-  }
+  if (request.method !== "POST") return error(405, "method_not_allowed", "POST a JSON-RPC request", { Allow: "POST" });
 
   // No version means 0.3 (specification 3.6), which the card does not offer.
   const requestedVersion = request.headers.get(A2A_VERSION_HEADER) ?? new URL(request.url).searchParams.get(A2A_VERSION_HEADER) ?? undefined;
@@ -433,7 +436,7 @@ async function handleA2a(request: Request, env: A2aEnv, verify: Verify, run: Run
   if (!(caller instanceof Caller)) return refuse(env, caller);
 
   const body = await readLimited(request, MAX_BODY_BYTES);
-  if (body === null) return Response.json({ error: "too_large", message: "request body is too large" }, { status: 413 });
+  if (body === null) return tooLarge();
   let rpc: unknown;
   try {
     rpc = JSON.parse(new TextDecoder().decode(body));
@@ -442,20 +445,25 @@ async function handleA2a(request: Request, env: A2aEnv, verify: Verify, run: Run
   }
   // The SDK's handler answers both of these with -32602; the specification (9.5) gives each its own code.
   if (!isRpcRequest(rpc)) return rpcError({ code: A2A_ERROR_CODE.INVALID_REQUEST, message: "Request payload validation error" });
-  const { operations, refused } = operationsFor(env, caller, run);
+  // The SDK's dispatcher answers whatever an operation throws as a JSON-RPC error. A refusal is
+  // HTTP's to answer, so an operation hands it over here before it stops.
+  let refusal: Refusal | undefined;
+  const operations = operationsFor(env, caller, run, (refused) => {
+    refusal = refused;
+    throw new Error(refused.message);
+  });
   // The SDK's dispatcher: method names, parameter and result codecs, and error codes. Always one
   // answer, never a stream: both streaming methods throw before a stream exists.
   const answer = (await new JsonRpcTransportHandler(operations).handle(rpc, new ServerCallContext({ requestedVersion, user: caller }))) as {
     error?: { code: number; message: string };
   };
-  const refusal = refused();
   if (refusal) return refuse(env, refusal);
   if (answer.error?.code === A2A_ERROR_CODE.INTERNAL_ERROR) {
     // The SDK passes on the message of whatever was thrown, which may describe AgentLater's insides.
     console.error("a2a operation failed", rpc.method, answer.error.message);
     answer.error.message = "AgentLater could not complete this request; try again";
   }
-  return rpcResponse(answer);
+  return json(answer);
 }
 
 /** What the card and the schema are served with: both are public, and a browser may read them. */

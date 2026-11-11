@@ -9,7 +9,7 @@ import { importSigningKey } from "./api";
 import { BASE_PATH, createAuth, malformedCredential, replayed, type AuthEnv } from "./auth";
 import { handleStripeWebhook, type BillingEnv } from "./billing";
 import { llmsTxt, openApi } from "./discovery";
-import { readLimited } from "./body";
+import { error, json, MAX_BODY_BYTES, readLimited, tooLarge } from "./body";
 import { handleAuthorize } from "./consent";
 import { handleHook, isHookPath, type HooksEnv } from "./hooks";
 import { envForHost, isHooksOnlyHost, type HostEnv } from "./hosts";
@@ -53,13 +53,6 @@ const AGENT_ROUTES = new Set([
   "/host/revoke",
   "/host/rotate-key",
 ]);
-
-/** A schedule_http body can be 64 KiB of string; leave room for JSON escaping. */
-const MAX_BODY_BYTES = 192 * 1024;
-
-const json = (body: unknown, status = 200) =>
-  Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
-const error = (status: number, code: string, message: string) => json({ error: code, message }, status);
 
 let keyCache: { seed: string; key: Promise<CryptoKey> } | undefined;
 function signingKey(env: Env): Promise<CryptoKey> {
@@ -120,7 +113,6 @@ const gateway = {
     const malformed = isDiscovery ? null : malformedCredential(request.headers);
     if (malformed) return error(401, "invalid_jwt", malformed);
 
-    const tooLarge = () => error(413, "too_large", "request body is too large");
     if (Number(request.headers.get("Content-Length") ?? 0) > MAX_BODY_BYTES) return tooLarge();
     const body = await readLimited(request, MAX_BODY_BYTES);
     if (body === null) return tooLarge();
