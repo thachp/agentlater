@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import { ATTEMPT_PACK } from "@runlater/contracts/billing";
-import { LIMITS } from "../lib/site";
+import { LIMITS, RETRIES } from "../lib/site";
 import { verifyNode, verifyPython } from "../lib/snippets";
 
 const SIG = "78034213583182231b9638987a3393e0a8a1a8ba1fa5810e5822c53d835a2eb2";
@@ -128,6 +128,10 @@ describe("stated limits", () => {
       `${ATTEMPT_PACK.attempts.toLocaleString("en-US")} for $${ATTEMPT_PACK.priceCents / 100}, valid 12 months; leftovers carry over`,
     );
     expect(constant("RETENTION_MS")).toBe("30 * DAY_MS");
+    expect(limitsRs.replace(/\s+/g, " ")).toContain(
+      "pub const RETRY_DELAYS_MS: [i64; 4] = [ 10 * SECOND_MS, 2 * MINUTE_MS, 20 * MINUTE_MS, 40 * MINUTE_MS, ];",
+    );
+    expect(RETRIES.map(([, wait]) => wait)).toEqual(["5–10 s", "1–2 min", "10–20 min", "20–40 min"]);
     expect(constant("MAX_SCHEDULE_AHEAD_MS")).toBe("7 * DAY_MS");
     expect(constant("CAPTURE_BODY_BYTES")).toBe("16 * 1024");
     expect(constant("CAPTURE_RETENTION_MS")).toBe("7 * DAY_MS");

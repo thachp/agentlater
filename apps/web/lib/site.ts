@@ -9,6 +9,14 @@ export const OPERATOR = "OM.Network, LLC";
 export const CONTACT_EMAIL = "support@agentlater.io";
 export const LEGAL_UPDATED = "November 6, 2026";
 
+/** The wait before each retry: half to all of each delay in RETRY_DELAYS_MS (crates/core/src/limits.rs). */
+export const RETRIES: [string, string][] = [
+  ["after attempt 1", "5–10 s"],
+  ["after attempt 2", "1–2 min"],
+  ["after attempt 3", "10–20 min"],
+  ["after attempt 4", "20–40 min"],
+];
+
 export const LIMITS: [string, string][] = [
   ["Free trial", "1,000 delivery attempts over 7 days, per project"],
   ["More attempts", "50,000 for $5, valid 12 months; leftovers carry over"],
