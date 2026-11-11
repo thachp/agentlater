@@ -611,6 +611,25 @@ describe("an agent without the grant for the capability an operation uses", () =
     }
   });
 
+  it("was told so by the Agent Card, which names for each operation the capabilities it is refused without", async () => {
+    const card = (await (await worker.fetch(new Request(`${ORIGIN}/.well-known/agent-card.json`), on, ctx)).json()) as Json;
+    const { capability, operations } = card.capabilities.extensions[0].params;
+    expect(capability).toBe("a2a");
+    expect(Object.keys(operations)).toEqual(["SendMessage", "GetTask", "ListTasks", "CancelTask"]);
+    // Every capability the card names for an operation is one that operation is refused without, and none is left out.
+    const refusedWithout = new Map<string, Set<string>>();
+    for (const [named, method, params] of cases) {
+      // A message for a task reads the task first; the card speaks of sending a request.
+      if (method === "SendMessage" && (params as Json).message.taskId) continue;
+      refusedWithout.set(method, (refusedWithout.get(method) ?? new Set()).add(named));
+    }
+    for (const [method, named] of Object.entries(operations)) expect(new Set(named as string[]), method).toEqual(refusedWithout.get(method));
+    expect([capability, ...Object.values(operations).flat()].sort()).toEqual([...ALL].sort());
+    // The security scheme says the same in words.
+    const { description } = card.securitySchemes.agentAuth.httpAuthSecurityScheme;
+    for (const [method, named] of Object.entries(operations)) for (const name of named as string[]) expect(description).toMatch(new RegExp(`${method}[^;.]*\\b${name}\\b`));
+  });
+
   it("is refused the same whether or not the task exists", async () => {
     const { send } = adapter(["a2a"], refuses(404, "task_not_found", "no such task in this project"));
     expect((await send("GetTask", { id: "task_ffffffffffffffffffff" })).status).toBe(403);

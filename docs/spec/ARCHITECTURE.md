@@ -63,7 +63,7 @@ flowchart LR
 | --- | --- | --- |
 | `/mcp` | Hosted MCP: Streamable HTTP, stateless, POST only. Tools are the capabilities. | OAuth 2.1 bearer token (`@cloudflare/workers-oauth-provider`) |
 | `/authorize`, `/oauth/*` | Dynamic client registration, PKCE, the one-click consent page | `/authorize` and `/oauth/register` are rate limited per IP; `/oauth/token` isn't |
-| `/.well-known/agent-configuration`, Agent Auth routes under its base path | Discovery, registration, capability execution | Agent Auth JWTs, single-use `jti` |
+| `/.well-known/agent-configuration`, Agent Auth routes under its base path | Discovery, registration, capability execution | Agent Auth JWTs, single-use `jti`. On these routes and on `/a2a`, an `Authorization` header that is not exactly `Bearer`, one space and a compact JWT is refused with 401 before the plugin sees it (`malformedCredential` in `src/auth.ts`), so the gateway and the plugin read the same token |
 | `/h/{project}/{token}` | Inbound hooks. The only thing the hooks host serves. | The token, checked in the ledger |
 | `/billing/webhook` | Stripe events | `Stripe-Signature` |
 | `/billing/mpp/{link}` | An agent buying a pack | HMAC in the link, then the payment challenge |

@@ -42,31 +42,56 @@ interface AgentSession {
 const hostActive = (session: Pick<AgentSession, "host">) => session.host?.status === "active";
 const HOST_REVOKED = { code: "host_revoked", message: "this agent's host is not active" };
 
-/** The claims of a request's bearer JWT, read without verifying it. Only for a token the plugin verifies or has verified. */
+/** `Bearer`, one space and a compact JWT: three base64url segments with dots between, and nothing else. */
+const BEARER_JWT = /^Bearer ([\w-]+\.[\w-]+\.[\w-]+)$/i;
+
+/**
+ * Why a request's Authorization header, if it has one, is not taken on the Agent Auth routes or
+ * on /a2a: it is not exactly a bearer JWT. Asked before the plugin sees the request, so that the
+ * gateway and the plugin always read the same token. The plugin takes all that follows `Bearer`
+ * and whitespace, and its JWT library skips whitespace inside a signature, so it would verify a
+ * token written with a space in it that a stricter reader here could not read at all.
+ */
+export const malformedCredential = (headers: Headers) =>
+  !headers.has("Authorization") || BEARER_JWT.test(headers.get("Authorization")!) ? null : "the Authorization header must be Bearer, one space and a compact JWT";
+
+/**
+ * The claims of a request's bearer JWT, read without verifying it; null when they cannot be read.
+ * Only for a token the plugin verifies or has verified, and whoever decides by them refuses on null.
+ */
 function bearerClaims(headers: Headers): Record<string, unknown> | null {
-  const token = headers.get("Authorization")?.match(/^Bearer\s+(\S+)$/i)?.[1];
-  const payload = token?.split(".")[1];
+  const payload = BEARER_JWT.exec(headers.get("Authorization") ?? "")?.[1]!.split(".")[1];
   if (!payload) return null;
   try {
     const claims: unknown = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
-    return typeof claims === "object" && claims !== null ? (claims as Record<string, unknown>) : null;
+    return typeof claims === "object" && claims !== null && !Array.isArray(claims) ? (claims as Record<string, unknown>) : null;
   } catch {
     return null;
   }
 }
 
 const authStore = (env: AuthEnv) => env.AUTH_STORE.get(env.AUTH_STORE.idFromName("auth-store"));
+/** What a replay claim can hold of a token as it is; anything longer is claimed by its digest. */
+const MAX_JTI = 128;
+const MAX_CLAIMED = 512;
 
 /**
- * Whether this is the first time a request's bearer JWT is presented, on any route. The plugin
- * has a replay check of its own, but a separate check-then-store that two copies of a request
- * sent at once both pass; the claim here is atomic. A token without a jti passes: the plugin
- * refuses it.
+ * Why a request's bearer JWT is not taken: it has been presented before, on any route, or it has
+ * no jti to tell that by. Null for a first use, and for a request with no token. The plugin has a
+ * replay check of its own, but a separate check-then-store that two copies of a request sent at
+ * once both pass; the claim here is atomic. The plugin takes any jti that is not empty, of any
+ * type; here it must be a string.
  */
-export async function firstUse(env: AuthEnv, request: Request): Promise<boolean> {
+export async function replayed(env: AuthEnv, request: Request): Promise<string | null> {
+  if (!request.headers.has("Authorization")) return null;
   const claims = bearerClaims(request.headers);
-  if (typeof claims?.jti !== "string" || claims.jti.length === 0 || claims.jti.length > 128) return true;
-  return authStore(env).claim(`replay:${String(claims.iss ?? "")}:${String(claims.sub ?? "")}:${claims.jti}`, JTI_TTL_SECS);
+  if (typeof claims?.jti !== "string" || claims.jti === "") return "this token has no jti";
+  let token = `${String(claims.iss ?? "")}:${String(claims.sub ?? "")}:${claims.jti}`;
+  if (claims.jti.length > MAX_JTI || token.length > MAX_CLAIMED) {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+    token = `sha256:${[...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+  }
+  return (await authStore(env).claim(`replay:${token}`, JTI_TTL_SECS)) ? null : "this token has already been used";
 }
 
 /**
@@ -74,8 +99,8 @@ export async function firstUse(env: AuthEnv, request: Request): Promise<boolean>
  * the a2a capability's location is an audience it allows everywhere, and its execute route then
  * runs any capability the host may grant, whatever the token names. So this hook, which runs after
  * the plugin's and acts only on a token the plugin has verified, refuses one whose audience is, or
- * includes, /a2a. It never runs on /agent/session, which is how /a2a itself asks: there the
- * plugin's hook answers.
+ * includes, /a2a, and one whose audience it cannot read. It never runs on /agent/session, which is
+ * how /a2a itself asks: there the plugin's hook answers.
  */
 const a2aTokensStayOnA2a = (audience: string): BetterAuthPlugin => ({
   id: "a2a-audience",
@@ -85,8 +110,11 @@ const a2aTokensStayOnA2a = (audience: string): BetterAuthPlugin => ({
         matcher: () => true,
         handler: createAuthMiddleware(async (ctx) => {
           const verified = ctx.context as { agentSession?: unknown; hostSession?: unknown };
-          if (!ctx.headers || (!verified.agentSession && !verified.hostSession)) return;
-          if ([bearerClaims(ctx.headers)?.aud].flat().includes(audience)) {
+          if (!verified.agentSession && !verified.hostSession) return;
+          // The gateway takes only a header these claims can be read from, so null here means that gate is gone.
+          const claims = ctx.headers ? bearerClaims(ctx.headers) : null;
+          if (!claims) throw agentError(401 as never, { code: "invalid_jwt", message: "this token cannot be read" });
+          if ([claims.aud].flat().includes(audience)) {
             throw agentError(401 as never, { code: "invalid_jwt", message: "a token signed for /a2a is accepted only there" });
           }
         }),
@@ -111,8 +139,9 @@ export function authOptions(input: {
   const a2a: Capability = {
     name: A2A_CAPABILITY,
     description:
-      "Call AgentLater's A2A interface (see /.well-known/agent-card.json). Not executed like the other capabilities: sign an agent JWT " +
-      "whose aud is this capability's location and whose capabilities are [\"a2a\"], and send it as the bearer token of each A2A request.",
+      "Lets an agent call AgentLater's A2A interface, where that interface is switched on: /.well-known/agent-card.json then serves " +
+      "its Agent Card, and answers 404 where it is off. Not executed like the other capabilities: sign an agent JWT whose aud is this " +
+      "capability's location and whose capabilities are [\"a2a\"], and send it as the bearer token of each A2A request.",
     location: a2aAudience,
     input: { type: "object", additionalProperties: false, properties: {} },
   };
@@ -230,6 +259,8 @@ export function createAuth(env: AuthEnv, ctx: ExecutionContext, signingKey: Cryp
    */
   async function a2aCaller(request: Request): Promise<Caller | Refusal> {
     const invalid = (message: string): Refusal => ({ status: 401, code: "invalid_jwt", message });
+    const malformed = malformedCredential(request.headers);
+    if (malformed) return invalid(malformed);
     const headers = new Headers({ Authorization: request.headers.get("Authorization") ?? "" });
     // Better Auth's rate limit is per address, which it reads from this header.
     const ip = request.headers.get("CF-Connecting-IP");
@@ -254,7 +285,8 @@ export function createAuth(env: AuthEnv, ctx: ExecutionContext, signingKey: Cryp
     // The plugin has accepted the signature over these claims, with any audience it allows.
     const audience = a2aUrl(env);
     if (bearerClaims(request.headers)?.aud !== audience) return invalid(`this token was not signed for /a2a: its aud must be ${audience}`);
-    if (!(await firstUse(env, request))) return invalid("this token has already been used");
+    const used = await replayed(env, request);
+    if (used) return invalid(used);
     if (!hostActive({ host })) return { status: 403, ...HOST_REVOKED };
     // The session lists the agent's grants among those the token names, so this is both.
     if (!agent.capabilityGrants.some((g) => g.capability === A2A_CAPABILITY && g.status === "active")) {

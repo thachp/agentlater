@@ -71,6 +71,20 @@ export const payloadSchema = (env: A2aEnv) => ({
   ),
 });
 
+/**
+ * The capability each operation runs, which the agent must hold besides a2a. The operations name
+ * their capability from here and the card tells a caller from here, so the two say the same.
+ */
+const RUNS = {
+  SendMessage: { later: "schedule_http", now: "queue_http" },
+  GetTask: "get_task",
+  ListTasks: "list_tasks",
+  CancelTask: "cancel_task",
+} as const;
+const RUNS_IN_WORDS =
+  `SendMessage ${RUNS.SendMessage.later} for a request with run_at_ms or delay and ${RUNS.SendMessage.now} for one with neither; ` +
+  `GetTask ${RUNS.GetTask}; ListTasks ${RUNS.ListTasks}; CancelTask ${RUNS.CancelTask}`;
+
 /** The card for the host that was asked. Its skills list only what /a2a will do. */
 function card(env: A2aEnv): AgentCard {
   const endpoint = a2aUrl(env);
@@ -88,9 +102,17 @@ function card(env: A2aEnv): AgentCard {
       extensions: [
         {
           uri: `${SITE}/a2a/extensions/agent-auth/v1`,
-          description: "How to get the bearer token: register with Agent Auth at `discovery`, then sign an agent JWT for `audience` that names `capability`.",
+          description:
+            "How to get the bearer token: register with Agent Auth at `discovery`, then sign an agent JWT for `audience` that names `capability`. " +
+            "Register the agent with `capability` and with the capabilities `operations` lists for each operation it will call: the token " +
+            "names only `capability`, but an operation is refused with HTTP 403 for an agent that does not hold what it runs.",
           required: false,
-          params: { discovery: discoveryUrl(env), audience: endpoint, capability: "a2a" },
+          params: {
+            discovery: discoveryUrl(env),
+            audience: endpoint,
+            capability: "a2a",
+            operations: Object.fromEntries(Object.entries(RUNS).map(([operation, runs]) => [operation, typeof runs === "string" ? [runs] : Object.values(runs)])),
+          },
         },
       ],
     },
@@ -101,6 +123,7 @@ function card(env: A2aEnv): AgentCard {
           bearerFormat: "JWT",
           description:
             "An Agent Auth agent JWT (typ agent+jwt, Ed25519) whose aud is this interface's URL and whose capabilities are [\"a2a\"]. " +
+            `The agent must also hold the capability each operation runs: ${RUNS_IN_WORDS}. ` +
             "A token lives at most 60 seconds and is accepted once, so sign a new one for every request. " +
             "At most 60 requests a minute are accepted from one IP address; past that the answer is HTTP 429 with Retry-After.",
         },
@@ -295,7 +318,7 @@ function operationsFor(env: A2aEnv, caller: Caller, run: Run) {
   async function sendMessage({ message, configuration }: SendMessageRequest): Promise<Task> {
     if (configuration?.taskPushNotificationConfig) throw new PushNotificationNotSupportedError();
     if (message?.taskId) {
-      await use("get_task", { task_id: message.taskId });
+      await use(RUNS.GetTask, { task_id: message.taskId });
       throw new UnsupportedOperationError("a task takes no further messages; send a message without taskId to make a new task");
     }
     if (message?.contextId) throw invalid("contextId cannot be chosen by the caller: each task is its own context; send the message without one", "message.contextId");
@@ -312,7 +335,7 @@ function operationsFor(env: A2aEnv, caller: Caller, run: Run) {
 
     const request = payload as Record<string, unknown>;
     const key = request.idempotency_key ?? (await keyFor(message!.messageId));
-    const capability = request.run_at_ms != null || request.delay != null ? "schedule_http" : "queue_http";
+    const capability = request.run_at_ms != null || request.delay != null ? RUNS.SendMessage.later : RUNS.SendMessage.now;
     // Returned as it is now, whatever returnImmediately says: no request is held until a delivery finishes.
     return a2aTask(await use(capability, { ...request, idempotency_key: key }, request.idempotency_key == null ? "message.messageId" : `${PAYLOAD}.idempotency_key`));
   }
@@ -331,10 +354,10 @@ function operationsFor(env: A2aEnv, caller: Caller, run: Run) {
     const statuses = Object.keys(STATES).filter((s) => STATES[s] === status);
     if (status !== TaskState.TASK_STATE_UNSPECIFIED && statuses.length === 0) {
       // A state no delivery is ever in, such as input required: nothing to list, for an agent that may list.
-      allow("list_tasks");
+      allow(RUNS.ListTasks);
       return { tasks: [], nextPageToken: "", pageSize, totalSize: 0 };
     }
-    const page = await use<TaskPage>("list_tasks", {
+    const page = await use<TaskPage>(RUNS.ListTasks, {
       limit: pageSize,
       ...(statuses.length ? { status: statuses.join(",") } : {}),
       ...(pageToken ? { cursor: pageToken } : {}),
@@ -348,10 +371,10 @@ function operationsFor(env: A2aEnv, caller: Caller, run: Run) {
     getAgentCard: unsupported("this operation"),
     getAuthenticatedExtendedAgentCard: unsupported("the extended Agent Card"),
     sendMessage,
-    getTask: async ({ id }) => a2aTask(await use("get_task", { task_id: id })),
+    getTask: async ({ id }) => a2aTask(await use(RUNS.GetTask, { task_id: id })),
     listTasks,
     cancelTask: async ({ id }) => {
-      const view = await use("cancel_task", { task_id: id });
+      const view = await use(RUNS.CancelTask, { task_id: id });
       // Canceled, unless an attempt is out: that task comes back as it is, working.
       return a2aTask(view, { note: view.status === "delivering" ? CANCEL_WAITS : undefined });
     },

@@ -75,7 +75,14 @@ describe("Agent Card", () => {
       discovery: "https://gateway.test/.well-known/agent-configuration",
       audience: "https://gateway.test/a2a",
       capability: "a2a",
+      // What else the agent must hold, by the operation that runs it.
+      operations: { SendMessage: ["schedule_http", "queue_http"], GetTask: ["get_task"], ListTasks: ["list_tasks"], CancelTask: ["cancel_task"] },
     });
+    expect(onboarding.description).toContain("`operations`");
+    expect(scheme.description).toContain(
+      "The agent must also hold the capability each operation runs: SendMessage schedule_http for a request with run_at_ms or delay and queue_http for one with neither; " +
+        "GetTask get_task; ListTasks list_tasks; CancelTask cancel_task.",
+    );
   });
 
   it("lists delivery of an HTTP request as its only skill, taking and returning JSON", async () => {
@@ -93,7 +100,8 @@ describe("Agent Card", () => {
   it("advertises nothing this version leaves out, and neither does the payload schema", async () => {
     const { text } = await cardAt("https://gateway.test");
     const schema = await (await get("https://gateway.test/a2a/schemas/deliver-http/v1.json")).text();
-    for (const published of [text, schema]) expect(published).not.toMatch(/cron|watch|callback|lane|queue|inbox|wake|set_secret|payment|redrive|stream(?!ing":false)/i);
+    // queue_http is named as the capability SendMessage runs for a request sent now; a queue to send in is not offered.
+    for (const published of [text, schema]) expect(published).not.toMatch(/cron|watch|callback|lane|queue(?!_http)|inbox|wake|set_secret|payment|redrive|stream(?!ing":false)/i);
   });
 
   it("contains no secret", async () => {

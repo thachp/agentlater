@@ -6,7 +6,7 @@
 import { OAuthProvider, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { a2aEnabled, agentCard, handleA2a, PAYLOAD_SCHEMA_PATH, payloadSchema, type A2aEnv } from "./a2a";
 import { importSigningKey } from "./api";
-import { BASE_PATH, createAuth, firstUse, type AuthEnv } from "./auth";
+import { BASE_PATH, createAuth, malformedCredential, replayed, type AuthEnv } from "./auth";
 import { handleStripeWebhook, type BillingEnv } from "./billing";
 import { llmsTxt, openApi } from "./discovery";
 import { readLimited } from "./body";
@@ -125,6 +125,9 @@ const gateway = {
     const isDiscovery = url.pathname === "/.well-known/agent-configuration";
     const route = url.pathname.startsWith(BASE_PATH + "/") ? url.pathname.slice(BASE_PATH.length) : null;
     if (!isDiscovery && !(route && AGENT_ROUTES.has(route))) return error(404, "not_found", "no such route");
+    // Every route below that the Agent Auth plugin answers takes a host's or an agent's JWT, or no credential.
+    const malformed = isDiscovery ? null : malformedCredential(request.headers);
+    if (malformed) return error(401, "invalid_jwt", malformed);
 
     const tooLarge = () => error(413, "too_large", "request body is too large");
     if (Number(request.headers.get("Content-Length") ?? 0) > MAX_BODY_BYTES) return tooLarge();
@@ -157,7 +160,8 @@ const gateway = {
     }
 
     // Before Better Auth verifies the token, so that of two copies sent at once only one gets that far.
-    if (!(await firstUse(env, request))) return error(401, "invalid_jwt", "this token has already been used");
+    const used = await replayed(env, request);
+    if (used) return error(401, "invalid_jwt", used);
     const buffered = new Request(request.url, {
       method: request.method,
       headers: request.headers,

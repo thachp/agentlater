@@ -569,12 +569,10 @@ describe("A2A at /a2a", () => {
 
   const a2a = () => `${origin}/a2a`;
   const execute = () => `${origin}/api/auth/capability/execute`;
-  /** A new client address for each of the delivery tests' requests, so none spends another's rate limit. */
+  /** A new client address for each request unless told otherwise, so none spends another's rate limit. Tens of thousands of them. */
   let hosts = 0;
   const address = () => `100.64.${++hosts >> 8}.${hosts & 255}`;
-  /** Each call comes from its own address unless told otherwise, so one test's requests don't spend another's rate limit. */
-  let addresses = 0;
-  const call = (token, { ip = `198.51.100.${++addresses}`, to = a2a(), via = fetch } = {}) =>
+  const call = (token, { ip = address(), to = a2a(), via = fetch } = {}) =>
     via(to, {
       method: "POST",
       headers: { "Content-Type": "application/json", "A2A-Version": "1.0", "CF-Connecting-IP": ip, ...(token ? { Authorization: `Bearer ${token}` } : {}) },
@@ -606,23 +604,28 @@ describe("A2A at /a2a", () => {
     });
 
   /** Registers an agent with the real SDK. `token` is what a caller signs for each request; `forge` signs what the SDK would not. */
-  async function register(capabilities = ["a2a", ...CAPABILITIES], client = sdkAt(`192.0.2.${++addresses}`)) {
+  async function register(capabilities = ["a2a", ...CAPABILITIES], client = sdkAt(address())) {
     const conn = await client.connectAgent({ provider: origin, mode: "autonomous", capabilities, name: "a2a caller" });
     const token = async (audience = a2a(), caps = ["a2a"]) => (await client.signJwt({ agentId: conn.agentId, audience, capabilities: caps ?? undefined })).token;
-    const forge = async (claims = {}, header = {}) => {
-      const { agentKeypair } = await client.getConnection(conn.agentId);
+    const signed = (keypair, header, claims) => {
       const now = Math.floor(Date.now() / 1000);
       const part = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
-      const signed = `${part({ alg: "EdDSA", typ: "agent+jwt", ...header })}.${part({ sub: conn.agentId, aud: a2a(), capabilities: ["a2a"], iat: now, exp: now + 60, jti: randomUUID(), ...claims })}`;
-      return `${signed}.${sign(null, Buffer.from(signed), createPrivateKey({ key: agentKeypair.privateKey, format: "jwk" })).toString("base64url")}`;
+      const signing = `${part({ alg: "EdDSA", ...header })}.${part({ aud: a2a(), capabilities: ["a2a"], iat: now, exp: now + 60, jti: randomUUID(), ...claims })}`;
+      return `${signing}.${sign(null, Buffer.from(signing), createPrivateKey({ key: keypair.privateKey, format: "jwk" })).toString("base64url")}`;
     };
-    return { client, agentId: conn.agentId, hostId: conn.hostId, token, forge };
+    const forge = async (claims = {}, header = {}) => signed((await client.getConnection(conn.agentId)).agentKeypair, { typ: "agent+jwt", ...header }, { sub: conn.agentId, ...claims });
+    /** The host's own JWT, which the SDK signs only for the issuer. */
+    const hostToken = async (claims = {}) => signed((await client.storage.getHostIdentity()).keypair, { typ: "host+jwt" }, { iss: conn.hostId, sub: conn.hostId, ...claims });
+    return { client, agentId: conn.agentId, hostId: conn.hostId, token, forge, hostToken };
   }
-  /** A request to an Agent Auth route, from an address of its own: Better Auth allows 60 a minute to most of them. */
-  const agentAuth = (path, token, body) =>
+  /**
+   * A request to an Agent Auth route, from an address of its own: Better Auth allows 60 a minute to most of them.
+   * `authorization` is the whole header, for one a client library would not write.
+   */
+  const agentAuth = (path, token, body, authorization = `Bearer ${token}`) =>
     fetch(`${origin}/api/auth${path}`, {
       method: body ? "POST" : "GET",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, "X-Forwarded-For": `192.0.2.${++addresses}` },
+      headers: { "Content-Type": "application/json", Authorization: authorization, "X-Forwarded-For": address() },
       body: body && JSON.stringify(body),
     });
   const gatewayDb = () => mf.getD1Database("DB", "gateway");
@@ -763,12 +766,7 @@ describe("A2A at /a2a", () => {
   });
 
   test("a host's own JWT is refused", async () => {
-    const { keypair } = await caller.client.storage.getHostIdentity();
-    const now = Math.floor(Date.now() / 1000);
-    const part = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
-    const signed = `${part({ alg: "EdDSA", typ: "host+jwt" })}.${part({ iss: caller.hostId, sub: caller.hostId, aud: a2a(), capabilities: ["a2a"], iat: now, exp: now + 60, jti: randomUUID() })}`;
-    const token = `${signed}.${sign(null, Buffer.from(signed), createPrivateKey({ key: keypair.privateKey, format: "jwk" })).toString("base64url")}`;
-    await refused(await call(token), 401, "invalid_jwt");
+    await refused(await call(await caller.hostToken()), 401, "invalid_jwt");
   });
 
   test("an OAuth token for hosted MCP is refused", async () => {
@@ -811,6 +809,159 @@ describe("A2A at /a2a", () => {
     // token that fails verification there is ignored as before, whatever audience it claims.
     const unverified = `${(await caller.token()).split(".").slice(0, 2).join(".")}.${"A".repeat(86)}`;
     assert.equal((await agentAuth("/capability/list", unverified)).status, 200);
+  });
+
+  /** Ways to write whitespace or padding into a header that still carries a token's three segments. */
+  const rewritten = (token) => {
+    const [header, payload, signature] = token.split(".");
+    const cut = (segment, gap) => `${segment.slice(0, 12)}${gap}${segment.slice(12)}`;
+    return {
+      "a space in the signature": `Bearer ${header}.${payload}.${cut(signature, " ")}`,
+      "a tab in the signature": `Bearer ${header}.${payload}.${cut(signature, "\t")}`,
+      "a space after the signature's first dot": `Bearer ${header}.${payload}. ${signature}`,
+      "a space in the payload": `Bearer ${header}.${cut(payload, " ")}.${signature}`,
+      "a space in the header": `Bearer ${cut(header, " ")}.${payload}.${signature}`,
+      "padding after a space": `Bearer ${token} =`,
+      "padding": `Bearer ${token}==`,
+      "two spaces after Bearer": `Bearer  ${token}`,
+      "a tab after Bearer": `Bearer\t${token}`,
+    };
+  };
+
+  test("a token signed for /a2a executes nothing on the capability-execution route however whitespace or padding is written into its header", async () => {
+    const victim = await register();
+    await run(victim, "create_project");
+    const count = async () => (await run(victim, "list_tasks")).tasks.length;
+    assert.equal(await count(), 0);
+    for (const what of Object.keys(rewritten("a.b.c"))) {
+      const authorization = rewritten(await victim.token())[what];
+      const res = await agentAuth("/capability/execute", null, { capability: "schedule_http", arguments: { url: "https://dest.example.com/must-not-run", delay: "1h" } }, authorization);
+      assert.equal(res.status, 401, `${what}: ${await res.text()}`);
+      assert.equal(await count(), 0, what);
+    }
+    // Nor does it revoke the agent or give it another key.
+    for (const what of ["a space in the signature", "a tab in the signature"]) {
+      for (const [path, body] of [["/agent/revoke", { agent_id: victim.agentId }], ["/agent/rotate-key", { public_key: { kty: "OKP", crv: "Ed25519", x: "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo" } }]]) {
+        assert.equal((await agentAuth(path, null, body, rewritten(await victim.token())[what])).status, 401, `${path}, ${what}`);
+      }
+    }
+    await dispatched(await call(await victim.token()), "the agent was neither revoked nor given another key");
+  });
+
+  test("a token whose header is not exactly Bearer and a compact JWS is refused on every Agent Auth route and on /a2a, and a request with no token is served as before", async () => {
+    const agent = await register();
+    await run(agent, "create_project");
+    const routes = [
+      ["/agent/register", {}],
+      [`/agent/status?agent_id=${agent.agentId}`, undefined],
+      ["/agent/revoke", { agent_id: agent.agentId }],
+      ["/agent/rotate-key", { public_key: {} }],
+      ["/agent/reactivate", { agent_id: agent.agentId }],
+      ["/agent/request-capability", { capabilities: ["schedule_http"] }],
+      ["/capability/list", undefined],
+      ["/capability/describe?name=schedule_http", undefined],
+      ["/capability/execute", { capability: "get_project", arguments: {} }],
+      ["/host/revoke", {}],
+      ["/host/rotate-key", { public_key: {} }],
+    ];
+    const malformed = async () => ({
+      ...rewritten(await agent.token(execute(), ["get_project"])),
+      "another scheme": "Basic dXNlcjpwYXNz",
+      "no token": "Bearer",
+      "an opaque token": "Bearer 3f9c1d:7a2b:5e8d4c",
+      "two segments": "Bearer e30.e30",
+      "four segments": "Bearer e30.e30.e30.e30",
+      "an empty segment": "Bearer e30..e30",
+      "a character outside base64url": "Bearer e30.e3+0.e30",
+      "a token after a comma": `Bearer ${await agent.token(execute(), ["get_project"])}, Bearer e30.e30.e30`,
+    });
+    for (const [path, body] of routes) {
+      for (const [what, authorization] of Object.entries(await malformed())) {
+        const res = await agentAuth(path, null, body, authorization);
+        assert.equal(res.status, 401, `${path}, ${what}`);
+        assert.deepEqual(await res.json(), { error: "invalid_jwt", message: "the Authorization header must be Bearer, one space and a compact JWT" }, `${path}, ${what}`);
+      }
+    }
+    for (const [what, authorization] of Object.entries(rewritten(await agent.token()))) {
+      const res = await fetch(a2a(), { method: "POST", headers: { "A2A-Version": "1.0", "CF-Connecting-IP": address(), Authorization: authorization }, body: "{}" });
+      assert.equal(res.status, 401, `/a2a, ${what}`);
+      // Turned away as no bearer token at all, or by the same rule as the other routes: never by the plugin.
+      const { error, message } = await res.json();
+      if (error !== "authentication_required") assert.equal(message, "the Authorization header must be Bearer, one space and a compact JWT", `/a2a, ${what}`);
+      assert.equal(error, /^Bearer\s+\S+$/.test(authorization) ? "invalid_jwt" : "authentication_required", `/a2a, ${what}`);
+    }
+    // Without the header the public routes answer, and with a well-formed one a caller is served, as before.
+    assert.equal((await fetch(`${origin}/api/auth/capability/list`)).status, 200);
+    assert.equal((await fetch(`${origin}/api/auth/capability/describe?name=schedule_http`)).status, 200);
+    assert.equal((await run(agent, "get_project")).attempts_remaining, 1_000);
+    assert.equal((await agentAuth("/capability/execute", null, { capability: "get_project", arguments: {} }, `bearer ${await agent.token(execute(), ["get_project"])}`)).status, 200, "the scheme's case does not matter");
+  });
+
+  test("a token whose jti is not a string is refused on every route, and one with a very long jti is taken once", async () => {
+    const agent = await register();
+    await run(agent, "create_project");
+    const elsewhere = { aud: execute(), capabilities: ["get_project"] };
+    // The plugin takes any jti that is not empty; the gateway's claim needs a string to claim.
+    for (const jti of [7, true, ["a"], { a: 1 }]) {
+      const res = await agentAuth("/capability/execute", await agent.forge({ ...elsewhere, jti }), { capability: "get_project", arguments: {} });
+      assert.equal(res.status, 401, JSON.stringify(jti));
+      assert.deepEqual(await res.json(), { error: "invalid_jwt", message: "this token has no jti" });
+      await refused(await call(await agent.forge({ jti })), 401, "invalid_jwt");
+    }
+    const long = "j".repeat(300);
+    const once = await agent.forge({ ...elsewhere, jti: long });
+    assert.equal((await agentAuth("/capability/execute", once, { capability: "get_project", arguments: {} })).status, 200);
+    const again = await agentAuth("/capability/execute", once, { capability: "get_project", arguments: {} });
+    assert.equal(again.status, 401);
+    assert.deepEqual(await again.json(), { error: "invalid_jwt", message: "this token has already been used" });
+    const onA2a = await agent.forge({ jti: `${long}2` });
+    const [a, b] = await Promise.all([call(onA2a), call(onA2a)]);
+    assert.deepEqual([a.status, b.status].sort(), [200, 401]);
+  });
+
+  test("a token signed for /a2a is refused on the routes a host uses too, whether an agent or the host signed it", async () => {
+    const agent = await register();
+    const ours = { error: "invalid_jwt", message: "a token signed for /a2a is accepted only there" };
+    const key = { kty: "OKP", crv: "Ed25519", x: "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo" };
+    const attempts = [
+      ["/capability/describe?name=schedule_http", undefined],
+      ["/agent/reactivate", { agent_id: agent.agentId }],
+      ["/host/revoke", {}],
+      ["/host/rotate-key", { public_key: key }],
+      ["/agent/revoke", { agent_id: agent.agentId }],
+      [`/agent/status?agent_id=${agent.agentId}`, undefined],
+    ];
+    for (const [path, body] of attempts) {
+      for (const [who, token] of [["the agent", await agent.token()], ["the host", await agent.hostToken()]]) {
+        const res = await agentAuth(path, token, body);
+        assert.equal(res.status, 401, `${path}, ${who}`);
+        assert.deepEqual(await res.json(), ours, `${path}, ${who}`);
+      }
+    }
+    // Registration verifies the host's JWT itself and takes no audience but the issuer's.
+    assert.equal((await agentAuth("/agent/register", await agent.hostToken(), { name: "x", mode: "autonomous" })).status, 401);
+    const host = await (await gatewayDb()).prepare('SELECT status, "publicKey" FROM "agentHost" WHERE id = ?').bind(agent.hostId).first();
+    assert.equal(host.status, "active");
+    assert.notEqual(JSON.parse(host.publicKey).x, key.x);
+    await dispatched(await call(await agent.token()), "the agent and its host are as they were");
+
+    // The same tokens signed for the issuer are the plugin's to answer: the hook turns away only /a2a's.
+    const issuer = `${origin}/api/auth`;
+    const served = [
+      ["/capability/describe?name=schedule_http", undefined, await agent.token(issuer, null), 200],
+      [`/agent/status?agent_id=${agent.agentId}`, undefined, await agent.hostToken({ aud: issuer, capabilities: undefined }), 200],
+      ["/agent/reactivate", { agent_id: agent.agentId }, await agent.hostToken({ aud: issuer, capabilities: undefined }), undefined],
+    ];
+    for (const [path, body, token, status] of served) {
+      const res = await agentAuth(path, token, body);
+      const answer = await res.json();
+      if (status) assert.equal(res.status, status, `${path}: ${JSON.stringify(answer)}`);
+      assert.notEqual(answer.message, ours.message, path);
+      assert.notEqual(answer.message, "the Authorization header must be Bearer, one space and a compact JWT", path);
+    }
+    const revoked = await agentAuth("/host/revoke", await agent.hostToken({ aud: issuer, capabilities: undefined }), {});
+    assert.equal(revoked.status, 200, await revoked.clone().text());
+    await refused(await call(await agent.token()), 403, "agent_revoked");
   });
 
   test("the a2a capability cannot be executed: it does nothing on the capability-execution route", async () => {
