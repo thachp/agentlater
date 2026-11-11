@@ -9,26 +9,20 @@ export const mcpRemoteConfig = `{
   }
 }`;
 
-export const mcpClaudeCode = `claude mcp add --transport http runlater ${GATEWAY_URL}/mcp`;
+export const mcpClaudeCode = `claude mcp add --transport http agentlater ${GATEWAY_URL}/mcp`;
 
-/** The landing page's Claude row: Claude Code, then Claude Desktop and claude.ai. */
-export const mcpClaude = `# Claude Code
-claude mcp add --transport http runlater ${GATEWAY_URL}/mcp
-
-# Claude Desktop or claude.ai
-Settings → Connectors → Add custom connector
+/** The landing page's Claude app setup; the CLI has its own tab. */
+export const mcpClaude = `Settings → Connectors → Add custom connector
   URL: ${GATEWAY_URL}/mcp`;
 
 export const mcpChatGpt = `chatgpt.com/plugins → + → Add custom MCP server
   URL:            ${GATEWAY_URL}/mcp
   Authentication: OAuth`;
 
-export const mcpCodex = `# ~/.codex/config.toml
-[mcp_servers.runlater]
-url = "${GATEWAY_URL}/mcp"
+export const mcpCodex = `codex mcp add agentlater --url ${GATEWAY_URL}/mcp
+codex mcp login agentlater`;
 
-# then sign in once
-codex mcp login runlater`;
+export const mcpGrokCli = `grok mcp add --transport http agentlater ${GATEWAY_URL}/mcp`;
 
 export const mcpGrok = `grok.com → Connectors → Custom
   Server URL: ${GATEWAY_URL}/mcp`;

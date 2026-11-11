@@ -11,6 +11,9 @@ import {
   inboxCall,
   mcpChatGpt,
   mcpClaude,
+  mcpClaudeCode,
+  mcpCodex,
+  mcpGrokCli,
   mcpGrok,
   mcpRemoteConfig,
   readInboxCall,
@@ -62,27 +65,37 @@ const BEFORE_AFTER: [string, ReactNode][] = [
 
 const CONNECT: { label: string; body: ReactNode; code: string }[] = [
   {
-    label: "Claude",
-    body: (
-      <>
-        In Claude Code, run one command. In Claude Desktop or claude.ai, add a custom connector. Either way, approve
-        the connection on the page that opens.
-      </>
-    ),
+    label: "Claude Code",
+    body: <>Run the command, then open Claude Code and use <code>/mcp</code> to authenticate AgentLater in your browser.</>,
+    code: mcpClaudeCode,
+  },
+  {
+    label: "Codex CLI",
+    body: <>Add the server, then run the login command and approve the connection in your browser.</>,
+    code: mcpCodex,
+  },
+  {
+    label: "Grok CLI",
+    body: <>Add the remote HTTP server. Grok handles OAuth in your browser on first use.</>,
+    code: mcpGrokCli,
+  },
+  {
+    label: "Claude app",
+    body: <>In Claude Desktop or claude.ai, add a custom connector and approve the connection in your browser.</>,
     code: mcpClaude,
   },
   {
-    label: "ChatGPT",
+    label: "ChatGPT app",
     body: (
       <>
         On <a href="https://chatgpt.com/plugins">chatgpt.com/plugins</a>, add a custom MCP server with this URL, then
-        sign in when ChatGPT asks.
+        choose OAuth and approve the connection. Availability depends on your plan and workspace permissions.
       </>
     ),
     code: mcpChatGpt,
   },
   {
-    label: "Grok",
+    label: "Grok app",
     body: <>Add a custom connector at grok.com and approve the connection on the page that opens.</>,
     code: mcpGrok,
   },
@@ -90,7 +103,7 @@ const CONNECT: { label: string; body: ReactNode; code: string }[] = [
     label: "Other MCP clients",
     body: (
       <>
-        Codex, Cursor and the rest: add the URL as a remote MCP server and sign in when asked. The{" "}
+        Cursor and other MCP clients: add the URL as a remote MCP server and sign in when asked. The{" "}
         <Link href="/docs">quickstart</Link> has the details for each.
       </>
     ),

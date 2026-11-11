@@ -151,3 +151,17 @@ describe("stated limits", () => {
     expect(stated["Wake"]).toBe("At most one per 1 minute to 24 hours (default 15 minutes); off after 3 failures in a row");
   });
 });
+
+// Keep the Getting Started commands copyable and pointed at the hosted MCP endpoint.
+describe("Getting Started MCP clients", () => {
+  it("shows CLI add commands and the matching Codex login", async () => {
+    const { mcpClaudeCode, mcpCodex, mcpGrokCli, mcpChatGpt } = await import("../lib/snippets");
+    const url = "https://gateway.agentlater.io/mcp";
+    expect(mcpClaudeCode).toBe(`claude mcp add --transport http agentlater ${url}`);
+    expect(mcpCodex).toBe(`codex mcp add agentlater --url ${url}\ncodex mcp login agentlater`);
+    expect(mcpGrokCli).toBe(`grok mcp add --transport http agentlater ${url}`);
+    expect(mcpChatGpt).toContain("Add custom MCP server");
+    expect(mcpChatGpt).toContain(url);
+    expect(mcpChatGpt).toContain("OAuth");
+  });
+});
