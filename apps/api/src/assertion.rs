@@ -148,13 +148,13 @@ pub(crate) mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
 
-    pub const NOW: i64 = 1_767_225_600;
+    pub(crate) const NOW: i64 = 1_767_225_600;
 
-    pub fn key() -> SigningKey {
+    pub(crate) fn key() -> SigningKey {
         SigningKey::from_bytes(&[7; 32])
     }
 
-    pub fn token(key: &SigningKey, claims: serde_json::Value) -> String {
+    pub(crate) fn token(key: &SigningKey, claims: serde_json::Value) -> String {
         let payload = URL_SAFE_NO_PAD.encode(claims.to_string());
         let sig = key.sign(payload.as_bytes());
         format!("{payload}.{}", URL_SAFE_NO_PAD.encode(sig.to_bytes()))

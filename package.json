@@ -11,10 +11,12 @@
   "scripts": {
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
+    "knip": "knip",
     "build": "npm run build --workspaces --if-present",
     "check": "npm run check --workspaces --if-present"
   },
   "devDependencies": {
+    "knip": "6.44.1",
     "typescript": "7.0.2",
     "wrangler": "4.157.0"
   },

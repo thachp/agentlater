@@ -1,0 +1,18 @@
+{
+  "$schema": "https://unpkg.com/knip@6.44.1/schema-jsonc.json",
+  // The e2e suites drive the miniflare that wrangler ships, so the two can't drift apart.
+  "ignoreDependencies": ["miniflare"],
+  "workspaces": {
+    ".": {
+      // Run by hand or by a workflow, not imported. apps/api is a Rust crate, not an npm workspace.
+      "entry": ["scripts/*.mjs", "apps/api/test/*.mjs"]
+    },
+    "apps/web": {
+      "entry": ["open-next.config.ts"]
+    },
+    "packages/contracts": {
+      // Every export here should have a reader in another workspace.
+      "includeEntryExports": true
+    }
+  }
+}

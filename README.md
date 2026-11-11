@@ -176,6 +176,8 @@ npm install
 cargo test && npm run typecheck && npm test
 ```
 
+The rules the code keeps, and the lints that enforce them, are in [CODING_STANDARDS.md](CODING_STANDARDS.md).
+
 ```bash
 npm run dev -w @runlater/gateway
 ```

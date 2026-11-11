@@ -615,7 +615,7 @@ mod tests {
             capture: true,
             ..ok()
         };
-        let spec = captured.clone().validate(NOW).unwrap();
+        let spec = captured.validate(NOW).unwrap();
         assert!(spec.capture);
         assert_ne!(spec.fingerprint, ok().validate(NOW).unwrap().fingerprint);
         let inbox = ScheduleRequest {
