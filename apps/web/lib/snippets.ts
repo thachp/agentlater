@@ -159,11 +159,12 @@ RunLater-Signature: v1=5d0e…c41a
 
 {"remind":"invoice #42"}`;
 
-export const rotateSecret = `// The secret leaked: the old one stops signing at once.
+export const rotateSigningSecret = `// The signing secret leaked: the old one stops signing from the next attempt
+// (one already in flight may still carry it for a few seconds).
 rotate_signing_secret({ overlap: "0s" })
 // { signing_secret: "rls_9f2c…", previous_valid_until_ms: null }
 
-// Routine: both secrets sign for the overlap (default "24h", at most "7d").
+// Routine: both signing secrets sign for the overlap (default "24h", at most "7d").
 rotate_signing_secret({ overlap: "2h" })
 // { signing_secret: "rls_41d7…", previous_valid_until_ms: 1767319200000 }
 

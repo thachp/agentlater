@@ -162,9 +162,10 @@ export const capabilities: CapabilityDefinition[] = [
     description:
       "Replace the project's signing secret, e.g. after it leaked. Rotate only when the user asks. Returns the new signing_secret: " +
       "give it only to the user, for the destination, and do not repeat it. For overlap (default 24h) every delivery and wake is " +
-      "signed with both secrets, one v1= entry each in RunLater-Signature, so the destination can be updated without rejecting " +
-      "a delivery; previous_valid_until_ms says when the old secret stops. Pass overlap: \"0s\" to stop the old secret at once " +
-      "when it has leaked. Rotating again during an overlap stops the oldest secret at once. Nothing else changes: tasks already " +
+      "signed with both signing secrets, one v1= entry each in RunLater-Signature, so the destination can be updated without rejecting " +
+      "a delivery; previous_valid_until_ms says when the old secret stops. Pass overlap: \"0s\" when it has leaked: the old secret " +
+      "stops signing from the next attempt (one already in flight may still carry it for a few seconds). Rotating again during " +
+      "an overlap stops the oldest signing secret the same way. Nothing else changes: tasks already " +
       "scheduled are signed with the new secret from their next attempt, and create_project returns the new secret from now on.",
     input: {
       type: "object",
@@ -174,7 +175,7 @@ export const capabilities: CapabilityDefinition[] = [
           type: "string",
           pattern: "^[0-9]{1,7}[smhd]$",
           default: "24h",
-          description: "How long the old secret keeps signing too: a whole number and s, m, h or d, from \"0s\" (stops at once) to \"7d\".",
+          description: "How long the old secret keeps signing too: a whole number and s, m, h or d, from \"0s\" (it stops from the next attempt) to \"7d\".",
         },
       },
     },

@@ -53,7 +53,7 @@ pub const MAX_WAKE_DEBOUNCE_MS: i64 = DAY_MS;
 pub const MAX_WAKE_FAILURES: i64 = 3;
 
 /// `rotate_signing_secret`: how long the replaced signing secret keeps signing beside the new
-/// one. Zero stops it at once.
+/// one. Zero stops it from the next attempt.
 pub const DEFAULT_ROTATION_OVERLAP: &str = "24h";
 pub const MAX_ROTATION_OVERLAP_MS: i64 = 7 * DAY_MS;
 

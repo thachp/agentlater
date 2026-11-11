@@ -150,9 +150,10 @@ impl<D: Db> Ledger<'_, D> {
     }
 
     /// Makes `new_secret` the project's signing secret. The one it replaces keeps signing beside
-    /// it for `overlap` (a duration like a wake's debounce; `"0s"` stops it at once), so a
-    /// receiver holding either verifies. A secret still in an earlier overlap stops now: at most
-    /// two sign.
+    /// it for `overlap` (a duration like a wake's debounce; `"0s"` stops it), so a receiver
+    /// holding either verifies. A signing secret still in an earlier overlap stops too: at most
+    /// two sign. Stopping holds for attempts claimed from now on; one already in flight may
+    /// still carry the stopped secret's signature.
     pub fn rotate_signing_secret(
         &self,
         new_secret: &str,

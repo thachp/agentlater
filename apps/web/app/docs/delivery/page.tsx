@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Code } from "../../../components/Code";
 import { LIMITS } from "../../../lib/site";
-import { deliveryHeaders, rotateSecret, verifyNode, verifyPython } from "../../../lib/snippets";
+import { deliveryHeaders, rotateSigningSecret, verifyNode, verifyPython } from "../../../lib/snippets";
 
 export const metadata: Metadata = { title: "Delivery & signatures" };
 
@@ -88,28 +88,30 @@ export default function Delivery() {
         file), replace it with one call, <code>rotate_signing_secret</code>. It returns the new secret, and{" "}
         <code>create_project</code> returns the new one from then on.
       </p>
-      <Code label="rotate_signing_secret">{rotateSecret}</Code>
+      <Code label="rotate_signing_secret">{rotateSigningSecret}</Code>
       <ul>
         <li>
           <strong>Leaked secret:</strong> pass <code>overlap: &quot;0s&quot;</code> and put the new secret in your
-          destination straight away. AgentLater stops signing with the old secret at once, but anyone holding it can
-          forge requests until your destination stops accepting it, so the leak is closed when the destination checks
-          against the new secret only. Deliveries that arrive before then fail your check; if your destination answers
+          destination straight away. AgentLater stops signing with the old one from the next attempt (an attempt
+          already in flight may still carry it for a few seconds), but anyone holding it can forge requests until your
+          destination stops accepting it, so the leak is closed when the destination checks against the new secret
+          only. Deliveries that arrive before then fail your check; if your destination answers
           them <code>401</code> they fail without a retry, and <code>redrive_task</code> sends them again.
         </li>
         <li>
           <strong>Routine rotation:</strong> for the <code>overlap</code> (default 24 hours, at most 7 days) every
           delivery, callback and wake carries two <code>v1=</code> entries, one made with each secret. A destination
           that accepts a match on any entry, as the samples above do, keeps verifying with the old secret, so nothing
-          is rejected while you deploy the new one. Do that before <code>previous_valid_until_ms</code>: after it
-          only the new secret signs.
+          is rejected while you deploy the new one. Do that before <code>previous_valid_until_ms</code>: attempts
+          made after it are signed with the new secret only.
         </li>
         <li>
           <code>get_project</code> shows that deadline as <code>signing_secret_previous_until_ms</code> while an
           overlap is running, and never shows either secret.
         </li>
         <li>
-          At most two secrets sign at a time. Rotating again during an overlap stops the oldest one at once.
+          At most two signing secrets sign at a time. Rotating again during an overlap stops the oldest one from the
+          next attempt.
         </li>
         <li>
           Nothing else changes: the signed content and header names are the same, the budget and everything scheduled

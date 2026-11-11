@@ -115,8 +115,14 @@ fn prepare(d: &Delivery, values: &[(String, String)], now_s: i64) -> Option<Outg
     // addresses after DNS resolution.
     let destination = Destination::parse(&d.url).ok()?;
     let body = d.body.clone().unwrap_or_default();
-    let secrets: Vec<&[u8]> = d.signing_secrets().into_iter().map(str::as_bytes).collect();
-    let signature = sign(&secrets, &d.task_id, d.attempt, now_s, body.as_bytes());
+    let signing_secrets: Vec<&[u8]> = d.signing_secrets().into_iter().map(str::as_bytes).collect();
+    let signature = sign(
+        &signing_secrets,
+        &d.task_id,
+        d.attempt,
+        now_s,
+        body.as_bytes(),
+    );
     let headers = [("User-Agent".to_string(), USER_AGENT.to_string())]
         .into_iter()
         .chain(filled)

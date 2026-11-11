@@ -916,7 +916,7 @@ mod tests {
     }
 
     #[test]
-    fn a_wake_is_signed_like_any_delivery_while_a_secret_is_rotated() {
+    fn a_wake_is_signed_like_any_delivery_while_the_signing_secret_is_rotated() {
         let db = Memory::new();
         let l = setup(&db);
         l.set_wake(waking(serde_json::json!({})), T0).unwrap();

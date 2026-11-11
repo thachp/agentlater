@@ -60,8 +60,10 @@ paths:
         Replaces the project's signing secret and returns the new one. For `overlap` the secret
         it replaced keeps signing too: each delivery and wake carries one `v1=` entry per signing
         secret in RunLater-Signature, the new secret's first, so a receiver holding either
-        verifies. After the overlap, or at once with an overlap of zero, only the new secret
-        signs. At most two sign: rotating during an overlap stops the older of them at once.
+        verifies. After the overlap, or from the next attempt with an overlap of zero, only the
+        new secret signs; an attempt already in flight may still carry the replaced one for a few
+        seconds. At most two signing secrets sign: rotating during an overlap stops the older of
+        them from the next attempt.
         Tasks already scheduled are signed with the secrets in force when each attempt is made.
         Nothing else about the project changes. Scope: project.
       requestBody:
@@ -76,7 +78,7 @@ paths:
                   type: string
                   pattern: "^[0-9]{1,7}[smhd]$"
                   default: 24h
-                  description: "How long the replaced secret keeps signing: 0s (it stops at once) to 7d."
+                  description: "How long the replaced secret keeps signing: 0s (it stops from the next attempt) to 7d."
       responses:
         "200":
           description: The new secret, and when the one it replaced stops.
