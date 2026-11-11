@@ -11,8 +11,6 @@
 
 use super::*;
 
-/// What `tasks.via` holds for a task whose request came through A2A; null for every other.
-const A2A: &str = "a2a";
 const DEFAULT_PAGE: usize = 20;
 const MAX_PAGE: usize = 100;
 
@@ -300,6 +298,25 @@ pub struct TaskPage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<i64>,
 }
+
+/// What a list is asked for. `status` is one status or several separated by commas,
+/// `updated_since_ms` leaves out tasks last changed before it, and `cursor` is the `next_cursor`
+/// of the page before.
+#[derive(Default, Deserialize)]
+pub struct ListQuery {
+    pub status: Option<String>,
+    pub lane: Option<String>,
+    pub updated_since_ms: Option<i64>,
+    pub cursor: Option<String>,
+    pub limit: Option<usize>,
+}
+
+/// What a list is ordered by, with how to read each key from a row: a cursor is the last row's
+/// keys.
+type Order = &'static [(&'static str, fn(&TaskRow) -> i64)];
+const NEWEST_FIRST: Order = &[("seq", |r| r.seq)];
+/// The order of A2A's ListTasks.
+const LAST_CHANGED_FIRST: Order = &[("updated_ms", |r| r.updated_ms), ("seq", |r| r.seq)];
 
 #[derive(Deserialize)]
 pub(super) struct TaskRow {
@@ -674,26 +691,20 @@ impl<D: Db> Ledger<'_, D> {
         row.view(Some(attempts))
     }
 
-    /// A page of tasks, newest first, and where the next page begins. `status` is one status or
-    /// several separated by commas; `since` leaves out tasks last changed before it. Through A2A
-    /// the order is its ListTasks': most recently changed first, with how many match in all.
-    pub fn list(
-        &self,
-        status: Option<&str>,
-        lane: Option<&str>,
-        since: Option<i64>,
-        cursor: Option<&str>,
-        limit: Option<usize>,
-    ) -> Result<TaskPage, ApiError> {
+    /// A page of tasks, newest first, and where the next page begins. Through A2A it is a page
+    /// of its ListTasks: only tasks made through A2A, most recently changed first, with how many
+    /// match in all.
+    pub fn list(&self, q: ListQuery) -> Result<TaskPage, ApiError> {
         self.project_row()?.ok_or_else(no_project)?;
-        let limit = limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
-        // What orders the list; a cursor is the last row's values of these.
-        let keys: &[&str] = if self.a2a {
-            &["updated_ms", "seq"]
+        let limit = q.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
+        // All that a list through A2A does differently.
+        let (order, marked, counted) = if self.a2a {
+            (LAST_CHANGED_FIRST, " AND via IS NOT NULL", true)
         } else {
-            &["seq"]
+            (NEWEST_FIRST, "", false)
         };
-        let before = match cursor {
+        let keys: Vec<&str> = order.iter().map(|(key, _)| *key).collect();
+        let before = match &q.cursor {
             None => vec![MAX_SAFE_INTEGER; keys.len()],
             Some(c) => c
                 .split('.')
@@ -702,13 +713,9 @@ impl<D: Db> Ledger<'_, D> {
                 .filter(|values| values.len() == keys.len())
                 .ok_or_else(|| ApiError::bad_request("cursor is not valid"))?,
         };
-        let mut filter = String::new();
+        let mut filter = String::from(marked);
         let mut params: Vec<Param> = vec![];
-        if self.a2a {
-            filter.push_str(" AND via = ?");
-            params.push(A2A.into());
-        }
-        if let Some(status) = status {
+        if let Some(status) = &q.status {
             let statuses: Vec<&str> = status.split(',').collect();
             if (statuses.iter()).any(|s| serde_json::from_value::<Status>((*s).into()).is_err()) {
                 return Err(ApiError::bad_request("status is not valid"));
@@ -717,18 +724,18 @@ impl<D: Db> Ledger<'_, D> {
             filter.push_str(&format!(" AND status IN ({marks})"));
             params.extend(statuses.into_iter().map(Param::from));
         }
-        if let Some(lane) = lane {
-            if !valid_lane(lane) {
+        if let Some(lane) = q.lane {
+            if !valid_lane(&lane) {
                 return Err(ApiError::bad_request("lane is not valid"));
             }
             filter.push_str(" AND lane = ?");
             params.push(lane.into());
         }
-        if let Some(since) = since {
+        if let Some(since) = q.updated_since_ms {
             filter.push_str(" AND updated_ms >= ?");
             params.push(since.into());
         }
-        let total = match self.a2a {
+        let total = match counted {
             true => Some(self.count(
                 &format!("SELECT COUNT(*) AS total FROM tasks WHERE TRUE{filter}"),
                 params.clone(),
@@ -750,9 +757,9 @@ impl<D: Db> Ledger<'_, D> {
         )?;
         let next_cursor = if rows.len() > limit {
             rows.truncate(limit);
-            rows.last().map(|r| match self.a2a {
-                true => format!("{}.{}", r.updated_ms, r.seq),
-                false => r.seq.to_string(),
+            rows.last().map(|r| {
+                let keys: Vec<_> = order.iter().map(|(_, key)| key(r).to_string()).collect();
+                keys.join(".")
             })
         } else {
             None
@@ -819,7 +826,7 @@ impl<D: Db> Ledger<'_, D> {
                 kind.on_match.into(),
                 new.action_reserve.into(),
                 kind.triggered_by.into(),
-                new.a2a.then_some(A2A).into(),
+                new.a2a.then_some("a2a").into(),
                 now.into(),
                 now.into(),
             ],
@@ -1051,10 +1058,7 @@ mod tests {
             .schedule(req("https://a.example.com/"), "t1", T0)
             .unwrap_err();
         assert_eq!(err.code, "project_not_found");
-        assert_eq!(
-            l.list(None, None, None, None, None).unwrap_err().status,
-            404
-        );
+        assert_eq!(l.list(ListQuery::default()).unwrap_err().status, 404);
     }
 
     #[test]
@@ -1136,13 +1140,19 @@ mod tests {
         a2a.schedule(req("https://a.example.com/"), "t3", T0)
             .unwrap();
         let ids = |page: &TaskPage| page.tasks.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
-        assert_eq!(
-            ids(&a2a.list(None, None, None, None, None).unwrap()),
-            ["t3", "t1"]
-        );
-        let first = a2a.list(None, None, None, None, Some(1)).unwrap();
+        assert_eq!(ids(&a2a.list(ListQuery::default()).unwrap()), ["t3", "t1"]);
+        let first = a2a
+            .list(ListQuery {
+                limit: Some(1),
+                ..Default::default()
+            })
+            .unwrap();
         let rest = a2a
-            .list(None, None, None, first.next_cursor.as_deref(), Some(1))
+            .list(ListQuery {
+                cursor: first.next_cursor.clone(),
+                limit: Some(1),
+                ..Default::default()
+            })
             .unwrap();
         assert_eq!(
             (ids(&first), ids(&rest)),
@@ -1150,7 +1160,7 @@ mod tests {
         );
         assert_eq!(rest.next_cursor, None);
         assert_eq!(
-            ids(&l.list(None, None, None, None, None).unwrap()),
+            ids(&l.list(ListQuery::default()).unwrap()),
             ["t3", "t2", "t1"]
         );
     }
@@ -1172,7 +1182,7 @@ mod tests {
         let keys =
             |v: &serde_json::Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
         assert_eq!(keys(&a), keys(&b));
-        assert_eq!(l.list(None, None, None, None, None).unwrap().tasks.len(), 2);
+        assert_eq!(l.list(ListQuery::default()).unwrap().tasks.len(), 2);
     }
 
     #[test]
@@ -1267,7 +1277,7 @@ mod tests {
         drive(&a2a, "t1", http(200), None, T0 + 20);
 
         let ids = |page: &TaskPage| page.tasks.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
-        let all = a2a.list(None, None, None, None, None).unwrap();
+        let all = a2a.list(ListQuery::default()).unwrap();
         assert_eq!(
             (ids(&all), all.total),
             (
@@ -1281,7 +1291,11 @@ mod tests {
         let mut cursor = None;
         loop {
             let page = a2a
-                .list(None, None, None, cursor.as_deref(), Some(1))
+                .list(ListQuery {
+                    cursor: cursor.clone(),
+                    limit: Some(1),
+                    ..Default::default()
+                })
                 .unwrap();
             assert_eq!((page.tasks.len(), page.total), (1, Some(4)));
             seen.extend(ids(&page));
@@ -1293,15 +1307,29 @@ mod tests {
         assert_eq!(seen, ids(&all));
 
         // A task that changes between two pages moves to the front; the rest still follow.
-        let first = a2a.list(None, None, None, None, Some(2)).unwrap();
+        let first = a2a
+            .list(ListQuery {
+                limit: Some(2),
+                ..Default::default()
+            })
+            .unwrap();
         a2a.cancel("t4", T0 + 30).unwrap();
         let rest = a2a
-            .list(None, None, None, first.next_cursor.as_deref(), Some(2))
+            .list(ListQuery {
+                cursor: first.next_cursor,
+                limit: Some(2),
+                ..Default::default()
+            })
             .unwrap();
         assert_eq!((ids(&rest), rest.total), (vec!["t2".to_string()], Some(4)));
 
         for bad in ["x", "5", "1.2.3", "1.x", ""] {
-            let e = a2a.list(None, None, None, Some(bad), None).unwrap_err();
+            let e = a2a
+                .list(ListQuery {
+                    cursor: Some(bad.into()),
+                    ..Default::default()
+                })
+                .unwrap_err();
             assert_eq!(
                 (e.status, e.message.as_str()),
                 (400, "cursor is not valid"),
@@ -1309,7 +1337,7 @@ mod tests {
             );
         }
         // Any other interface lists as before: newest first, every task, and no count.
-        let plain = l.list(None, None, None, None, None).unwrap();
+        let plain = l.list(ListQuery::default()).unwrap();
         assert_eq!(
             (ids(&plain), plain.total),
             (
@@ -1325,9 +1353,12 @@ mod tests {
         );
         assert!(!serde_json::to_string(&plain).unwrap().contains("total"));
         assert_eq!(
-            l.list(None, None, None, Some("1.2"), None)
-                .unwrap_err()
-                .status,
+            l.list(ListQuery {
+                cursor: Some("1.2".into()),
+                ..Default::default()
+            })
+            .unwrap_err()
+            .status,
             400
         );
     }
@@ -1349,7 +1380,14 @@ mod tests {
         deliver(&l, due("t4"), T0 + 30);
 
         let ids = |page: TaskPage| page.tasks.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
-        let listed = |status, since| a2a.list(status, None, since, None, None).unwrap();
+        let listed = |status: Option<&str>, since| {
+            a2a.list(ListQuery {
+                status: status.map(String::from),
+                updated_since_ms: since,
+                ..Default::default()
+            })
+            .unwrap()
+        };
         assert_eq!(listed(Some("delivering,retrying"), None).total, Some(2));
         assert_eq!(ids(listed(Some("delivering,retrying"), None)), ["t4", "t3"]);
         assert_eq!(ids(listed(Some("canceled"), None)), ["t2"]);
@@ -1362,13 +1400,22 @@ mod tests {
         );
         assert_eq!(
             ids(l
-                .list(Some("delivering,retrying"), None, Some(T0 + 30), None, None)
+                .list(ListQuery {
+                    status: Some("delivering,retrying".into()),
+                    updated_since_ms: Some(T0 + 30),
+                    ..Default::default()
+                })
                 .unwrap()),
             ["t4"]
         );
 
         for bad in ["done", "canceled,", ",", "canceled,done", ""] {
-            let e = l.list(Some(bad), None, None, None, None).unwrap_err();
+            let e = l
+                .list(ListQuery {
+                    status: Some(bad.into()),
+                    ..Default::default()
+                })
+                .unwrap_err();
             assert_eq!(
                 (e.status, e.message.as_str()),
                 (400, "status is not valid"),
@@ -1629,25 +1676,46 @@ mod tests {
         }
         l.cancel("t3", T0).unwrap();
 
-        let page = l.list(None, None, None, None, Some(2)).unwrap();
+        let page = l
+            .list(ListQuery {
+                limit: Some(2),
+                ..Default::default()
+            })
+            .unwrap();
         let ids: Vec<_> = page.tasks.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, ["t4", "t3"]);
         assert!(page.tasks[0].attempts.is_none());
         let page2 = l
-            .list(None, None, None, page.next_cursor.as_deref(), Some(2))
+            .list(ListQuery {
+                cursor: page.next_cursor.clone(),
+                limit: Some(2),
+                ..Default::default()
+            })
             .unwrap();
         assert_eq!(page2.tasks[0].id, "t2");
         let last = l
-            .list(None, None, None, page2.next_cursor.as_deref(), Some(2))
+            .list(ListQuery {
+                cursor: page2.next_cursor,
+                limit: Some(2),
+                ..Default::default()
+            })
             .unwrap();
         assert_eq!((last.tasks.len(), last.next_cursor), (1, None));
 
-        let canceled = l.list(Some("canceled"), None, None, None, None).unwrap();
+        let canceled = l
+            .list(ListQuery {
+                status: Some("canceled".into()),
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(canceled.tasks.len(), 1);
         assert_eq!(
-            l.list(None, None, None, Some("x"), None)
-                .unwrap_err()
-                .status,
+            l.list(ListQuery {
+                cursor: Some("x".into()),
+                ..Default::default()
+            })
+            .unwrap_err()
+            .status,
             400
         );
     }
@@ -1658,13 +1726,21 @@ mod tests {
         let l = setup(&db);
         l.schedule(in_lane("pay", T0), "a", T0).unwrap();
         l.schedule(in_lane("mail", T0), "b", T0).unwrap();
-        let page = l.list(None, Some("pay"), None, None, None).unwrap();
+        let page = l
+            .list(ListQuery {
+                lane: Some("pay".into()),
+                ..Default::default()
+            })
+            .unwrap();
         let ids: Vec<_> = page.tasks.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, ["a"]);
         assert_eq!(
-            l.list(None, Some("a b"), None, None, None)
-                .unwrap_err()
-                .status,
+            l.list(ListQuery {
+                lane: Some("a b".into()),
+                ..Default::default()
+            })
+            .unwrap_err()
+            .status,
             400
         );
     }

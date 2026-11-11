@@ -302,15 +302,6 @@ fn hook_answer(reply: HookReply) -> Result<Response> {
     Ok(r)
 }
 
-#[derive(Deserialize)]
-struct ListQuery {
-    status: Option<String>,
-    lane: Option<String>,
-    updated_since_ms: Option<i64>,
-    cursor: Option<String>,
-    limit: Option<usize>,
-}
-
 async fn body<T: DeserializeOwned>(req: &mut Request) -> std::result::Result<T, ApiError> {
     let bytes = req
         .bytes()
@@ -404,16 +395,7 @@ impl TaskLedger {
                     created(ledger.schedule(body(req).await?, &minted("task", 10)?, t)?)
                 }
                 Route::Watch => created(ledger.watch(body(req).await?, &minted("task", 10)?, t)?),
-                Route::ListTasks => {
-                    let q: ListQuery = query(&url)?;
-                    ok(ledger.list(
-                        q.status.as_deref(),
-                        q.lane.as_deref(),
-                        q.updated_since_ms,
-                        q.cursor.as_deref(),
-                        q.limit,
-                    )?)
-                }
+                Route::ListTasks => ok(ledger.list(query(&url)?)?),
                 Route::GetTask(id) => ok(ledger.task(id)?),
                 Route::CancelTask(id) => ok(ledger.cancel(id, t)?),
                 Route::RedriveTask(id) => ok(ledger.redrive(id, t)?),

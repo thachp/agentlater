@@ -51,7 +51,7 @@ pub use runlater_core::Health;
 use schema::{MIGRATIONS, SCHEMA};
 pub use secrets::{ResealCount, SealedSecret, Sealer, SecretList, SecretView};
 use tasks::{derived_id, Kind, NewTask, Reporting, TaskRow, TASK_COLUMNS};
-pub use tasks::{AttemptView, CapturedResponse, TaskPage, TaskView};
+pub use tasks::{AttemptView, CapturedResponse, ListQuery, TaskPage, TaskView};
 pub use watches::{OnMatchView, WatchView};
 
 /// Durable Object SQL bindings pass through JavaScript numbers.
