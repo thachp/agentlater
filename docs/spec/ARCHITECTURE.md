@@ -68,6 +68,7 @@ flowchart LR
 | `/billing/webhook` | Stripe events | `Stripe-Signature` |
 | `/billing/mpp/{link}` | An agent buying a pack | HMAC in the link, then the payment challenge |
 | `/openapi.json`, `/llms.txt`, `/health` | Discovery documents; `/health` also checks the API | None |
+| `/.well-known/agent-card.json`, `/a2a` | The A2A Agent Card and its JSON-RPC endpoint (`src/a2a.ts`). Both answer 404 unless `A2A_ENABLED` is `"true"`: on in staging, off in production. `/a2a` negotiates the version and runs nothing yet. | The card: none. `/a2a`: an Agent Auth JWT as a bearer token; none is accepted yet, so every request gets 401 |
 
 - **Two identities, one path.** `runCapability` (`src/projects.ts`) takes an owner, either an Agent Auth host id or `mcp:<id>` from a grant, finds its project in `runlater_project`, and makes the one API call named by the capability's `api` binding in `packages/contracts` (`src/capabilities.ts`). The exception is `get_payment_link`, which the gateway answers itself. A project id is never taken from the caller.
 - **The local bridge.** `@auth/agent-cli mcp --url <gateway>` is a stdio MCP server that holds an agent's keys and exposes generic tools (`execute_capability`, …). Nothing in the gateway is specific to it.

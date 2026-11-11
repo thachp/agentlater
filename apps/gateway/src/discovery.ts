@@ -6,7 +6,7 @@ import { ATTEMPT_PACK } from "@runlater/contracts/billing";
 import type { BillingEnv } from "./billing";
 import { mppEnabled } from "./mpp";
 
-const SITE = "https://agentlater.io";
+export const SITE = "https://agentlater.io";
 const attempts = ATTEMPT_PACK.attempts.toLocaleString("en-US");
 const price = `$${(ATTEMPT_PACK.priceCents / 100).toFixed(2)}`;
 

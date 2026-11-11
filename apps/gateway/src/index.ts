@@ -1,8 +1,10 @@
 // Public entry for agents. Serves Agent Auth discovery and the agent endpoints, the hosted MCP
 // server at /mcp behind OAuth, Stripe's payment webhook and MPP purchases, and turns capability executions into signed calls on the
-// private Rust API (API binding). Also serves inbound hooks (/h/…), on the hooks host.
+// private Rust API (API binding). Also serves inbound hooks (/h/…), on the hooks host, and, where
+// A2A_ENABLED is on, the A2A Agent Card and /a2a.
 
 import { OAuthProvider, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
+import { a2aEnabled, agentCard, handleA2a, type A2aEnv } from "./a2a";
 import { importSigningKey } from "./api";
 import { BASE_PATH, createAuth, type AuthEnv } from "./auth";
 import { handleStripeWebhook, type BillingEnv } from "./billing";
@@ -17,7 +19,7 @@ import { d1SweepStore, resealOver, sweep } from "./rotation";
 
 export { AuthStore } from "./store";
 
-export interface Env extends AuthEnv, BillingEnv, HooksEnv, HostEnv {
+export interface Env extends A2aEnv, AuthEnv, BillingEnv, HooksEnv, HostEnv {
   /** How many new trials may start in 24 hours across the service. Unset means no cap. */
   NEW_TRIALS_PER_DAY?: string;
   /** Hex-encoded 32-byte Ed25519 seed; its public key is the API's GATEWAY_PUBLIC_KEY. */
@@ -112,6 +114,11 @@ const gateway = {
         headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "public, max-age=300", "Access-Control-Allow-Origin": "*" },
       });
     }
+
+    if (a2aEnabled(env) && request.method === "GET" && url.pathname === "/.well-known/agent-card.json") {
+      return Response.json(agentCard(env), { headers: { "Cache-Control": "public, max-age=300", "Access-Control-Allow-Origin": "*" } });
+    }
+    if (a2aEnabled(env) && url.pathname === "/a2a") return handleA2a(request, env);
 
     if (request.method === "GET" && url.pathname === "/health") {
       const api = await env.API.fetch("https://api.internal/health");

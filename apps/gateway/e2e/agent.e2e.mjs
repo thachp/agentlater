@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
+import { AgentCardResolver, ClientFactory } from "@a2a-js/sdk/client";
 import { AgentAuthClient, MemoryStorage } from "@auth/agent";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -99,6 +100,7 @@ before(async () => {
           compatibilityFlags: ["nodejs_compat"],
           bindings: {
             PUBLIC_URL: origin,
+            A2A_ENABLED: "true",
             ASSERTION_PRIVATE_KEY: seed.toString("hex"),
             BETTER_AUTH_SECRET: randomBytes(32).toString("hex"),
             STRIPE_SECRET_KEY: "sk_test_e2e",
@@ -521,6 +523,44 @@ describe("agent journey through the gateway", () => {
       other.executeCapability({ agentId: otherAgent, capability: "get_task", arguments: { task_id: taskId } }),
       { code: "task_not_found", status: 404 },
     );
+  });
+});
+
+describe("A2A at /a2a", () => {
+  const rpc = (headers) =>
+    fetch(`${origin}/a2a`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "GetTask", params: { id: "task_00000000000000000000" } }),
+    });
+
+  test("the official A2A client reads the Agent Card and finds the JSON-RPC interface", async () => {
+    const card = await AgentCardResolver.default.resolve(origin);
+    assert.equal(card.name, "AgentLater");
+    assert.deepEqual(
+      card.supportedInterfaces.map((i) => [i.url, i.protocolBinding, i.protocolVersion]),
+      [[`${origin}/a2a`, "JSONRPC", "1.0"]],
+    );
+    assert.equal(card.capabilities.extensions[0].params.discovery, `${origin}/.well-known/agent-configuration`);
+    // The client picks that interface and sends A2A-Version: 1.0; without a token it is turned away.
+    const client = await new ClientFactory().createFromAgentCard(card);
+    await assert.rejects(client.getTask({ id: "task_00000000000000000000" }), /Status: 401/);
+  });
+
+  test("a request without A2A-Version: 1.0 gets the SDK's VersionNotSupportedError", async () => {
+    const res = await rpc({});
+    assert.equal(res.status, 200);
+    const { error } = await res.json();
+    assert.equal(error.code, -32009);
+    assert.equal(error.data[0].reason, "VERSION_NOT_SUPPORTED");
+  });
+
+  test("no caller reaches JSON-RPC: without or with a bearer token the answer is 401 and the Agent Auth challenge", async () => {
+    for (const headers of [{}, { Authorization: "Bearer not-verified" }]) {
+      const res = await rpc({ "A2A-Version": "1.0", ...headers });
+      assert.equal(res.status, 401);
+      assert.equal(res.headers.get("WWW-Authenticate"), `AgentAuth discovery="${origin}/.well-known/agent-configuration"`);
+    }
   });
 });
 
