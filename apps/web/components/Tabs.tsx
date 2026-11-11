@@ -2,13 +2,14 @@
 
 import { useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 
-export type Tab = { label: string; content: ReactNode };
+export type Tab = { label: string; detail?: string; content: ReactNode };
 
 /**
  * Keeps long alternatives to one screen. Every panel is in the server-rendered HTML, so agents
- * and readers without JavaScript still get all of them.
+ * and readers without JavaScript still get all of them. `rail` puts the tabs in a column beside
+ * the panel.
  */
-export function Tabs({ tabs, label }: { tabs: Tab[]; label: string }) {
+export function Tabs({ tabs, label, rail = false }: { tabs: Tab[]; label: string; rail?: boolean }) {
   const [active, setActive] = useState(0);
   const base = useId();
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
@@ -16,8 +17,8 @@ export function Tabs({ tabs, label }: { tabs: Tab[]; label: string }) {
   function onKeyDown(event: KeyboardEvent) {
     const last = tabs.length - 1;
     const next =
-      event.key === "ArrowRight" ? (active === last ? 0 : active + 1)
-      : event.key === "ArrowLeft" ? (active === 0 ? last : active - 1)
+      event.key === "ArrowRight" || event.key === "ArrowDown" ? (active === last ? 0 : active + 1)
+      : event.key === "ArrowLeft" || event.key === "ArrowUp" ? (active === 0 ? last : active - 1)
       : event.key === "Home" ? 0
       : event.key === "End" ? last
       : null;
@@ -28,11 +29,17 @@ export function Tabs({ tabs, label }: { tabs: Tab[]; label: string }) {
   }
 
   return (
-    <div className="tabs">
+    <div className={rail ? "tabs rail" : "tabs"}>
       <noscript>
         <style>{`.tab-list { display: none; } .tab-panel[hidden] { display: block; }`}</style>
       </noscript>
-      <div className="tab-list" role="tablist" aria-label={label} onKeyDown={onKeyDown}>
+      <div
+        className="tab-list"
+        role="tablist"
+        aria-label={label}
+        aria-orientation={rail ? "vertical" : undefined}
+        onKeyDown={onKeyDown}
+      >
         {tabs.map((tab, i) => (
           <button
             key={tab.label}
@@ -48,6 +55,7 @@ export function Tabs({ tabs, label }: { tabs: Tab[]; label: string }) {
             onClick={() => setActive(i)}
           >
             {tab.label}
+            {tab.detail ? <small>{tab.detail}</small> : null}
           </button>
         ))}
       </div>

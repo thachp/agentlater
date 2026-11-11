@@ -17,14 +17,19 @@ export const RETRIES: [string, string][] = [
   ["after attempt 4", "20–40 min"],
 ];
 
+/** The free trial and the per-task attempt cap, as the landing page states them (pinned with LIMITS below). */
+export const TRIAL_ATTEMPTS = "1,000";
+export const TRIAL_DAYS = 7;
+export const MAX_ATTEMPTS = 5;
+
 export const LIMITS: [string, string][] = [
-  ["Free trial", "1,000 delivery attempts over 7 days, per project"],
+  ["Free trial", `${TRIAL_ATTEMPTS} delivery attempts over ${TRIAL_DAYS} days, per project`],
   ["More attempts", "50,000 for $5, valid 12 months; leftovers carry over"],
   ["Projects", "One per agent host"],
   ["Schedule ahead", "Up to 7 days, and before the project's attempts expire"],
   ["Request body", "64 KiB"],
   ["Headers", "32 headers, 8 KiB in total"],
-  ["Attempts per task", "1–5 (default 5)"],
+  ["Attempts per task", `1–${MAX_ATTEMPTS} (default ${MAX_ATTEMPTS})`],
   ["Attempt timeout", "10 seconds; redirects are not followed"],
   ["Tasks held", "1,000 per project (20,000 once paid), finished ones included until purged"],
   ["Retention", "Tasks and attempts are kept 30 days after they finish"],

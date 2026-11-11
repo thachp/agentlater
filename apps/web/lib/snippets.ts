@@ -11,14 +11,6 @@ export const mcpRemoteConfig = `{
 
 export const mcpClaudeCode = `claude mcp add --transport http runlater ${GATEWAY_URL}/mcp`;
 
-/** The landing page's Claude row: Claude Code, then Claude Desktop and claude.ai. */
-export const mcpClaude = `# Claude Code
-claude mcp add --transport http runlater ${GATEWAY_URL}/mcp
-
-# Claude Desktop or claude.ai
-Settings → Connectors → Add custom connector
-  URL: ${GATEWAY_URL}/mcp`;
-
 export const mcpChatGpt = `chatgpt.com/plugins → + → Add custom MCP server
   URL:            ${GATEWAY_URL}/mcp
   Authentication: OAuth`;
@@ -102,51 +94,6 @@ const { agentId } = await client.connectAgent({
 const run = (capability, args = {}) =>
   client.executeCapability({ agentId, capability, arguments: args });
 await run("create_project");`;
-
-export const agentPrompt = `Use AgentLater to watch https://deploy.example.com/deployments/123
-every 5 minutes. When status is SUCCEEDED, start the smoke tests at
-https://ci.example.com/smoke and put the result in the inbox.
-Next session, read the inbox first.`;
-
-export const watchActCall = `watch_http({
-  url: "https://deploy.example.com/deployments/123",
-  every: "5m",
-  deadline: "6h",
-  until: { path: "/status", in: ["SUCCEEDED"] },
-  on_match: {
-    url: "https://ci.example.com/smoke",
-    headers: { "Authorization": "Bearer {{secret:CI_TOKEN}}" },
-    callback_url: "inbox"
-  }
-})`;
-
-export const hookCall = `create_hook({
-  name: "ci-failures",
-  verify: { scheme: "github", secret: "…" },
-  accept: [{
-    headers: { "X-GitHub-Event": ["workflow_run"] },
-    path: "/workflow_run/conclusion",
-    in: ["failure"]
-  }]
-})
-// → { url: "https://hooks.agentlater.io/h/prj_…/hk_…" }`;
-
-export const inboxCall = `// next session
-get_project()  // → { inbox_unread: 2, … }
-read_inbox({ ack: true })
-// → [{ event: "task.finished", task: { status: "succeeded",
-//      response: { status: 200, body: "{\\"passed\\":42}" } } },
-//    { event: "hook.received", hook: "ci-failures", … }]`;
-
-export const scheduleCall = `schedule_http({
-  url: "https://example.com/remind",
-  delay: "24h",
-  callback_url: "inbox"
-})`;
-
-export const readInboxCall = `read_inbox({ ack: true })
-// → task.finished
-//   status: "succeeded"`;
 
 export const deliveryHeaders = `POST /hooks/reminder HTTP/1.1
 Host: example.com
