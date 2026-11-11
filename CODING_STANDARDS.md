@@ -28,8 +28,8 @@ CI fails on any of these, so fix the code instead of silencing the check.
 - `[workspace.lints]` in `Cargo.toml`, run by `cargo clippy -- -D warnings`:
   `unreachable_pub`, `unused_qualifications`, `unused_lifetimes`, `unused_macro_rules`,
   `clippy::redundant_clone` and `clippy::too_many_lines`.
-- `clippy.toml` caps a function at 110 lines. Lower the cap as functions shrink; never raise it.
-  The one exemption is `route()`, marked `#[expect]` until it is flattened.
+- `clippy.toml` caps a function at 110 lines, with no exemptions. Lower the cap as functions
+  shrink; never raise it.
 - `npm run knip` (config in `knip.jsonc`): no unused files, dependencies or exports in the
   TypeScript workspaces.
 

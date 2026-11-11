@@ -5,18 +5,14 @@ use crate::assertion;
 use crate::db::{Db, DbError, Param};
 use crate::delivery::{attempt, Outgoing, ReadPlan, ResponseBody, Transport};
 use crate::ledger::{
-    ApiError, Claimed, Delivery, Dispatch, HookDelivery, HookReply, Ledger, ResponseRead,
-    SealedSecret, Sealer,
+    ApiError, Claimed, Delivery, Dispatch, HookReply, Ledger, ResponseRead, SealedSecret, Sealer,
 };
 use crate::routes::{Route, Verb};
 use crate::sealing::{Keyring, SealingKey, NONCE_BYTES};
 use futures_util::future::{join_all, select, Either};
 use futures_util::StreamExt;
 use runlater_core::limits::{ATTEMPT_TIMEOUT_MS, CAPTURED_HEADERS};
-use runlater_core::{
-    CronRequest, HookRequest, HookUpdate, Outcome, PollBody, ScheduleRequest, SecretRequest,
-    Status, WakeRequest, WatchRequest,
-};
+use runlater_core::{HookRequest, HookUpdate, Outcome, PollBody, SecretRequest, Status};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -62,6 +58,11 @@ fn error(e: ApiError) -> Result<Response> {
         console_error!("{}: {}", e.code, e.message);
     }
     json(&e.body(), e.status)
+}
+
+/// A database failure with no caller to tell: the Worker's own error.
+fn platform(e: DbError) -> Error {
+    Error::RustError(e.to_string())
 }
 
 fn simple_error(status: u16, code: &'static str, message: &str) -> Result<Response> {
@@ -126,18 +127,20 @@ fn segments(url: &Url) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// A deployment setting, whether it was set as a secret or as a plain variable.
+fn setting(env: &Env, name: &str) -> Option<String> {
+    env.secret(name)
+        .map(|s| s.to_string())
+        .or_else(|_| env.var(name).map(|s| s.to_string()))
+        .ok()
+}
+
 /// The keys project secrets are sealed with: `SECRETS_KEY` (32 bytes as hex), and while it is
 /// being rotated `SECRETS_KEY_PREVIOUS`. Secrets are unavailable without the first, and when
 /// either is malformed: a mistyped previous key must be loud, not quietly fail old values.
 fn sealing_key(env: &Env) -> Option<Keyring> {
-    let read = |name: &str| {
-        env.secret(name)
-            .map(|s| s.to_string())
-            .or_else(|_| env.var(name).map(|s| s.to_string()))
-            .ok()
-    };
-    let current = SealingKey::parse(&read("SECRETS_KEY")?)?;
-    let previous = match read("SECRETS_KEY_PREVIOUS") {
+    let current = SealingKey::parse(&setting(env, "SECRETS_KEY")?)?;
+    let previous = match setting(env, "SECRETS_KEY_PREVIOUS") {
         Some(raw) => Some(SealingKey::parse(&raw)?),
         None => None,
     };
@@ -153,12 +156,24 @@ fn sealer(env: &Env) -> Option<Sealer> {
 }
 
 fn gateway_key(env: &Env) -> Option<assertion::VerifyingKey> {
-    let raw = env
-        .secret("GATEWAY_PUBLIC_KEY")
-        .map(|s| s.to_string())
-        .or_else(|_| env.var("GATEWAY_PUBLIC_KEY").map(|s| s.to_string()))
-        .ok()?;
-    assertion::parse_public_key(&raw)
+    assertion::parse_public_key(&setting(env, "GATEWAY_PUBLIC_KEY")?)
+}
+
+/// A request to a project's ledger, naming the project its sender vouches for.
+fn ledger_request(
+    project_id: &str,
+    method: Method,
+    url: &str,
+    body: Option<JsValue>,
+) -> Result<Request> {
+    let headers = Headers::new();
+    headers.set(PROJECT_HEADER, project_id)?;
+    headers.set("Content-Type", "application/json")?;
+    let mut init = RequestInit::new();
+    init.with_method(method)
+        .with_headers(headers)
+        .with_body(body);
+    Request::new_with_init(url, &init)
 }
 
 #[event(fetch)]
@@ -189,15 +204,11 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         return simple_error(403, "forbidden", "assertion lacks the required scope");
     }
 
-    let headers = Headers::new();
-    headers.set(PROJECT_HEADER, &claims.project_id)?;
-    headers.set("Content-Type", "application/json")?;
-    let mut init = RequestInit::new();
-    init.with_method(method.clone()).with_headers(headers);
-    if method == Method::Post {
-        init.with_body(Some(req.bytes().await?.into()));
-    }
-    let forwarded = Request::new_with_init(url.as_str(), &init)?;
+    let body = match method {
+        Method::Post => Some(req.bytes().await?.into()),
+        _ => None,
+    };
+    let forwarded = ledger_request(&claims.project_id, method, url.as_str(), body)?;
     env.durable_object("LEDGER")?
         .get_by_name(&claims.project_id)?
         .fetch_with_request(forwarded)
@@ -300,8 +311,39 @@ async fn body<T: DeserializeOwned>(req: &mut Request) -> std::result::Result<T, 
     serde_json::from_slice(&bytes).map_err(|e| ApiError::bad_request(format!("invalid JSON: {e}")))
 }
 
-fn created<T: Serialize>(value: &T, was_created: bool) -> Result<Response> {
-    json(value, if was_created { 201 } else { 200 })
+/// Why a route has no response of its own: the ledger refused the request, which the caller is
+/// told as an error body, or the platform failed, which is the Worker's error.
+enum Failure {
+    Refused(ApiError),
+    Platform(Error),
+}
+
+impl From<ApiError> for Failure {
+    fn from(e: ApiError) -> Self {
+        Self::Refused(e)
+    }
+}
+
+impl From<Error> for Failure {
+    fn from(e: Error) -> Self {
+        Self::Platform(e)
+    }
+}
+
+type Answer = std::result::Result<Response, Failure>;
+
+fn ok<T: Serialize>(value: T) -> Answer {
+    Ok(json(&value, 200)?)
+}
+
+/// 201 for what this request made, 200 for what was already there.
+fn created<T: Serialize>((value, was_created): (T, bool)) -> Answer {
+    Ok(json(&value, if was_created { 201 } else { 200 })?)
+}
+
+/// A fresh random id or token: the prefix, then that many random bytes as hex.
+fn minted(prefix: &str, bytes: u32) -> Result<String> {
+    Ok(format!("{prefix}_{}", hex::encode(random_bytes(bytes)?)))
 }
 
 impl TaskLedger {
@@ -317,10 +359,7 @@ impl TaskLedger {
     /// Points the alarm at the next thing the ledger needs to do.
     async fn arm(&self, ledger: &Ledger<'_, Sql>) -> Result<()> {
         let storage = self.state.storage();
-        match ledger
-            .next_wake()
-            .map_err(|e| Error::RustError(e.to_string()))?
-        {
+        match ledger.next_wake().map_err(platform)? {
             Some(at) => {
                 let delay = (at - now()).max(0);
                 storage.set_alarm(Duration::from_millis(delay as u64)).await
@@ -329,9 +368,6 @@ impl TaskLedger {
         }
     }
 
-    // Debt: flattening the repeated `match body::<T>(req).await` arms is planned. `expect` fails
-    // once this fits, so the exemption goes with it.
-    #[expect(clippy::too_many_lines)]
     async fn route(&self, req: &mut Request, ledger: &Ledger<'_, Sql>) -> Result<Response> {
         let Some(project_id) = req.headers().get(PROJECT_HEADER)? else {
             return simple_error(400, "invalid_request", "missing project");
@@ -344,167 +380,120 @@ impl TaskLedger {
         let Some(route) = verb(&req.method()).and_then(|v| Route::parse(v, &path)) else {
             return simple_error(404, "not_found", "no such route");
         };
-        let result = match route {
-            Route::CreateProject => {
-                let secret = format!("rls_{}", hex::encode(random_bytes(32)?));
-                ledger
-                    .create_project(&project_id, &secret, t)
-                    .map(|(p, c)| created(&p, c))
-            }
-            Route::GetProject => ledger.project().map(|p| json(&p, 200)),
-            Route::AddCredit => match body::<CreditBody>(req).await {
-                Ok(c) => ledger
-                    .add_credit(&c.payment_id, c.attempts, t)
-                    .map(|(p, added)| {
-                        if added {
-                            record_stat(&self.env, &p.id, "payment", "real", c.attempts as f64);
-                        }
-                        created(&p, added)
-                    }),
-                Err(e) => Err(e),
-            },
-            Route::Schedule => match body::<ScheduleRequest>(req).await {
-                Ok(r) => {
-                    let id = format!("task_{}", hex::encode(random_bytes(10)?));
-                    ledger
-                        .schedule(r, &id, t)
-                        .map(|(task, c)| created(&task, c))
+        let answer: Answer = async {
+            match route {
+                Route::CreateProject => {
+                    created(ledger.create_project(&project_id, &minted("rls", 32)?, t)?)
                 }
-                Err(e) => Err(e),
-            },
-            Route::Watch => match body::<WatchRequest>(req).await {
-                Ok(r) => {
-                    let id = format!("task_{}", hex::encode(random_bytes(10)?));
-                    ledger.watch(r, &id, t).map(|(task, c)| created(&task, c))
+                Route::GetProject => ok(ledger.project()?),
+                Route::AddCredit => self.add_credit(ledger, &body(req).await?, t),
+                Route::Schedule => {
+                    created(ledger.schedule(body(req).await?, &minted("task", 10)?, t)?)
                 }
-                Err(e) => Err(e),
-            },
-            Route::ListTasks => match serde_urlencoded_query::<ListQuery>(&url) {
-                Ok(q) => ledger
-                    .list(q.status, q.lane.as_deref(), q.cursor.as_deref(), q.limit)
-                    .map(|p| json(&p, 200)),
-                Err(e) => Err(e),
-            },
-            Route::GetTask(id) => ledger.task(id).map(|v| json(&v, 200)),
-            Route::CancelTask(id) => ledger.cancel(id, t).map(|v| json(&v, 200)),
-            Route::RedriveTask(id) => ledger.redrive(id, t).map(|v| json(&v, 200)),
-            Route::PutCron => match body::<CronRequest>(req).await {
-                Ok(r) => ledger.put_cron(r, t).map(|(c, was)| created(&c, was)),
-                Err(e) => Err(e),
-            },
-            Route::ListCrons => ledger.crons().map(|c| json(&c, 200)),
-            Route::GetCron(name) => ledger.cron(name).map(|c| json(&c, 200)),
-            Route::DeleteCron(name) => ledger.delete_cron(name).map(|c| json(&c, 200)),
-            Route::ReadInbox => match body::<InboxReadBody>(req).await {
-                Ok(r) => ledger
-                    .read_inbox(r.after, r.limit, r.ack)
-                    .map(|p| json(&p, 200)),
-                Err(e) => Err(e),
-            },
-            Route::AckInbox => match body::<InboxAckBody>(req).await {
-                Ok(a) => ledger.ack_inbox(a.up_to).map(|c| json(&c, 200)),
-                Err(e) => Err(e),
-            },
-            Route::SetWake => match body::<WakeRequest>(req).await {
-                Ok(w) => ledger.set_wake(w, t).map(|v| json(&v, 200)),
-                Err(e) => Err(e),
-            },
-            Route::DeleteWake => ledger.delete_wake(t).map(|v| json(&v, 200)),
-            Route::PutSecret => match body::<SecretRequest>(req).await {
-                Ok(r) => match r.validate() {
-                    Err(e) => Err(ApiError::invalid(e)),
-                    Ok(spec) => ledger.put_secret(&spec, t).map(|(v, c)| created(&v, c)),
-                },
-                Err(e) => Err(e),
-            },
-            Route::ListSecrets => ledger.secrets().map(|s| json(&s, 200)),
-            Route::PutHook => match body::<HookRequest>(req).await {
-                Ok(r) => match r.validate() {
-                    Err(e) => Err(ApiError::invalid(e)),
-                    Ok(spec) => {
-                        let token = format!("hk_{}", hex::encode(random_bytes(32)?));
-                        ledger
-                            .put_hook(&spec, &token, t)
-                            .map(|(h, c)| created(&h, c))
-                    }
-                },
-                Err(e) => Err(e),
-            },
-            Route::ListHooks => ledger.hooks().map(|h| json(&h, 200)),
-            Route::ReceiveHook => {
-                let d = match body::<HookDelivery>(req).await {
-                    Ok(d) => d,
-                    Err(e) => return error(e),
-                };
-                return match ledger.take_hook_request(d, t) {
-                    Ok(reply) => hook_answer(reply),
-                    Err(e) => Err(Error::RustError(e.to_string())),
-                };
+                Route::Watch => created(ledger.watch(body(req).await?, &minted("task", 10)?, t)?),
+                Route::ListTasks => {
+                    let q: ListQuery = serde_urlencoded_query(&url)?;
+                    ok(ledger.list(q.status, q.lane.as_deref(), q.cursor.as_deref(), q.limit)?)
+                }
+                Route::GetTask(id) => ok(ledger.task(id)?),
+                Route::CancelTask(id) => ok(ledger.cancel(id, t)?),
+                Route::RedriveTask(id) => ok(ledger.redrive(id, t)?),
+                Route::PutCron => created(ledger.put_cron(body(req).await?, t)?),
+                Route::ListCrons => ok(ledger.crons()?),
+                Route::GetCron(name) => ok(ledger.cron(name)?),
+                Route::DeleteCron(name) => ok(ledger.delete_cron(name)?),
+                Route::ReadInbox => {
+                    let r: InboxReadBody = body(req).await?;
+                    ok(ledger.read_inbox(r.after, r.limit, r.ack)?)
+                }
+                Route::AckInbox => ok(ledger.ack_inbox(body::<InboxAckBody>(req).await?.up_to)?),
+                Route::SetWake => ok(ledger.set_wake(body(req).await?, t)?),
+                Route::DeleteWake => ok(ledger.delete_wake(t)?),
+                Route::PutSecret => {
+                    let request: SecretRequest = body(req).await?;
+                    let spec = request.validate().map_err(ApiError::invalid)?;
+                    created(ledger.put_secret(&spec, t)?)
+                }
+                Route::ListSecrets => ok(ledger.secrets()?),
+                Route::PutHook => {
+                    let request: HookRequest = body(req).await?;
+                    let spec = request.validate().map_err(ApiError::invalid)?;
+                    created(ledger.put_hook(&spec, &minted("hk", 32)?, t)?)
+                }
+                Route::ListHooks => ok(ledger.hooks()?),
+                Route::ReceiveHook => {
+                    let reply = ledger.take_hook_request(body(req).await?, t);
+                    Ok(hook_answer(reply.map_err(platform)?)?)
+                }
+                Route::DeleteHook(name) => ok(ledger.delete_hook(name)?),
+                Route::UpdateHook(name) => {
+                    let update: HookUpdate = body(req).await?;
+                    let patch = update.validate().map_err(ApiError::invalid)?;
+                    ok(ledger.update_hook(name, patch)?)
+                }
+                Route::DeleteSecret(name) => ok(ledger.delete_secret(name)?),
+                Route::ResealSecrets => self.reseal(ledger),
+                Route::Claim => {
+                    let c: ClaimBody = body(req).await?;
+                    let claimed = ledger.claim(&c.task_id, c.generation, t)?;
+                    ok(ClaimReply::from(claimed))
+                }
+                Route::Finish => finish(ledger, body(req).await?, t),
             }
-            Route::DeleteHook(name) => ledger.delete_hook(name).map(|v| json(&v, 200)),
-            Route::UpdateHook(name) => match body::<HookUpdate>(req).await {
-                Ok(u) => match u.validate() {
-                    Err(e) => Err(ApiError::invalid(e)),
-                    Ok(patch) => ledger.update_hook(name, patch).map(|v| json(&v, 200)),
-                },
-                Err(e) => Err(e),
-            },
-            Route::DeleteSecret(name) => ledger.delete_secret(name).map(|v| json(&v, 200)),
-            Route::ResealSecrets => ledger.reseal().map(|c| {
-                json(
-                    &serde_json::json!({
-                        "rotation": c.rotation,
-                        // Which GitHub slot the deploy took the current key from, so
-                        // scripts/rotate-secrets-key.mjs can tell the sweep saw these keys.
-                        "slot": self.env.var("SECRETS_KEY_SLOT").ok().map(|v| v.to_string()),
-                        "resealed": c.resealed,
-                        "unreadable": c.unreadable,
-                    }),
-                    200,
-                )
-            }),
-            Route::Claim => match body::<ClaimBody>(req).await {
-                Ok(c) => ledger.claim(&c.task_id, c.generation, t).map(|claimed| {
-                    let reply = match claimed {
-                        Claimed::Deliver(d) => ClaimReply {
-                            deliver: Some(*d),
-                            skipped: None,
-                        },
-                        Claimed::Skip(why) => ClaimReply {
-                            deliver: None,
-                            skipped: Some(why.into()),
-                        },
-                    };
-                    json(&reply, 200)
-                }),
-                Err(e) => Err(e),
-            },
-            Route::Finish => match body::<FinishBody>(req).await {
-                Ok(f) => ledger
-                    .finish_response(
-                        &f.task_id,
-                        f.fence,
-                        f.outcome,
-                        Some(ResponseRead {
-                            body: f.body.as_deref().map(|text| PollBody {
-                                text,
-                                truncated: f.truncated,
-                            }),
-                            headers: &f.headers,
-                        }),
-                        t,
-                        jitter(),
-                    )
-                    .map(|s| json(&serde_json::json!({ "status": s }), 200))
-                    .map_err(ApiError::from),
-                Err(e) => Err(e),
-            },
-        };
-        match result {
-            Ok(response) => response,
-            Err(e) => error(e),
+        }
+        .await;
+        match answer {
+            Ok(response) => Ok(response),
+            Err(Failure::Refused(e)) => error(e),
+            Err(Failure::Platform(e)) => Err(e),
         }
     }
+
+    fn add_credit(&self, ledger: &Ledger<'_, Sql>, credit: &CreditBody, t: i64) -> Answer {
+        let attempts = credit.attempts;
+        let (project, added) = ledger.add_credit(&credit.payment_id, attempts, t)?;
+        if added {
+            record_stat(&self.env, &project.id, "payment", "real", attempts as f64);
+        }
+        created((project, added))
+    }
+
+    fn reseal(&self, ledger: &Ledger<'_, Sql>) -> Answer {
+        let count = ledger.reseal()?;
+        ok(serde_json::json!({
+            "rotation": count.rotation,
+            // Which GitHub slot the deploy took the current key from, so
+            // scripts/rotate-secrets-key.mjs can tell the sweep saw these keys.
+            "slot": self.env.var("SECRETS_KEY_SLOT").ok().map(|v| v.to_string()),
+            "resealed": count.resealed,
+            "unreadable": count.unreadable,
+        }))
+    }
+}
+
+impl From<Claimed> for ClaimReply {
+    fn from(claimed: Claimed) -> Self {
+        let (deliver, skipped) = match claimed {
+            Claimed::Deliver(d) => (Some(*d), None),
+            Claimed::Skip(why) => (None, Some(why.into())),
+        };
+        Self { deliver, skipped }
+    }
+}
+
+/// Records what an attempt came to, with whatever of the response the task keeps.
+fn finish(ledger: &Ledger<'_, Sql>, f: FinishBody, t: i64) -> Answer {
+    let read = ResponseRead {
+        body: f.body.as_deref().map(|text| PollBody {
+            text,
+            truncated: f.truncated,
+        }),
+        headers: &f.headers,
+    };
+    let status = ledger
+        .finish_response(&f.task_id, f.fence, f.outcome, Some(read), t, jitter())
+        .map_err(ApiError::from)?;
+    ok(serde_json::json!({ "status": status }))
 }
 
 /// Query strings here are flat `key=value` pairs; parse them through JSON so serde does
@@ -540,12 +529,8 @@ impl DurableObject for TaskLedger {
 
     async fn alarm(&self) -> Result<Response> {
         let sql = self.sql();
-        let ledger = self
-            .ledger(&sql)
-            .map_err(|e| Error::RustError(e.to_string()))?;
-        let tick = ledger
-            .tick(now(), jitter)
-            .map_err(|e| Error::RustError(e.to_string()))?;
+        let ledger = self.ledger(&sql).map_err(platform)?;
+        let tick = ledger.tick(now(), jitter).map_err(platform)?;
         for e in tick.unreadable {
             console_error!("failed an unreadable task row: {e}");
         }
@@ -572,14 +557,9 @@ async fn call<T: DeserializeOwned>(
     path: &str,
     payload: &impl Serialize,
 ) -> Result<T> {
-    let headers = Headers::new();
-    headers.set(PROJECT_HEADER, project_id)?;
-    headers.set("Content-Type", "application/json")?;
-    let mut init = RequestInit::new();
-    init.with_method(Method::Post)
-        .with_headers(headers)
-        .with_body(Some(serde_json::to_string(payload)?.into()));
-    let req = Request::new_with_init(&format!("https://ledger{path}"), &init)?;
+    let body = serde_json::to_string(payload)?.into();
+    let url = format!("https://ledger{path}");
+    let req = ledger_request(project_id, Method::Post, &url, Some(body))?;
     let mut res = stub.fetch_with_request(req).await?;
     if res.status_code() != 200 {
         return Err(Error::RustError(format!(
