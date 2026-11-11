@@ -1352,7 +1352,7 @@ describe("A2A at /a2a", () => {
     assert.equal((await getAs(reader, standing.id)).result.status.state, "TASK_STATE_SUBMITTED");
   });
 
-  test("redrive_task is refused for a task made through A2A, so a terminal A2A task never reopens; any other task redrives as before", async () => {
+  test("redrive_task is refused for a task made through A2A, so once terminal it never reopens; any other task redrives as before", async () => {
     const agent = await withProject();
     for (const path of ["/a2a-redrive", "/a2a-redrive-plain"]) replies.set(path, [404]);
     const made = await sendAs(agent, { url: "https://dest.example.com/a2a-redrive" });
@@ -1381,7 +1381,7 @@ describe("A2A at /a2a", () => {
     assert.equal(deliveriesTo("/a2a-redrive-plain").length, 2);
   });
 
-  test("ListTasks returns only the caller's A2A tasks, most recently changed first, with paging, a total and the filters; never another host's or interface's", async () => {
+  test("ListTasks returns only the caller's tasks made through A2A, most recently changed first, with paging, a total and the filters; never another host's or interface's", async () => {
     const agent = await withProject();
     const stranger = await withProject();
     const client = await a2aClient(agent);

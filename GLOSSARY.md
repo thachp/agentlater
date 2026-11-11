@@ -27,7 +27,7 @@ A task an agent asked for with schedule_http or queue_http, optionally waiting i
 
 **Made through A2A**:
 Said of a request that arrived on the A2A interface. The ledger marks it, and A2A reads only marked tasks; every other interface reads all of a project's tasks and cannot tell which are marked, except that none can redrive a marked one.
-_Avoid_: origin (issue #209 calls the mark an "origin marker"; here origin reads as the task kind), A2A task as a kind (its kind is request)
+_Avoid_: origin (here it reads as the task kind), A2A task as a kind (its kind is request)
 
 **Watch**:
 A task whose attempts are polls, repeated until the response matches or the deadline passes.

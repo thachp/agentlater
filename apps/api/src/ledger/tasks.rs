@@ -718,7 +718,7 @@ impl<D: Db> Ledger<'_, D> {
         if let Some(status) = &q.status {
             let statuses: Vec<&str> = status.split(',').collect();
             if (statuses.iter()).any(|s| serde_json::from_value::<Status>((*s).into()).is_err()) {
-                return Err(ApiError::bad_request("status is not valid"));
+                return Err(ApiError::bad_request("status is not valid").in_field("status"));
             }
             let marks = vec!["?"; statuses.len()].join(", ");
             filter.push_str(&format!(" AND status IN ({marks})"));
@@ -1421,6 +1421,7 @@ mod tests {
                 (400, "status is not valid"),
                 "{bad:?}"
             );
+            assert_eq!(e.field, Some("status"), "{bad:?}");
         }
     }
 
