@@ -45,9 +45,6 @@ export const LIMITS: [string, string][] = [
 
 // ---- A2A (app/docs/a2a). Each is checked against apps/gateway/src by test/snippets.test.ts.
 
-/** The gateway the A2A page's samples call: one that serves the Agent Card and /a2a (its A2A_ENABLED is "true"). */
-export const A2A_GATEWAY_URL = "https://gateway-staging.agentlater.io";
-
 /** A delivery status, the A2A task state it reads as, and what it means. */
 export const A2A_STATES: [string, string, string][] = [
   ["scheduled", "TASK_STATE_SUBMITTED", "Waiting for its time."],

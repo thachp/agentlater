@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Code } from "../../../components/Code";
-import { A2A_GATEWAY_URL, A2A_LIMITS, A2A_PAYLOAD, A2A_STATES, GATEWAY_URL, REPO_URL } from "../../../lib/site";
+import { A2A_LIMITS, A2A_PAYLOAD, A2A_STATES, GATEWAY_URL, REPO_URL } from "../../../lib/site";
 import { a2aConnect, a2aRequest, a2aResponse, a2aRun, a2aSend } from "../../../lib/snippets";
 
 export const metadata: Metadata = { title: "A2A" };
@@ -11,7 +11,7 @@ const EXAMPLE = `${REPO_URL}/blob/main/apps/gateway/examples/a2a-client.mjs`;
 
 /** Refused before JSON-RPC: an HTTP status and a body of { error, message }. */
 const REFUSALS: [string, string, string][] = [
-  ["404", "not_found", "A2A is switched off in this environment. The Agent Card and the schema answer 404 too."],
+  ["404", "not_found", "A2A is switched off on this gateway. The Agent Card and the schema answer 404 too."],
   ["405", "method_not_allowed", "/a2a takes POST only."],
   ["401", "authentication_required", "No Bearer token. Like every 401 here, it carries WWW-Authenticate: AgentAuth discovery=\"…\", the place to register."],
   ["401", "invalid_jwt", "The token is malformed, wrongly signed, expired, older than 60 seconds, not an agent JWT, signed for an audience other than this /a2a URL, or names capabilities other than [\"a2a\"]. Check the clock, and that aud is the interface URL from the card."],
@@ -67,9 +67,9 @@ export default function A2a() {
 
       <div className="callout">
         <p>
-          <strong>Switched on per environment.</strong> A2A is on at <code>{A2A_GATEWAY_URL}</code>. On{" "}
-          <code>{GATEWAY_URL}</code> it may not be available yet: where it is off, the Agent Card and{" "}
-          <code>/a2a</code> answer <code>404</code>. Fetch <code>/.well-known/agent-card.json</code> to find out.
+          <strong>Start from the Agent Card.</strong> A2A is on at <code>{GATEWAY_URL}</code>. Fetch{" "}
+          <code>/.well-known/agent-card.json</code> there: it names the endpoint, the protocol version and how to
+          authenticate.
         </p>
       </div>
 
@@ -160,7 +160,7 @@ export default function A2a() {
       <p>
         <code>SendMessage</code> takes one message with one part: a JSON data part, media type{" "}
         <code>application/json</code>, as the JSON Schema at{" "}
-        <code>{A2A_GATEWAY_URL}/a2a/schemas/deliver-http/v1.json</code> defines it. A text part schedules nothing and
+        <code>{GATEWAY_URL}/a2a/schemas/deliver-http/v1.json</code> defines it. A text part schedules nothing and
         the error says what to send.
       </p>
       <div className="table-scroll">

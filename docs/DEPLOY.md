@@ -104,7 +104,7 @@ Each run creates a new agent identity and project in staging; they are not clean
 
 ### A2A end-to-end run
 
-The A2A interface is switched on per environment by the gateway's `A2A_ENABLED` var (`apps/gateway/wrangler.jsonc`): on in staging, off in production. Before switching it on in production, run [`apps/gateway/e2e/a2a-staging.mjs`](../apps/gateway/e2e/a2a-staging.mjs) against staging and attach its report to the pull request that flips the var:
+The A2A interface is switched on per environment by the gateway's `A2A_ENABLED` var (`apps/gateway/wrangler.jsonc`): on in staging and, since 2026-11-11, in production. After a change to the A2A interface, run [`apps/gateway/e2e/a2a-staging.mjs`](../apps/gateway/e2e/a2a-staging.mjs) against staging and attach its report to the pull request:
 
 ```sh
 node apps/gateway/e2e/a2a-staging.mjs https://gateway-staging.agentlater.io "$(gh variable get RECEIVER_URL --env staging)" > a2a-report.md
