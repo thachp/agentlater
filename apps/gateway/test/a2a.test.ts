@@ -67,7 +67,7 @@ describe("Agent Card", () => {
     expect(Object.keys(card.securityRequirements[0].schemes)).toEqual([name]);
     expect(card.securityRequirements[0].schemes[name].list ?? []).toEqual([]);
 
-    expect(card.documentationUrl).toMatch(/^https:\/\//);
+    expect(card.documentationUrl).toBe("https://agentlater.io/docs/a2a");
     const [onboarding] = card.capabilities.extensions;
     // Data only: a client that ignores it can still call the agent.
     expect(onboarding.required ?? false).toBe(false);
@@ -88,6 +88,12 @@ describe("Agent Card", () => {
     for (const example of card.skills[0].examples) {
       expect(Object.keys(JSON.parse(example)).filter((k) => !accepted.includes(k))).toEqual([]);
     }
+  });
+
+  it("advertises nothing this version leaves out, and neither does the payload schema", async () => {
+    const { text } = await cardAt("https://gateway.test");
+    const schema = await (await get("https://gateway.test/a2a/schemas/deliver-http/v1.json")).text();
+    for (const published of [text, schema]) expect(published).not.toMatch(/cron|watch|callback|lane|queue|inbox|wake|set_secret|payment|redrive|stream(?!ing":false)/i);
   });
 
   it("contains no secret", async () => {
@@ -249,6 +255,14 @@ describe("with A2A_ENABLED off", () => {
       expect((await worker.fetch(post({ ...V1, Authorization: "Bearer anything" }), off, ctx)).status, String(value)).toBe(404);
       expect((await worker.fetch(post({}), off, ctx)).status, String(value)).toBe(404);
     }
+  });
+
+  it("leaves A2A out of llms.txt, which names the card only where it is served", async () => {
+    const llms = async (env: Env) => (await get("https://gateway.test/llms.txt", env)).text();
+    expect(await llms({ ...on, A2A_ENABLED: "false" } as unknown as Env)).not.toMatch(/a2a/i);
+    const served = await llms(on);
+    expect(served).toContain("https://gateway.test/.well-known/agent-card.json");
+    expect(served).toContain("https://agentlater.io/docs/a2a");
   });
 });
 

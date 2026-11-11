@@ -91,7 +91,7 @@ const gateway = {
       return Response.json(openApi(env), { headers: { "Cache-Control": "public, max-age=300", "Access-Control-Allow-Origin": "*" } });
     }
     if (request.method === "GET" && url.pathname === "/llms.txt") {
-      return new Response(llmsTxt(env), {
+      return new Response(llmsTxt(env, a2aEnabled(env)), {
         headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "public, max-age=300", "Access-Control-Allow-Origin": "*" },
       });
     }

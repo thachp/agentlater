@@ -67,7 +67,7 @@ flowchart LR
 | `/h/{project}/{token}` | Inbound hooks. The only thing the hooks host serves. | The token, checked in the ledger |
 | `/billing/webhook` | Stripe events | `Stripe-Signature` |
 | `/billing/mpp/{link}` | An agent buying a pack | HMAC in the link, then the payment challenge |
-| `/openapi.json`, `/llms.txt`, `/health` | Discovery documents; `/health` also checks the API | None |
+| `/openapi.json`, `/llms.txt`, `/health` | Discovery documents; `/llms.txt` names the A2A card only when `A2A_ENABLED` is on; `/health` also checks the API | None |
 | `/.well-known/agent-card.json`, `/a2a/schemas/deliver-http/v1.json`, `/a2a` | The A2A Agent Card, the JSON Schema of the request it takes, and its JSON-RPC endpoint (`src/a2a.ts`). All answer 404 unless `A2A_ENABLED` is `"true"`: on in staging, off in production. `/a2a` negotiates the version, verifies the caller and hands it to the dispatcher with its host and grants. It is an adapter over the capabilities: `SendMessage` runs `schedule_http` (a `run_at_ms` or `delay` given) or `queue_http`, `GetTask` runs `get_task`, `ListTasks` runs `list_tasks` and `CancelTask` runs `cancel_task`, each only if the agent holds that capability (else HTTP 403). The task returned is the delivery task under its own id, never held until it finishes. `CancelTask` cancels a task with no attempt out, answers `TaskNotCancelableError` for one that succeeded or failed, and returns one whose attempt is out as working, with a status message saying the attempt decides. `ListTasks` pages by the ledger's cursor, filters by state and `statusTimestampAfter`, and refuses `contextId` by name, since each task is its own context. Calls made for `/a2a` are marked in the assertion, so the ledger marks the tasks they make and finds only those for them (see Assertions) | The card: none. `/a2a`: an Agent Auth agent JWT whose `aud` is the `/a2a` URL of the host asked and whose `capabilities` are `["a2a"]`, single-use. The Agent Auth plugin verifies it (through its `/agent/session` route, which is not served publicly); `src/auth.ts` then requires that audience exactly, an active host and the agent's `a2a` grant. A hook after the plugin's refuses such a token on every Agent Auth route |
 
 - **Two identities, one path.** `runCapability` (`src/projects.ts`) takes an owner, either an Agent Auth host id or `mcp:<id>` from a grant, finds its project in `runlater_project`, and makes the one API call named by the capability's `api` binding in `packages/contracts` (`src/capabilities.ts`). The exception is `get_payment_link`, which the gateway answers itself. A project id is never taken from the caller.
@@ -86,11 +86,11 @@ Not on any public route (`workers_dev: false`, no custom domain). It is reached 
 
 ### `apps/web`
 
-Landing page, docs (`/docs`, `/docs/capabilities`, `/docs/delivery`), `/pay`, `/terms`, `/privacy`. No auth and no server state. The capabilities page renders the same definitions the gateway serves.
+Landing page, docs (`/docs`, `/docs/capabilities`, `/docs/delivery`, `/docs/a2a`), `/pay`, `/terms`, `/privacy`. No auth and no server state. The capabilities page renders the same definitions the gateway serves.
 
 ### `apps/receiver`
 
-A staging-only fixture: it records what the journey delivers and scripts replies (`ok`, `flaky`, `gone`). Never deployed to production.
+A staging-only fixture: it records what the journey and the A2A run deliver and scripts replies (`ok`, `flaky`, `gone`, `down`). Never deployed to production.
 
 ## Where data lives
 
@@ -178,7 +178,8 @@ runlater/
 │   │   ├── src/             index, mcp, consent, auth, store, projects, capabilities,
 │   │   │                    api, hooks, billing, mpp, discovery, body
 │   │   ├── migrations/      D1 SQL
-│   │   └── e2e/             agent.e2e, journey, staging, oauth
+│   │   ├── examples/        a2a-client (the A2A example the docs show), a2a-wire
+│   │   └── e2e/             agent.e2e, journey, staging, a2a-staging, oauth
 │   ├── receiver/            TS Worker: staging fixture
 │   └── web/                 Next.js + OpenNext: app/, components/, lib/
 ├── crates/
@@ -220,6 +221,7 @@ One `wrangler.jsonc` per app with `env.staging` and `env.production` (the receiv
 | `crates/*`, ledger | `cargo test`, native. The test database enforces workerd's limits (for example, `SQLITE_LIMIT_COMPOUND_SELECT = 5`). |
 | `apps/api` | `npm run test:e2e`: the built Worker in local workerd, with DO SQLite, alarms and Queues |
 | `apps/gateway` | `vitest` units; `npm run test:e2e`: gateway, API and receiver together, driven by the real `@auth/agent` SDK, the MCP bridge and scripted OAuth |
+| A2A | In the gateway e2e: the official `@a2a-js/sdk` client drives send, get, list and cancel; `examples/a2a-client.mjs` runs from nothing, restarts, and replaces an expired or revoked agent; `examples/a2a-wire.json` is sent as it is. `apps/web/test/snippets.test.ts` fails when the docs page shows a line or a number that is not in them. `e2e/a2a-staging.mjs` runs its scenarios locally in the same suite, and by hand against staging ([DEPLOY.md](../DEPLOY.md#a2a-end-to-end-run)) |
 | Journey | `e2e/journey.mjs`: one agent's whole path, run locally in CI, on staging after each deploy, and daily against production |
 | `apps/web` | `vitest`: the docs' Node and Python signature samples are executed against the `crates/egress` vector, and the stated limits are checked against `crates/core`. `npm run check` builds with OpenNext. There are no browser tests. |
 | `apps/receiver` | `vitest` |

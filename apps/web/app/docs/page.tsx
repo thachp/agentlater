@@ -129,6 +129,10 @@ export default function Quickstart() {
           <Link href="/docs/delivery">Delivery &amp; signatures</Link>: what the destination receives, how to verify
           it, and when AgentLater retries.
         </li>
+        <li>
+          <Link href="/docs/a2a">A2A</Link>: schedule a delivery from an agent that speaks the Agent2Agent protocol.
+          Switched on per environment; it may not be available on production yet.
+        </li>
       </ul>
     </>
   );

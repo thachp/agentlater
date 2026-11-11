@@ -63,6 +63,25 @@ See the [plugin README](plugins/agentlater/README.md) for installation and migra
 Autonomous integrations can also use [Agent Auth](docs/spec/PRODUCT.md#capabilities-the-api-surface) at the gateway;
 that identity and its project are separate from a hosted MCP connection.
 
+### A2A
+
+An agent that speaks the [Agent2Agent protocol](https://a2a-protocol.org/v1.0.1/specification/) (version 1.0,
+JSON-RPC) can schedule one-off deliveries and read, list and cancel them, signed in with Agent Auth and no
+human login. A2A is switched on per environment: it is on at `https://gateway-staging.agentlater.io` and may
+not be available on production yet, where its Agent Card answers `404` until it is.
+
+```sh
+# in a checkout, after npm ci
+node apps/gateway/examples/a2a-client.mjs https://gateway-staging.agentlater.io
+```
+
+[`a2a-client.mjs`](apps/gateway/examples/a2a-client.mjs) is a complete client in one file: it reads the Agent
+Card, registers, makes its project, schedules a delivery and polls it to its end. Outside a checkout, copy the file and
+`npm install @a2a-js/sdk@1.3.0 @auth/agent@0.6.2`. It keeps its keys in
+`~/.agentlater/` (mode 0600). The auth sequence, payload schema, task states, errors and what is not offered
+through A2A (crons, watches, hooks, secrets, payments, streaming, push notifications, callbacks, lanes) are in
+the [A2A docs](https://agentlater.io/docs/a2a) and [PRODUCT.md](docs/spec/PRODUCT.md#a2a-interface).
+
 ## Example: trigger a background job through a webhook
 
 A common use is calling your application's job endpoint after a delay—for example, generating
@@ -152,9 +171,9 @@ cutover; it is in git history before this change.
 | Path | What | Stack |
 | --- | --- | --- |
 | `apps/api` | Private task API: ledger, scheduling, delivery | Rust · workers-rs |
-| `apps/gateway` | Public entry for agents: Agent Auth, capabilities, MCP | TypeScript Worker |
+| `apps/gateway` | Public entry for agents: Agent Auth, capabilities, MCP, A2A | TypeScript Worker |
 | `apps/web` | agentlater.io landing, docs and payment page | Next.js · OpenNext |
-| `apps/receiver` | Staging-only fixture the journey delivers to | TypeScript Worker |
+| `apps/receiver` | Staging-only fixture the journey and the A2A run deliver to | TypeScript Worker |
 | `crates/core` | Task domain, no Cloudflare deps | Rust |
 | `crates/egress` | Destination policy and request signing | Rust |
 | `packages/contracts` | Capability definitions, and the OpenAPI contract between gateway and API | TypeScript · OpenAPI 3.1 |

@@ -38,6 +38,9 @@ export default function Delivery() {
         </table>
       </div>
       <p>
+        Read through <a href="/docs/a2a#states">A2A</a>, a task shows the same statuses as A2A task states.
+      </p>
+      <p>
         Delivery is <strong>at least once</strong>: if a worker is lost mid-attempt, the attempt is recorded as{" "}
         <code>lease_expired</code> and tried again, so the destination may see the same task twice. Use{" "}
         <code>RunLater-Task-Id</code> to ignore repeats. Timing is best effort, with no exact-time or ordering promise.

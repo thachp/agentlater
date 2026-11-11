@@ -1,6 +1,7 @@
 // Public discovery documents. /openapi.json describes the paid MPP endpoint with `x-payment-info`
 // so MPP clients and directories can find it (https://mpp.dev); /llms.txt tells a model what
-// AgentLater is and how to connect. The runtime 402 challenge stays authoritative.
+// AgentLater is and how to connect, and names the A2A interface only where it is served. The
+// runtime 402 challenge stays authoritative.
 
 import { ATTEMPT_PACK } from "@runlater/contracts/billing";
 import type { BillingEnv } from "./billing";
@@ -69,13 +70,17 @@ export function openApi(env: BillingEnv & { PUBLIC_URL: string }): Record<string
   };
 }
 
-export function llmsTxt(env: { PUBLIC_URL: string }): string {
+/** `a2a` adds the A2A interface, which is served only where it is switched on. */
+export function llmsTxt(env: { PUBLIC_URL: string }, a2a: boolean): string {
+  const a2aLine = a2a
+    ? `\n- A2A (protocol 1.0, JSON-RPC): Agent Card at ${env.PUBLIC_URL}/.well-known/agent-card.json. Register with Agent Auth first, with the a2a capability; send one JSON data part describing the HTTP request and get a task to poll. One-off deliveries only. Guide: ${SITE}/docs/a2a`
+    : "";
   return `# AgentLater
 
 > Make an HTTP request later, and know whether it happened. AgentLater schedules signed HTTPS requests for AI agents, retries them when the destination fails, and records every attempt.
 
 - Hosted MCP server: ${env.PUBLIC_URL}/mcp (Streamable HTTP, OAuth with a one-click consent page, no account).
-- Agent Auth: discovery at ${env.PUBLIC_URL}/.well-known/agent-configuration.
+- Agent Auth: discovery at ${env.PUBLIC_URL}/.well-known/agent-configuration.${a2aLine}
 - Capabilities: create_project, schedule_http, queue_http, get_task, list_tasks, cancel_task, redrive_task, create_cron, watch_http, read_inbox, ack_inbox, set_wake, set_secret, create_hook, get_payment_link and more. Reference: ${SITE}/docs/capabilities
 - No public URL? schedule_http or queue_http with callback_url "inbox" and capture: true, then read_inbox in your next session: the result, including what the destination answered, waits there. With set_wake, AgentLater calls the URL that starts you as soon as something arrives.
 - Credentials: set_secret stores one encrypted and bound to allowed_hosts; use {{secret:NAME}} in a header and AgentLater fills it in only when sending, only to those hosts.

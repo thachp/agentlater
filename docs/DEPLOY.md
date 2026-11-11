@@ -102,6 +102,20 @@ environment variable `RECEIVER_URL` to its `*.workers.dev` URL, printed by the d
 
 Each run creates a new agent identity and project in staging; they are not cleaned up.
 
+### A2A end-to-end run
+
+The A2A interface is switched on per environment by the gateway's `A2A_ENABLED` var (`apps/gateway/wrangler.jsonc`): on in staging, off in production. Before switching it on in production, run [`apps/gateway/e2e/a2a-staging.mjs`](../apps/gateway/e2e/a2a-staging.mjs) against staging and attach its report to the pull request that flips the var:
+
+```sh
+node apps/gateway/e2e/a2a-staging.mjs https://gateway-staging.agentlater.io "$(gh variable get RECEIVER_URL --env staging)" > a2a-report.md
+```
+
+It registers a new identity, makes its project, and through the official A2A client checks an immediate and a delayed success, a 404 that fails without a retry, retries exhausted (two 503s with `max_attempts: 2`), cancellation, a duplicate submission, the list, a second host being refused, and that a failed task cannot be redriven. The report is Markdown on stdout, progress is on stderr, and the exit status is 1 if a scenario failed. It takes 30 to 60 seconds. With `RECEIVER_TOKEN` set it also checks what the receiver recorded; without it, deliveries are judged by each task's attempts. It needs the receiver's `down` reply, deployed with the staging receiver.
+
+Each run leaves two hosts and their projects (two of the day's new trials) and six finished tasks, deleted after 30 days. Unlike the journey it revokes its two agents when it ends. It is not part of the deploy workflow and is never run against production while A2A is off there (it would stop at the missing Agent Card).
+
+The same script runs against the local stack in the gateway e2e suite.
+
 ### Hosted MCP
 
 The gateway serves `/mcp`, `/authorize`, `/oauth/token`, `/oauth/register` and the OAuth discovery

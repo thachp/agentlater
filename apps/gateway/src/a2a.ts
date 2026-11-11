@@ -44,6 +44,7 @@ const PAYLOAD_FIELDS = ["url", "method", "headers", "body", "run_at_ms", "delay"
 const scheduleInput = capabilities.find((c) => c.name === "schedule_http")!.input;
 /** Where schedule_http's own words would send an A2A caller to a capability it has no use for here. */
 const PAYLOAD_DESCRIPTIONS: Record<string, string> = {
+  headers: "Headers to send. Host, Content-Length and RunLater-*/CF-*/X-Forwarded-* headers are not allowed.",
   run_at_ms: "When to send, unix ms, at most 7 days ahead. Not with delay. With neither, it is sent as soon as possible.",
   idempotency_key: "Send the same request again with the same key to get the same task back. Without one, the message's messageId is the key.",
   capture:
@@ -78,7 +79,7 @@ function card(env: A2aEnv): AgentCard {
     description: "Makes an HTTP request later for an agent, retries it when the destination fails, and records whether it happened.",
     version: "1.0.0",
     provider: { organization: "AgentLater", url: SITE },
-    documentationUrl: `${SITE}/docs`,
+    documentationUrl: `${SITE}/docs/a2a`,
     supportedInterfaces: [{ url: endpoint, protocolBinding: "JSONRPC", protocolVersion: "1.0" }],
     capabilities: {
       streaming: false,

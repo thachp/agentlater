@@ -655,7 +655,7 @@ describe("the payload schema", () => {
     }
     expect(schema.required).toEqual(input("schedule_http").required);
     // No description points an A2A caller at a capability it cannot call here.
-    expect(JSON.stringify(schema)).not.toMatch(/queue_http|schedule_http|get_task|callback|inbox/);
+    expect(JSON.stringify(schema)).not.toMatch(/queue_http|schedule_http|get_task|set_secret|callback|inbox/);
   });
 
   it("is not served when A2A is off", async () => {

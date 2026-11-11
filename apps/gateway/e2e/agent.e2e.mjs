@@ -6,16 +6,18 @@
 
 import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createHmac, createPrivateKey, createPublicKey, randomBytes, randomUUID, sign } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { CancelTaskRequest, ListTasksRequest, SendMessageRequest, SubscribeToTaskRequest, TaskState } from "@a2a-js/sdk";
 import { AgentCardResolver, ClientFactory, JsonRpcTransportFactory } from "@a2a-js/sdk/client";
-import { ContentTypeNotSupportedError, TaskNotCancelableError, TaskNotFoundError, UnsupportedOperationError } from "@a2a-js/sdk/errors";
+import { ContentTypeNotSupportedError, RequestMalformedError, TaskNotCancelableError, TaskNotFoundError, UnsupportedOperationError } from "@a2a-js/sdk/errors";
 import { AgentAuthClient, MemoryStorage } from "@auth/agent";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -23,6 +25,8 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { createHash } from "node:crypto";
 import { Challenge, Credential, Receipt } from "mppx";
 import { apiWorker } from "../../api/test/api-worker.mjs";
+import { connect as connectExample, delivery as exampleDelivery, deliveryOf, ended, run as runExample } from "../examples/a2a-client.mjs";
+import { runA2aReport } from "./a2a-staging.mjs";
 import { runJourney } from "./journey.mjs";
 import { REDIRECT, connectHosted } from "./oauth.mjs";
 
@@ -1334,6 +1338,180 @@ describe("A2A at /a2a", () => {
     assert.equal((await run(stranger, "cancel_task", { task_id: plain.id })).status, "canceled");
     // The stranger's list never had any of them.
     assert.deepEqual((await rpcAs(stranger, "ListTasks", {})).body.result, { tasks: [], nextPageToken: "", pageSize: 50, totalSize: 0 });
+  });
+
+  // ---- What a client author runs: the example client, the SDK client alone, and the staging script ----
+
+  /** fetch as the example client takes it, each request from an address of its own. */
+  const fromAnywhere = (url, init) => {
+    const ip = address();
+    return fetch(url, { ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), "CF-Connecting-IP": ip, "X-Forwarded-For": ip } });
+  };
+  /** Where the example client keeps its keys when it is not a file. */
+  const memoryStore = () => {
+    const kept = new Map();
+    return { get: async (key) => kept.get(key) ?? null, set: async (key, value) => void kept.set(key, value), del: async (key) => void kept.delete(key) };
+  };
+
+  test("the example client goes from nothing to a delivered request; restarted, it keeps its identity and finds its project and task again; it registers a new agent when its own has expired or been revoked", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "a2a-example-"));
+    const state = join(dir, "state", "client.json");
+    const lines = [];
+    const start = (over = {}) =>
+      runExample({ baseUrl: origin, state, payload: { url: "https://dest.example.com/a2a-example", method: "POST", body: "hello", delay: "1s" }, fetch: fromAnywhere, pollMs: 250, log: (line) => lines.push(line), ...over });
+    try {
+      const first = await start();
+      assert.deepEqual([first.registered, first.state, first.delivery.attempt_count], [true, "TASK_STATE_COMPLETED", 1]);
+      assert.equal(deliveriesTo("/a2a-example")[0].body, "hello");
+
+      // The private keys are in the state file, which only its owner can read, and nowhere else.
+      assert.equal((await stat(state)).mode & 0o777, 0o600);
+      assert.equal((await stat(join(dir, "state"))).mode & 0o777, 0o700);
+      assert.deepEqual(await readdir(join(dir, "state")), ["client.json"]);
+      const kept = await readFile(state, "utf8");
+      assert.ok(kept.includes('\\"d\\"'), "the state file holds the private keys");
+      assert.equal(lines.join("\n").includes('"d"'), false);
+      // The project's signing secret is returned by create_project; the client neither keeps nor prints it.
+      assert.doesNotMatch(kept + lines.join("\n"), /rls_/);
+
+      // Restarted: the same agent, and the project and the task found again, with nothing sent twice.
+      const again = await start();
+      assert.deepEqual([again.registered, again.agentId, again.projectId, again.taskId, again.state], [false, first.agentId, first.projectId, first.taskId, "TASK_STATE_COMPLETED"]);
+      assert.ok(lines.includes(`project ${first.projectId} found again`) && lines.includes(`task ${first.taskId} found again`), lines.join("\n"));
+      // Stopped after sending but before the task's id was kept: the same message returns the same task.
+      const saved = JSON.parse(kept);
+      delete saved["agentlater:task"];
+      await writeFile(state, JSON.stringify(saved));
+      assert.equal((await start()).taskId, first.taskId);
+      assert.equal(deliveriesTo("/a2a-example").length, 1);
+      const another = await start({ another: true });
+      assert.notEqual(another.taskId, first.taskId);
+      assert.equal(deliveriesTo("/a2a-example").length, 2);
+
+      // The agent is past the 7 days an agent lives: a new one is registered under the same host
+      // key, so the project and the task are the same.
+      const db = await gatewayDb();
+      await db.prepare('UPDATE "agent" SET "createdAt" = ? WHERE id = ?').bind(new Date(Date.now() - 8 * 86_400_000).toISOString(), first.agentId).run();
+      const renewed = await start();
+      assert.deepEqual([renewed.registered, renewed.projectId, renewed.taskId], [true, first.projectId, another.taskId]);
+      assert.notEqual(renewed.agentId, first.agentId);
+      // Revoked, or no longer known to the gateway at all: the same.
+      await db.prepare('UPDATE "agent" SET status = ? WHERE id = ?').bind("revoked", renewed.agentId).run();
+      const replaced = await start();
+      assert.deepEqual([replaced.registered, replaced.projectId, replaced.taskId], [true, first.projectId, another.taskId]);
+      await db.prepare('DELETE FROM "agent" WHERE id = ?').bind(replaced.agentId).run();
+      const last = await start();
+      assert.deepEqual([last.registered, last.projectId, last.taskId], [true, first.projectId, another.taskId]);
+      assert.deepEqual(new Set([first.agentId, renewed.agentId, replaced.agentId, last.agentId]).size, 4);
+      assert.equal((await start()).agentId, last.agentId);
+
+      // As a program: the gateway is its argument, its state is where AGENTLATER_STATE says, and it exits 0 for a completed task.
+      const program = (args, env = {}) => promisify(execFile)(process.execPath, [join(gatewayDir, "examples/a2a-client.mjs"), ...args], { env: { ...process.env, AGENTLATER_URL: "", ...env } });
+      const { stdout } = await program([`${origin}/`], { AGENTLATER_STATE: state });
+      assert.ok(stdout.includes(`task ${another.taskId} found again`) && stdout.includes("TASK_STATE_COMPLETED: 1 attempt(s), last HTTP status 200"), stdout);
+      await assert.rejects(program([]), (e) => e.code === 2 && /usage/.test(e.stderr));
+      await assert.rejects(promisify(execFile)(process.execPath, [join(gatewayDir, "e2e/a2a-staging.mjs"), origin], { env: { ...process.env, RECEIVER_URL: "" } }), (e) => e.code === 2 && /usage/.test(e.stderr));
+      assert.equal(deliveriesTo("/a2a-example").length, 2);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("SDK interoperability: the official A2A client alone sends, gets, lists and cancels; a refusal at HTTP is waited out or answered with a new agent", async () => {
+    // The first request to /a2a is answered as the rate limit answers, once.
+    let limited = 0;
+    const session = await connectExample({
+      baseUrl: origin,
+      store: memoryStore(),
+      fetch: (url, init) => (String(url) === a2a() && !limited++ ? Response.json({ error: "rate_limited" }, { status: 429, headers: { "Retry-After": "1" } }) : fromAnywhere(url, init)),
+    });
+    await session.execute("create_project");
+    const client = session.a2a;
+
+    // Send: the client asks to wait for the end (the protocol's default); the task comes back at once, in the SDK's form.
+    const sent = await client.sendMessage(exampleDelivery({ url: "https://dest.example.com/a2a-sdk", capture: true }));
+    assert.equal(limited, 2);
+    assert.equal(typeof sent.status.state, "number");
+    assert.equal(ended(sent), false);
+    // Get, until it ends.
+    const done = await until(async () => { const task = await client.getTask({ id: sent.id }); return ended(task) && task; });
+    assert.equal(done.status.state, TaskState.TASK_STATE_COMPLETED);
+    assert.deepEqual([deliveryOf(done).status, deliveryOf(done).attempts[0].http_status, deliveryOf(done).response.status], ["succeeded", 200, 200]);
+    // List.
+    const waiting = await client.sendMessage(exampleDelivery({ url: "https://dest.example.com/a2a-sdk-later", delay: "1h" }));
+    const page = await client.listTasks(ListTasksRequest.fromJSON({ includeArtifacts: true }));
+    assert.deepEqual([ids(page.tasks), page.totalSize], [[waiting.id, sent.id], 2]);
+    // A listed artifact says how the delivery stands, captured response included, but not each attempt: GetTask has those.
+    assert.deepEqual([deliveryOf(page.tasks[1]).status, deliveryOf(page.tasks[1]).attempt_count, deliveryOf(page.tasks[1]).response.status], ["succeeded", 1, 200]);
+    assert.equal("attempts" in deliveryOf(page.tasks[1]), false);
+    assert.equal((await client.listTasks(ListTasksRequest.fromJSON({}))).tasks[0].artifacts.length, 0);
+    // Cancel.
+    assert.equal((await client.cancelTask(CancelTaskRequest.fromJSON({ id: waiting.id }))).status.state, TaskState.TASK_STATE_CANCELED);
+    await assert.rejects(client.cancelTask(CancelTaskRequest.fromJSON({ id: sent.id })), TaskNotCancelableError);
+
+    // A request handed to the client as plain JSON, not built by fromJSON, loses its part's data: nothing is scheduled.
+    const plain = { message: { messageId: randomUUID(), role: "ROLE_USER", parts: [{ data: { url: "https://dest.example.com/a2a-sdk-plain" }, mediaType: "application/json" }] } };
+    await assert.rejects(client.sendMessage(plain), (e) => e instanceof RequestMalformedError && /Send one data part/.test(e.message));
+    assert.equal(deliveriesTo("/a2a-sdk-plain").length, 0);
+
+    // An agent left idle past its session is not gone: its next token is taken, and it stays the same agent.
+    const before = session.agentId();
+    await (await gatewayDb()).prepare('UPDATE "agent" SET "expiresAt" = ? WHERE id = ?').bind(new Date(Date.now() - 3_600_000).toISOString(), before).run();
+    assert.equal((await client.getTask({ id: sent.id })).id, sent.id);
+    assert.equal(session.agentId(), before);
+    // The agent is revoked while the client is running: the next request registers a new one and is answered.
+    await (await gatewayDb()).prepare('UPDATE "agent" SET status = ? WHERE id = ?').bind("revoked", before).run();
+    assert.equal((await client.getTask({ id: sent.id })).id, sent.id);
+    assert.notEqual(session.agentId(), before);
+    assert.equal(deliveriesTo("/a2a-sdk").length, 1);
+  });
+
+  test("the JSON-RPC request the docs show is taken as it is, and its answer has the shape the docs show", async () => {
+    const wire = JSON.parse(await readFile(join(gatewayDir, "examples/a2a-wire.json"), "utf8"));
+    const agent = await withProject();
+    const res = await fetch(a2a(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "A2A-Version": "1.0", "CF-Connecting-IP": address(), Authorization: `Bearer ${await agent.token()}` },
+      body: JSON.stringify(wire.request),
+    });
+    const body = await res.json();
+    /** The fields of a value and their types, whatever their values. */
+    const shape = (v) => (Array.isArray(v) ? v.slice(0, 1).map(shape) : v === null ? "null" : typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, shape(v[k])])) : typeof v);
+    assert.deepEqual(shape(body), shape(wire.response));
+    const { task } = body.result;
+    assert.deepEqual([task.status.state, delivery(task).status, delivery(task).run_at_ms - delivery(task).created_ms], ["TASK_STATE_SUBMITTED", "scheduled", 900_000]);
+    assert.deepEqual([wire.response.result.task.status.state, delivery(wire.response.result.task).status], ["TASK_STATE_SUBMITTED", "scheduled"]);
+  });
+
+  test("the A2A staging script passes every scenario against the local stack, and says which failed when one does", async () => {
+    const options = { gatewayUrl: origin, receiverUrl: `https://${RECEIVER_HOST}`, receiverReadUrl: receiverOrigin, receiverToken, fetch: fromAnywhere, pollMs: 250, timeoutMs: 60_000 };
+    const { ok, report, rows } = await runA2aReport(options);
+    assert.ok(ok, report);
+    assert.deepEqual(
+      rows.map((row) => row.name),
+      [
+        "A new identity registers and makes its project",
+        "Immediate success",
+        "Delayed success",
+        "Expected HTTP failure (404, not retried)",
+        "Retries exhausted (503 twice, max_attempts 2)",
+        "Cancellation",
+        "Duplicate submission",
+        "ListTasks shows this run's tasks, latest change first",
+        "A second host is refused",
+        "A failed task cannot be redriven",
+        "The destination saw each delivery the expected number of times",
+        "Clean up: cancel what is still scheduled, revoke both agents",
+      ],
+    );
+    assert.match(report, /Result: \*\*PASS\*\*, 12 of 12 scenarios/);
+    for (const row of rows.slice(1, 7)) assert.match(report, new RegExp(`\\| ${row.name.replace(/[()]/g, "\\$&")} \\| pass \\| [0-9.]+ \\| \`task_[0-9a-f]{20}\` \\|`));
+
+    // A destination that answers 200 to everything: the two failures that were expected do not happen, and the report says so.
+    const wrong = await runA2aReport({ ...options, receiverUrl: "https://dest.example.com/a2a-report", receiverToken: undefined });
+    assert.equal(wrong.ok, false);
+    assert.deepEqual(wrong.rows.filter((row) => !row.ok).map((row) => row.name), ["Expected HTTP failure (404, not retried)", "Retries exhausted (503 twice, max_attempts 2)", "A failed task cannot be redriven"]);
+    assert.match(wrong.report, /Result: \*\*FAIL\*\*, 8 of 11 scenarios/);
   });
 
   test("the 61st request in a minute from one address is refused with 429, whichever agent sends it", async () => {

@@ -15,6 +15,7 @@ scheduled ──(run_at reached)──▶ delivering ──2xx──▶ succeede
 - Retries: 5 attempts by default (`max_attempts` 1–5). Retries wait 10 s, 2 min, 20 min and 40 min, with jitter, so five attempts span 31 to 62 minutes; `Retry-After` is honoured up to 40 min. A task that keeps failing holds its queue and delays its callback or alert for that long, so pass a lower `max_attempts` when you need to hear sooner.
 - Retried: 408, 425, 429, 5xx, timeouts (10 s), network errors. Other 4xx and 3xx fail at once. Redirects are not followed.
 - Watches and wakes can't be redriven; start a new watch instead.
+- A task made through A2A (another interface to an Agent Auth host's project, [agentlater.io/docs/a2a](https://agentlater.io/docs/a2a)) shows up in `get_task` and `list_tasks` and can't be redriven: schedule its request again.
 
 ## Limits
 
