@@ -66,12 +66,7 @@ fn platform(e: DbError) -> Error {
 }
 
 fn simple_error(status: u16, code: &'static str, message: &str) -> Result<Response> {
-    error(ApiError {
-        status,
-        code,
-        message: message.into(),
-        field: None,
-    })
+    error(ApiError::new(status, code, message))
 }
 
 // ---------------------------------------------------------------------------------------
@@ -231,7 +226,7 @@ struct CreditBody {
     attempts: i64,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct ClaimBody {
     task_id: String,
     generation: u64,
@@ -392,7 +387,7 @@ impl TaskLedger {
                 }
                 Route::Watch => created(ledger.watch(body(req).await?, &minted("task", 10)?, t)?),
                 Route::ListTasks => {
-                    let q: ListQuery = serde_urlencoded_query(&url)?;
+                    let q: ListQuery = query(&url)?;
                     ok(ledger.list(q.status, q.lane.as_deref(), q.cursor.as_deref(), q.limit)?)
                 }
                 Route::GetTask(id) => ok(ledger.task(id)?),
@@ -498,7 +493,7 @@ fn finish(ledger: &Ledger<'_, Sql>, f: FinishBody, t: i64) -> Answer {
 
 /// Query strings here are flat `key=value` pairs; parse them through JSON so serde does
 /// the typing (numbers and enums) for us.
-fn serde_urlencoded_query<T: DeserializeOwned>(url: &Url) -> std::result::Result<T, ApiError> {
+fn query<T: DeserializeOwned>(url: &Url) -> std::result::Result<T, ApiError> {
     let mut map = serde_json::Map::new();
     for (k, v) in url.query_pairs() {
         let value = match v.parse::<u64>() {
@@ -602,7 +597,7 @@ fn record_stat(env: &Env, project_id: &str, event: &str, source: &str, value: f6
         .analytics_engine("STATS")
         .and_then(|stats| stats.write_data_point(&point))
     {
-        console_error!("recording a {event} stat failed: {e}");
+        console_error!("recording the {event} stat failed: {e}");
     }
 }
 
@@ -615,7 +610,10 @@ async fn process(env: &Env, d: &Dispatch) -> Result<()> {
         &stub,
         &d.project_id,
         "/internal/claim",
-        &serde_json::json!({ "task_id": d.task_id, "generation": d.generation }),
+        &ClaimBody {
+            task_id: d.task_id.clone(),
+            generation: d.generation,
+        },
     )
     .await?;
     let Some(delivery) = claim.deliver else {

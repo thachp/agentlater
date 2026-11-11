@@ -61,14 +61,14 @@ impl<D: Db> Ledger<'_, D> {
     /// an older hook event, never an unread result of the project's own work, so with none of
     /// those it is full for hooks.
     pub(super) fn room_for_hook_event(&self) -> Result<bool, DbError> {
-        let inbox: Vec<Counts> = self.db.query(
+        let inbox: Vec<HookRoom> = self.db.query(
             "SELECT COUNT(*) AS total, COALESCE(SUM(seq <= (SELECT inbox_acked_seq FROM project) \
-             OR json_extract(event, '$.event') = 'hook.received'), 0) AS waiting FROM inbox",
+             OR json_extract(event, '$.event') = 'hook.received'), 0) AS droppable FROM inbox",
             vec![],
         )?;
         Ok(inbox
             .first()
-            .is_none_or(|c| c.total < MAX_INBOX_EVENTS || c.waiting > 0))
+            .is_none_or(|c| c.total < MAX_INBOX_EVENTS || c.droppable > 0))
     }
 
     /// The project's wake setting, if any.
@@ -363,14 +363,11 @@ impl<D: Db> Ledger<'_, D> {
             )?;
         }
         let acked_seq = up_to.max(project.inbox_acked_seq);
-        let unread: Vec<Counts> = self.db.query(
-            "SELECT COUNT(*) AS total, 0 AS waiting FROM inbox WHERE seq > ?",
+        let unread = self.count(
+            "SELECT COUNT(*) AS total FROM inbox WHERE seq > ?",
             vec![acked_seq.into()],
         )?;
-        Ok(InboxCursor {
-            acked_seq,
-            unread: unread.first().map_or(0, |c| c.total),
-        })
+        Ok(InboxCursor { acked_seq, unread })
     }
 
     /// Hands out the next event number. Separate from [`Self::add_to_inbox`] so a task can
@@ -404,10 +401,7 @@ impl<D: Db> Ledger<'_, D> {
                 response_until.into(),
             ],
         )?;
-        let held: Vec<Counts> = self
-            .db
-            .query("SELECT COUNT(*) AS total, 0 AS waiting FROM inbox", vec![])?;
-        if held.first().map_or(0, |c| c.total) <= MAX_INBOX_EVENTS {
+        if self.count("SELECT COUNT(*) AS total FROM inbox", vec![])? <= MAX_INBOX_EVENTS {
             return Ok(());
         }
         // Unread hook events go before other unread events: they come from outside, and must
@@ -443,11 +437,10 @@ impl<D: Db> Ledger<'_, D> {
                 (now - INBOX_ACKED_RETENTION_MS).into(),
             ],
         )?;
-        let stale: Vec<Counts> = self.db.query(
-            "SELECT COUNT(*) AS total, 0 AS waiting FROM inbox WHERE seq > ? AND at_ms <= ?",
+        let stale = self.count(
+            "SELECT COUNT(*) AS total FROM inbox WHERE seq > ? AND at_ms <= ?",
             vec![project.inbox_acked_seq.into(), (now - RETENTION_MS).into()],
         )?;
-        let stale = stale.first().map_or(0, |c| c.total);
         if stale > 0 {
             self.db.exec(
                 "DELETE FROM inbox WHERE seq > ? AND at_ms <= ?",
@@ -530,6 +523,13 @@ impl WakeRow {
             updated_ms: self.updated_ms,
         })
     }
+}
+
+/// The events the inbox holds, and how many of them a hook event may push out.
+#[derive(Deserialize)]
+struct HookRoom {
+    total: i64,
+    droppable: i64,
 }
 
 #[derive(Deserialize)]

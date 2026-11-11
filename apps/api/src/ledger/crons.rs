@@ -139,17 +139,14 @@ impl<D: Db> Ledger<'_, D> {
         let spec = request.validate(now).map_err(ApiError::invalid)?;
         self.check_secrets(&spec.request.headers, spec.request.destination.host())?;
         let existing = self.cron_row(&spec.name)?;
-        if existing.is_none() {
-            let count: Vec<Counts> = self
-                .db
-                .query("SELECT COUNT(*) AS total, 0 AS waiting FROM crons", vec![])?;
-            if count.first().map_or(0, |c| c.total) >= MAX_CRONS {
-                return Err(ApiError::new(
-                    429,
-                    "cron_limit",
-                    format!("this project already has {MAX_CRONS} crons; delete one first"),
-                ));
-            }
+        if existing.is_none()
+            && self.count("SELECT COUNT(*) AS total FROM crons", vec![])? >= MAX_CRONS
+        {
+            return Err(ApiError::new(
+                429,
+                "cron_limit",
+                format!("this project already has {MAX_CRONS} crons; delete one first"),
+            ));
         }
         let request = &spec.request;
         let headers =

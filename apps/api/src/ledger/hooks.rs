@@ -209,17 +209,14 @@ impl<D: Db> Ledger<'_, D> {
             ));
         }
         let existing = self.hook_row(&spec.name)?;
-        if existing.is_none() {
-            let count: Vec<Counts> = self
-                .db
-                .query("SELECT COUNT(*) AS total, 0 AS waiting FROM hooks", vec![])?;
-            if count.first().map_or(0, |c| c.total) >= MAX_HOOKS {
-                return Err(ApiError::new(
-                    429,
-                    "hook_limit",
-                    format!("this project already has {MAX_HOOKS} hooks; delete one first"),
-                ));
-            }
+        if existing.is_none()
+            && self.count("SELECT COUNT(*) AS total FROM hooks", vec![])? >= MAX_HOOKS
+        {
+            return Err(ApiError::new(
+                429,
+                "hook_limit",
+                format!("this project already has {MAX_HOOKS} hooks; delete one first"),
+            ));
         }
         let sealed_secret = match &spec.verify {
             Some((_, secret)) => Some(self.seal_hook_secret(&project.id, &spec.name, secret)?),
@@ -487,12 +484,12 @@ impl<D: Db> Ledger<'_, D> {
                 "DELETE FROM hook_deliveries WHERE hook = ? AND expires_ms <= ?",
                 vec![hook.name.as_str().into(), now.into()],
             )?;
-            let seen: Vec<Counts> = self.db.query(
-                "SELECT COUNT(*) AS total, 0 AS waiting FROM hook_deliveries \
+            let seen = self.count(
+                "SELECT COUNT(*) AS total FROM hook_deliveries \
                  WHERE hook = ? AND delivery_id = ?",
                 vec![hook.name.as_str().into(), id.as_str().into()],
             )?;
-            if seen.first().map_or(0, |c| c.total) > 0 {
+            if seen > 0 {
                 return Ok(HookOutcome::Duplicate);
             }
         }
@@ -927,16 +924,16 @@ mod tests {
             send(&l, TOKEN, Some("d-2"), T0),
             HookOutcome::Accepted(_)
         ));
-        let gone: Vec<Counts> = db
+        let gone: Vec<Count> = db
             .query(
-                "SELECT COUNT(*) AS total, 0 AS waiting FROM inbox WHERE seq = ?",
+                "SELECT COUNT(*) AS total FROM inbox WHERE seq = ?",
                 vec![first_hook[0].seq.into()],
             )
             .unwrap();
         assert_eq!(gone[0].total, 0, "the older hook event made room");
-        let tasks: Vec<Counts> = db
+        let tasks: Vec<Count> = db
             .query(
-                "SELECT COUNT(*) AS total, 0 AS waiting FROM inbox \
+                "SELECT COUNT(*) AS total FROM inbox \
                  WHERE json_extract(event, '$.event') = 'task.finished'",
                 vec![],
             )
@@ -1005,11 +1002,8 @@ mod tests {
             ["workflow_run"]
         );
         // Nor does it spend the hook's rate limit, so noise can't crowd out a real event.
-        let tat: Vec<Counts> = db
-            .query(
-                "SELECT rate_tat_ms AS total, 0 AS waiting FROM hooks",
-                vec![],
-            )
+        let tat: Vec<Count> = db
+            .query("SELECT rate_tat_ms AS total FROM hooks", vec![])
             .unwrap();
         assert_eq!(tat[0].total, 0);
         // A flood over the limit is turned away before the filter is even asked.

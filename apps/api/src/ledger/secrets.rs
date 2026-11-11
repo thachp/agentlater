@@ -161,18 +161,14 @@ impl<D: Db> Ledger<'_, D> {
     pub fn put_secret(&self, spec: &SecretSpec, now: i64) -> Result<(SecretView, bool), ApiError> {
         let project = self.project_row()?.ok_or_else(no_project)?;
         let existing = self.secret_row(&spec.name)?;
-        if existing.is_none() {
-            let count: Vec<Counts> = self.db.query(
-                "SELECT COUNT(*) AS total, 0 AS waiting FROM secrets",
-                vec![],
-            )?;
-            if count.first().map_or(0, |c| c.total) >= MAX_SECRETS {
-                return Err(ApiError::new(
-                    429,
-                    "secret_limit",
-                    format!("this project already has {MAX_SECRETS} secrets; delete one first"),
-                ));
-            }
+        if existing.is_none()
+            && self.count("SELECT COUNT(*) AS total FROM secrets", vec![])? >= MAX_SECRETS
+        {
+            return Err(ApiError::new(
+                429,
+                "secret_limit",
+                format!("this project already has {MAX_SECRETS} secrets; delete one first"),
+            ));
         }
         let sealer = self.sealer("secrets")?;
         let sealed = sealer
