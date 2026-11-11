@@ -36,8 +36,8 @@ export interface ApiBinding {
 
 const TASK_ID = { type: "string", pattern: "^task_[0-9a-f]{20}$", description: "The task id returned by schedule_http or queue_http." };
 export const LANE_PATTERN = "^[A-Za-z0-9_.:-]{1,64}$";
-export const CRON_NAME_PATTERN = "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$";
-export const SECRET_NAME_PATTERN = "^[A-Z][A-Z0-9_]{0,63}$";
+const CRON_NAME_PATTERN = "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$";
+const SECRET_NAME_PATTERN = "^[A-Z][A-Z0-9_]{0,63}$";
 const SECRET_NAME = { type: "string", pattern: SECRET_NAME_PATTERN, description: "The secret's name, e.g. \"GITHUB_TOKEN\"." };
 const SECRET_HEADERS_NOTE = " A header value may use {{secret:NAME}} (see set_secret); AgentLater fills it in only when sending, to hosts the secret allows.";
 export const STATUSES = ["scheduled", "delivering", "retrying", "succeeded", "failed", "canceled"];

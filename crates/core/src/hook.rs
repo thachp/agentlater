@@ -620,7 +620,7 @@ pub fn delivery_id(
     let id = match verify?.scheme {
         Scheme::Github => header(headers, "x-github-delivery")?.to_string(),
         Scheme::Stripe => {
-            let doc: serde_json::Value = serde_json::from_slice(body).ok()?;
+            let doc: Value = serde_json::from_slice(body).ok()?;
             doc.get("id")?.as_str()?.to_string()
         }
         Scheme::HmacSha256 => return None,
@@ -648,7 +648,7 @@ mod tests {
     const NOW: i64 = 1_767_225_600_000;
     const SECRET: &str = "whsec_0123456789abcdef";
 
-    fn request(v: serde_json::Value) -> HookRequest {
+    fn request(v: Value) -> HookRequest {
         serde_json::from_value(v).unwrap()
     }
 
@@ -976,7 +976,7 @@ mod tests {
         );
     }
 
-    fn rules(v: serde_json::Value) -> Result<Vec<AcceptRule>, HookError> {
+    fn rules(v: Value) -> Result<Vec<AcceptRule>, HookError> {
         request(json!({ "name": "h", "accept": v }))
             .validate()
             .map(|s| s.accept.unwrap())

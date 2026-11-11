@@ -329,6 +329,9 @@ impl TaskLedger {
         }
     }
 
+    // Debt: flattening the repeated `match body::<T>(req).await` arms is planned. `expect` fails
+    // once this fits, so the exemption goes with it.
+    #[expect(clippy::too_many_lines)]
     async fn route(&self, req: &mut Request, ledger: &Ledger<'_, Sql>) -> Result<Response> {
         let Some(project_id) = req.headers().get(PROJECT_HEADER)? else {
             return simple_error(400, "invalid_request", "missing project");

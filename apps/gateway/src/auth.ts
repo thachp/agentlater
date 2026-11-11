@@ -82,7 +82,7 @@ function storage(env: AuthEnv): NonNullable<BetterAuthOptions["secondaryStorage"
   };
 }
 
-export interface AgentAuthApi {
+interface AgentAuthApi {
   getAgentConfiguration(): Promise<{ endpoints?: Record<string, string> } & Record<string, unknown>>;
 }
 

@@ -1,0 +1,3 @@
+# A ratchet, not a target: the longest function today is `receive_hook` at 109 lines, apart from
+# `route()`, which carries its own `#[expect]`. Lower this as functions shrink; never raise it.
+too-many-lines-threshold = 110

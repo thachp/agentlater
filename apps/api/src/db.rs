@@ -76,10 +76,10 @@ pub(crate) mod sqlite {
     use super::*;
     use rusqlite::types::{Value as Sql, ValueRef};
 
-    pub struct Memory(pub rusqlite::Connection);
+    pub(crate) struct Memory(pub rusqlite::Connection);
 
     impl Memory {
-        pub fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let db = rusqlite::Connection::open_in_memory().unwrap();
             // Durable Object SQLite refuses compound SELECTs with more terms than this.
             db.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_COMPOUND_SELECT, 5)

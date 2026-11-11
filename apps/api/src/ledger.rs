@@ -2350,7 +2350,7 @@ mod tests {
         l.finish("t1", a.fence, http(204), T0 + 5, 0.0).unwrap();
 
         let t = l.task("t1").unwrap();
-        let cb_id = t.callback_task_id.clone().expect("callback queued");
+        let cb_id = t.callback_task_id.expect("callback queued");
         assert!(cb_id.starts_with("task_") && cb_id.len() == 25, "{cb_id}");
         let cb = l.task(&cb_id).unwrap();
         assert_eq!(cb.callback_for.as_deref(), Some("t1"));
@@ -2396,7 +2396,7 @@ mod tests {
         later.run_at_ms = Some(T0 + 60_000);
 
         // Canceled while waiting; canceling again does not call back twice.
-        l.schedule(later.clone(), "c", T0).unwrap();
+        l.schedule(later, "c", T0).unwrap();
         l.cancel("c", T0).unwrap();
         l.cancel("c", T0 + 1).unwrap();
         assert_eq!(callbacks("c"), 1);

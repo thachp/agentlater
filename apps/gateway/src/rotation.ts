@@ -6,7 +6,7 @@
 import { ApiClient } from "./api";
 
 /** Projects asked per cron run, well inside a Worker's subrequest limit. */
-export const PROJECTS_PER_RUN = 200;
+const PROJECTS_PER_RUN = 200;
 
 /** Where the sweep is: which rotation, the last project done in this pass, and what the pass found. */
 export interface SweepState {

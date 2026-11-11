@@ -23,6 +23,17 @@ aes-gcm = { version = "=0.11.1", default-features = false, features = ["aes", "a
 hkdf = "0.13"
 ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["alloc", "zeroize"] }
 
+# Leanness guardrails; see CODING_STANDARDS.md. CI runs clippy with `-D warnings`, so each is an error there.
+[workspace.lints.rust]
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+unused_lifetimes = "warn"
+unused_macro_rules = "warn"
+
+[workspace.lints.clippy]
+too_many_lines = "warn"
+redundant_clone = "warn"
+
 [profile.release]
 lto = true
 opt-level = "s"

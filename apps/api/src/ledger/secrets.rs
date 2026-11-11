@@ -398,7 +398,7 @@ mod tests {
     const T0: i64 = 1_767_225_600_000;
     const P: &str = "proj_1";
 
-    pub fn key(byte: u8) -> SealingKey {
+    pub(super) fn key(byte: u8) -> SealingKey {
         SealingKey::parse(&hex::encode([byte; 32])).unwrap()
     }
 

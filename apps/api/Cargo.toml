@@ -27,3 +27,6 @@ worker.workspace = true
 
 [dev-dependencies]
 rusqlite = { version = "0.41", features = ["bundled", "limits"] }
+
+[lints]
+workspace = true
