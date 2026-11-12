@@ -12,9 +12,9 @@
 // Deploy after each. Requires `gh` logged in with admin on the repo, and for `finish` wrangler
 // logged in to Cloudflare with CLOUDFLARE_ACCOUNT_ID set to the account the Workers run in (wrangler
 // won't choose one when the login reaches several, and the repo is public, so the id isn't in its
-// config). finish refuses unless the gateway's sweep has completed a pass with the
-// keys deployed now, more than an hour ago, and checked them since the last change here: that
-// verdict is lib/finish-verdict.mjs.
+// config). finish refuses unless the gateway's sweep has completed a pass with the keys deployed
+// now, and has checked them again an hour or more after both that pass and the last change here:
+// that verdict is lib/finish-verdict.mjs.
 
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -72,7 +72,7 @@ if (step === "start") {
     { cwd: new URL("../apps/gateway/", import.meta.url), encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] },
   );
   const row = JSON.parse(out)[0]?.results?.[0];
-  const verdict = finishVerdict({ row, current, changedAt, now: Date.now() });
+  const verdict = finishVerdict({ row, current, changedAt });
   if (verdict.finish !== true) fail(verdict.why);
   gh(["variable", "set", "SECRETS_KEY_ROTATING", "--env", env, "--body", "false"]);
   if (secrets.has(SLOTS[other])) gh(["secret", "delete", SLOTS[other], "--env", env]);

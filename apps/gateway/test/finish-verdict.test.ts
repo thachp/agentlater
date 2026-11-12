@@ -32,22 +32,22 @@ const complete = {
 const fresh = { ...complete, rotation: null, slot: null, completed_at: null, checked_at: null, resealed_total: 0 };
 
 const ask = (row: unknown, facts: Record<string, unknown> = {}) =>
-  finishVerdict({ row, current: 2, changedAt: CHANGED, now: NOW, ...facts } as Parameters<typeof finishVerdict>[0]);
+  finishVerdict({ row, current: 2, changedAt: CHANGED, ...facts } as Parameters<typeof finishVerdict>[0]);
 const without = (column: string) => Object.fromEntries(Object.entries(complete).filter(([name]) => name !== column));
 
 const FINISH = { finish: true };
 const NO_PASS = { finish: false, why: "the sweep hasn't completed a pass yet" };
 const UNKNOWN_ROW = { finish: false, why: "the sweep's row isn't one this script knows how to read" };
-const NOT_CHECKED = { finish: false, why: "the sweep hasn't checked the keys since the last change; deploy, then wait an hour" };
+const NOT_CHECKED = { finish: false, why: "the sweep hasn't checked the keys an hour or more after the last change; deploy, then wait for the sweep" };
 const UNKNOWN_CHANGE = { finish: false, why: "can't tell when the SECRETS_KEY_ variables last changed" };
-const TOO_SOON = { finish: false, why: "the pass completed less than an hour ago; wait for attempts in flight" };
+const TOO_SOON = { finish: false, why: "the sweep hasn't checked the keys an hour or more after the pass completed; wait for attempts in flight" };
 const otherSlot = (saw: unknown, current: number) => ({
   finish: false,
   why: `the sweep last saw slot ${saw}, not ${current}: deploy, then wait for a new pass`,
 });
 
 describe("whether finish may delete the previous SECRETS_KEY", () => {
-  it("finishes when a pass for the current slot completed over an hour ago and the keys were checked since the last change", () => {
+  it("finishes when a pass completed for the current slot and the keys were checked an hour after it and after the last change", () => {
     expect(ask(complete)).toEqual(FINISH);
     expect(ask({ ...complete, slot: "1" }, { current: 1 })).toEqual(FINISH);
   });
@@ -81,12 +81,18 @@ describe("whether finish may delete the previous SECRETS_KEY", () => {
     expect(ask({ ...complete, slot: "2 " })).toEqual(otherSlot("2 ", 2));
   });
 
-  it("refuses when the keys were not checked after the last change, the same millisecond included", () => {
-    expect(ask(complete, { changedAt: complete.checked_at + 1 })).toEqual(NOT_CHECKED);
+  it("refuses until the keys were checked a full hour after the last change", () => {
+    expect(ask(complete, { changedAt: complete.checked_at - HOUR })).toEqual(FINISH);
+    expect(ask(complete, { changedAt: complete.checked_at - HOUR + 1 })).toEqual(NOT_CHECKED);
     expect(ask(complete, { changedAt: complete.checked_at })).toEqual(NOT_CHECKED);
-    expect(ask(complete, { changedAt: complete.checked_at - 1 })).toEqual(FINISH);
     // `undo` twice with no deploy between: the slot matches the old pass again, the check is stale.
     expect(ask(complete, { changedAt: NOW - 60_000 })).toEqual(NOT_CHECKED);
+  });
+
+  it("refuses a check within a second of the change, whichever clock says it came first", () => {
+    // GitHub gives the change in whole seconds, and its clock is not the gateway's.
+    expect(ask(complete, { changedAt: complete.checked_at + 1000 })).toEqual(NOT_CHECKED);
+    expect(ask(complete, { changedAt: complete.checked_at - 1000 })).toEqual(NOT_CHECKED);
   });
 
   it.each([Number.NaN, 0, -1, Number.POSITIVE_INFINITY, undefined, null, "2026-11-12T00:00:00Z"])(
@@ -96,15 +102,24 @@ describe("whether finish may delete the previous SECRETS_KEY", () => {
     },
   );
 
-  it("refuses until a full hour after the pass completed", () => {
+  it("refuses until the sweep has checked the keys a full hour after the pass completed", () => {
     const completedAt = (completed_at: number) => ask({ ...complete, completed_at, checked_at: NOW });
     expect(completedAt(NOW - HOUR)).toEqual(FINISH);
     expect(completedAt(NOW - HOUR + 1)).toEqual(TOO_SOON);
+    // The run that completed the pass, before any later probe.
     expect(completedAt(NOW)).toEqual(TOO_SOON);
-    // The laptop's clock is behind the gateway's.
+    // The next cron run started 700 ms sooner into its minute: under an hour, so the run after it decides.
+    expect(completedAt(NOW - HOUR + 700)).toEqual(TOO_SOON);
+    expect(completedAt(NOW - 2 * HOUR + 700)).toEqual(FINISH);
+    // A check before the completion is not something the sweep writes.
     expect(completedAt(NOW + 5 * HOUR)).toEqual(TOO_SOON);
-    expect(ask(complete, { now: Number.NaN })).toEqual(TOO_SOON);
-    expect(ask(complete, { now: undefined })).toEqual(TOO_SOON);
+  });
+
+  it("gives the same answer whatever the laptop's clock says: no time of its own is an input", () => {
+    for (const now of [0, NOW - 365 * 24 * HOUR, NOW + 365 * 24 * HOUR, Number.NaN]) {
+      expect(ask(complete, { now })).toEqual(FINISH);
+      expect(ask({ ...complete, checked_at: complete.completed_at + HOUR - 1 }, { now })).toEqual(TOO_SOON);
+    }
   });
 
   it("refuses times in seconds: every time compared is epoch milliseconds", () => {
@@ -172,34 +187,62 @@ describe("the verdict on the row the sweep stores", () => {
     const { db, row } = sweepDatabase();
     const store = { ...d1SweepStore(db), projects: async (after: string) => ["p1"].filter((id) => id > after) };
     const api: Reseal = { rotation: "r1", slot: "2", resealed: 4, unreadable: 1 };
-    const facts = { current: 2, changedAt: NOW - 1 };
+    // `start` at NOW moved the slot to 2; the deploy landed before the first cron run, 20 minutes on.
+    const facts = { current: 2, changedAt: NOW };
+    const run = (at: number) => sweep(store, async () => api, 5, at);
+    const first = NOW + HOUR / 3;
     expect(ask(row(), facts)).toEqual(NO_PASS);
 
     // The first pass reseals, so it does not complete; the second reseals nothing and does.
-    await sweep(store, async () => api, 5, NOW);
+    await run(first);
     expect(row()).toMatchObject({ rotation: "r1", slot: "2", completed_at: null, resealed_total: 4 });
-    expect(ask(row(), { ...facts, now: NOW + 2 * HOUR })).toEqual(NO_PASS);
+    expect(ask(row(), facts)).toEqual(NO_PASS);
     api.resealed = 0;
-    await sweep(store, async () => api, 5, NOW);
-    expect(row()).toMatchObject({ rotation: "r1", slot: "2", completed_at: NOW, checked_at: NOW, unreadable: 1 });
-    expect(ask(row(), { ...facts, now: NOW + HOUR - 1 })).toEqual(TOO_SOON);
-    expect(ask(row(), { ...facts, now: NOW + HOUR })).toEqual(FINISH);
+    const completed = first + HOUR;
+    await run(completed);
+    expect(row()).toMatchObject({ rotation: "r1", slot: "2", completed_at: completed, checked_at: completed, unreadable: 1 });
+    expect(ask(row(), facts)).toEqual(TOO_SOON);
 
-    // `undo` at NOW + HOUR, not deployed: the hourly probe still finds slot 2's keys.
-    const undone = { current: 1, changedAt: NOW + HOUR, now: NOW + 3 * HOUR };
-    await sweep(store, async () => api, 5, NOW + 2 * HOUR);
-    expect(ask(row(), undone)).toEqual(otherSlot("2", 1));
-    // Deployed: the keys changed, so the sweep starts a pass for slot 1 and completes it.
-    api.rotation = "r2";
-    api.slot = "1";
-    await sweep(store, async () => api, 5, NOW + 2 * HOUR);
-    expect(ask(row(), undone)).toEqual(NO_PASS);
-    await sweep(store, async () => api, 5, NOW + 2 * HOUR);
-    expect(ask(row(), undone)).toEqual(FINISH);
+    // Complete: each run only probes, and the probe moves checked_at. The next run started 700 ms
+    // sooner into its minute, so it is under an hour after the completion; the one after decides.
+    await run(completed + HOUR - 700);
+    expect(row()).toMatchObject({ completed_at: completed, checked_at: completed + HOUR - 700 });
+    expect(ask(row(), facts)).toEqual(TOO_SOON);
+    await run(completed + 2 * HOUR - 700);
+    expect(ask(row(), facts)).toEqual(FINISH);
 
     // Finished and deployed: the API has no previous key, and the row is no longer a completed pass.
-    await sweep(store, async () => ({ ...api, rotation: null }), 5, NOW + 4 * HOUR);
-    expect(ask(row(), { ...undone, now: NOW + 9 * HOUR })).toEqual(NO_PASS);
+    api.rotation = null;
+    await run(completed + 3 * HOUR);
+    expect(ask(row(), facts)).toEqual(NO_PASS);
+  });
+
+  it("refuses after two undos with a deploy in flight, until the sweep has seen what that deploy brought", async () => {
+    const { db, row } = sweepDatabase();
+    const store = { ...d1SweepStore(db), projects: async (after: string) => ["p1"].filter((id) => id > after) };
+    const api: Reseal = { rotation: "r1", slot: "2", resealed: 0, unreadable: 0 };
+    const run = (at: number) => sweep(store, async () => api, 5, at);
+    await run(NOW);
+    await run(NOW + HOUR);
+    expect(ask(row(), { changedAt: NOW - HOUR })).toEqual(FINISH);
+
+    // `undo` (slot 1), a deploy starts and reads slot 1, `undo` again (slot 2), and the sweep probes
+    // before that deploy lands: the keys it finds are still slot 2's, checked after the last change,
+    // on a pass completed two hours ago.
+    const undoneTwice = { current: 2, changedAt: NOW + 2 * HOUR - 60_000 };
+    await run(NOW + 2 * HOUR);
+    expect(row()).toMatchObject({ slot: "2", completed_at: NOW, checked_at: NOW + 2 * HOUR });
+    expect(ask(row(), undoneTwice)).toEqual(NOT_CHECKED);
+
+    // The deploy lands and seals new values under slot 1's key, the one `finish` would delete.
+    // By the time a check is an hour after the change, the sweep has seen those keys.
+    api.rotation = "r2";
+    api.slot = "1";
+    await run(NOW + 3 * HOUR);
+    expect(ask(row(), undoneTwice)).toEqual(NO_PASS);
+    await run(NOW + 4 * HOUR);
+    await run(NOW + 5 * HOUR);
+    expect(ask(row(), undoneTwice)).toEqual(otherSlot("1", 2));
   });
 });
 
@@ -235,7 +278,8 @@ function finish(variables: unknown[], row: unknown): { status: number | null; st
 }
 
 describe("rotate-secrets-key.mjs finish", () => {
-  const ago = (ms: number) => Date.now() - ms;
+  const started = Date.now();
+  const ago = (ms: number) => started - ms;
   const variable = (name: string, value: string, changed = ago(5 * HOUR)) => ({ name, value, updatedAt: new Date(changed).toISOString() });
   const rotatingOn2 = [variable("SECRETS_KEY_SLOT", "2"), variable("SECRETS_KEY_ROTATING", "true"), variable("API_URL", "x", ago(0))];
   const completed = () => ({ ...complete, completed_at: ago(2 * HOUR), checked_at: ago(HOUR) });
@@ -253,6 +297,17 @@ describe("rotate-secrets-key.mjs finish", () => {
     expect(finish(rotatingOn2, { ...completed(), slot: "1" })).toEqual(refused(otherSlot("1", 2).why));
     expect(finish(rotatingOn2, { ...completed(), completed_at: ago(HOUR / 2), checked_at: ago(0) })).toEqual(refused(TOO_SOON.why));
     expect(finish(rotatingOn2, without("completed_at"))).toEqual(refused(UNKNOWN_ROW.why));
+  });
+
+  it("is not moved by the laptop's clock, a day slow or a day fast", () => {
+    const DAY = 24 * HOUR;
+    const rotating = (changed: number) => [variable("SECRETS_KEY_SLOT", "2", changed), variable("SECRETS_KEY_ROTATING", "true", changed)];
+    // Slow: GitHub and the gateway are a day ahead of it, and the pass is good.
+    const ahead = { ...complete, completed_at: ago(2 * HOUR - DAY), checked_at: ago(HOUR - DAY) };
+    expect(finish(rotating(ago(5 * HOUR - DAY)), ahead)).toMatchObject({ status: 0 });
+    // Fast: the pass looks a day old from here, but the sweep last checked half an hour after it completed.
+    const behind = { ...complete, completed_at: ago(HOUR / 2 + DAY), checked_at: ago(DAY) };
+    expect(finish(rotating(ago(5 * HOUR + DAY)), behind)).toEqual(refused(TOO_SOON.why));
   });
 
   it("takes the last change from the newest SECRETS_KEY_ variable", () => {

@@ -279,16 +279,21 @@ environment, `staging` first:
    rotation); keeping the old key doesn't help them. Set `CLOUDFLARE_ACCOUNT_ID` to the account the Workers
    run in (`npx wrangler whoami` lists your accounts and their ids): wrangler won't choose one when
    your login reaches several, and `finish` always requires it.
-3. **Wait an hour more**, for attempts claimed with old ciphertext to finish.
+3. **Wait for the sweep to check again**, an hour or more after `completed_at`, so attempts claimed with
+   old ciphertext have finished. Once a pass has completed, each hourly run probes the keys and moves
+   `checked_at`. Runs don't start exactly an hour apart, so this is the first or the second run after
+   the pass completed: one to two hours.
 4. **Finish.** `CLOUDFLARE_ACCOUNT_ID=<account id> node scripts/rotate-secrets-key.mjs --env production finish` (needs wrangler logged in)
    sets `SECRETS_KEY_ROTATING=false` and deletes the old slot. It refuses unless that row shows a pass
-   completed more than an hour ago, for the current slot, and checked since the slot variables last
-   changed: finishing early would delete the only key some values open with. Deploy; the deploy deletes
+   completed for the current slot, with `checked_at` an hour or more after both `completed_at` and the
+   last change to the slot variables: finishing early would delete the only key some values open with.
+   Only the gateway's and GitHub's clocks count, not your computer's. Deploy; the deploy deletes
    `SECRETS_KEY_PREVIOUS` from the Worker, since `--secrets-file` never deletes on its own.
 
 To back out before finishing, run `undo` and deploy: the old key is current again and the new one still
 opens, so nothing is lost. The sweep starts a new pass (it reseals back under the old key), and `finish`
-waits for it before deleting the new key.
+waits for it before deleting the new key. After any `start` or `undo`, `finish` refuses until the sweep
+has checked the keys an hour or more later, so a deploy still in flight can't be missed.
 
 ## Lost keys: refund the unused attempts
 
