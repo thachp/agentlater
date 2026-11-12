@@ -1,13 +1,13 @@
 import type { Metadata } from "next";
-import { Fraunces, Inter } from "next/font/google";
+import { DM_Sans } from "next/font/google";
 import Link from "next/link";
 import type { ReactNode } from "react";
+import { SiteNav } from "../components/SiteNav";
 import { GATEWAY_URL, REPO_URL } from "../lib/site";
 import "./globals.css";
 
 // Downloaded at build time and served from this site, so no reader's browser calls Google.
-const display = Fraunces({ subsets: ["latin"], style: ["normal", "italic"], axes: ["opsz"], variable: "--font-display" });
-const sans = Inter({ subsets: ["latin"], variable: "--font-sans" });
+const sans = DM_Sans({ subsets: ["latin"], variable: "--font-sans" });
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://agentlater.io"),
@@ -18,37 +18,35 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en" className={`${display.variable} ${sans.variable}`}>
+    <html lang="en" className={sans.variable}>
       <body>
         <a className="skip" href="#main">
           Skip to content
         </a>
-        <header className="site-header">
+        <header className="site-header dark">
           <div className="wrap">
             <Link href="/" className="brand">
               <img src="/icon.svg" alt="" />
               AgentLater
             </Link>
-            <nav className="nav" aria-label="Main">
-              <Link href="/docs">Docs</Link>
-              <Link href="/docs/capabilities" className="hide-small">
-                Capabilities
-              </Link>
-              <a href={REPO_URL}>GitHub</a>
-              <Link href="/#connect" className="button primary small">
-                Connect
-              </Link>
-            </nav>
+            <SiteNav />
           </div>
         </header>
         <main id="main">{children}</main>
-        <footer className="site-footer">
+        <footer className="site-footer dark">
           <div className="wrap">
-            <span>AgentLater, formerly RunLater — make an HTTP request later, and know whether it happened.</span>
-            <span>
-              <Link href="/docs">Docs</Link> · <Link href="/terms">Terms</Link> · <Link href="/privacy">Privacy</Link> ·{" "}
-              <a href={REPO_URL}>Source</a> · <a href={`${GATEWAY_URL}/llms.txt`}>llms.txt</a>
-            </span>
+            <Link href="/" className="brand">
+              <img src="/icon.svg" alt="" />
+              AgentLater
+            </Link>
+            <p>HTTP requests later. Outcomes you can check.</p>
+            <nav aria-label="Footer">
+              <Link href="/docs">Docs</Link>
+              <Link href="/privacy">Privacy</Link>
+              <Link href="/terms">Terms</Link>
+              <a href={REPO_URL}>GitHub</a>
+              <a href={`${GATEWAY_URL}/llms.txt`}>llms.txt</a>
+            </nav>
           </div>
         </footer>
       </body>

@@ -3,288 +3,286 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 import { Code } from "../components/Code";
 import { CopyButton } from "../components/CopyButton";
+import { Icon } from "../components/Icon";
 import { Tabs } from "../components/Tabs";
-import { GATEWAY_URL, LIMITS } from "../lib/site";
-import {
-  agentPrompt,
-  hookCall,
-  inboxCall,
-  mcpChatGpt,
-  mcpClaude,
-  mcpGrok,
-  mcpRemoteConfig,
-  readInboxCall,
-  scheduleCall,
-  sdkShort,
-  watchActCall,
-} from "../lib/snippets";
+import { GATEWAY_URL, MAX_ATTEMPTS, TRIAL_ATTEMPTS, TRIAL_DAYS } from "../lib/site";
+import { mcpClaudeCode, mcpCodex, mcpRemoteConfig, sdkShort } from "../lib/snippets";
 
 const MCP_URL = `${GATEWAY_URL}/mcp`;
 const PACK_ATTEMPTS = ATTEMPT_PACK.attempts.toLocaleString("en-US");
 const PACK_PRICE = `$${ATTEMPT_PACK.priceCents / 100}`;
 
-// One reminder, followed from the call that schedules it to the session that reads the result.
-const TIMELINE: { when: string; title: string; status?: [string, "bad" | "ok"]; note?: string; code?: string }[] = [
-  { when: "Today, 4:02 pm", title: "Your agent hands it over", code: scheduleCall },
-  { when: "Tomorrow, 4:02 pm", title: "First attempt", status: ["503", "bad"], note: "The destination is down." },
-  { when: "Seconds later", title: "Retried, signed", status: ["200", "ok"], note: "The destination accepted it." },
-  { when: "Right after", title: "Result recorded", status: ["inbox +1", "ok"], note: "It waits there, for up to 30 days." },
-  { when: "Next session", title: "Your agent finds out", code: readInboxCall },
-];
-
-const FACTS = [
-  ["1,000", "delivery attempts free, per project"],
-  [PACK_PRICE, `for ${PACK_ATTEMPTS} more, with no subscription`],
-  ["5", "attempts per task, spread over about an hour"],
-  ["0", "servers, dashboards or API keys"],
+const STEPS = [
+  ["Connect once", "Add AgentLater to your MCP client."],
+  ["Describe the task", "Tell your agent what to request and when."],
+  ["Return to the result", "Read completed tasks from the inbox."],
 ] as const;
 
-const BEFORE_AFTER: [string, ReactNode][] = [
-  [
-    "It says it will check the deploy in 20 minutes. The session ends. Nobody checks.",
-    <>
-      <code>watch_http</code> polls until the deploy finishes, then starts the smoke tests itself.
-    </>,
-  ],
-  [
-    "It has no public URL, so GitHub and Stripe have nowhere to send anything.",
-    <>
-      <code>create_hook</code> gives it one. Events wait in the inbox.
-    </>,
-  ],
-  [
-    "The next session starts with no idea what the last one left running.",
-    <>
-      <code>read_inbox</code> opens with a report of what finished.
-    </>,
-  ],
-];
-
-const CONNECT: { label: string; body: ReactNode; code: string }[] = [
-  {
-    label: "Claude",
-    body: (
-      <>
-        In Claude Code, run one command. In Claude Desktop or claude.ai, add a custom connector. Either way, approve
-        the connection on the page that opens.
-      </>
-    ),
-    code: mcpClaude,
-  },
-  {
-    label: "ChatGPT",
-    body: (
-      <>
-        On <a href="https://chatgpt.com/plugins">chatgpt.com/plugins</a>, add a custom MCP server with this URL, then
-        sign in when ChatGPT asks.
-      </>
-    ),
-    code: mcpChatGpt,
-  },
-  {
-    label: "Grok",
-    body: <>Add a custom connector at grok.com and approve the connection on the page that opens.</>,
-    code: mcpGrok,
-  },
-  {
-    label: "Other MCP clients",
-    body: (
-      <>
-        Codex, Cursor and the rest: add the URL as a remote MCP server and sign in when asked. The{" "}
-        <Link href="/docs">quickstart</Link> has the details for each.
-      </>
-    ),
-    code: mcpRemoteConfig,
-  },
-  {
-    label: "Your own code",
-    body: (
-      <>
-        Use the <a href="https://agentauthprotocol.com">Agent Auth</a> SDK. The agent makes its own keys and gets its
-        own project.
-      </>
-    ),
-    code: sdkShort,
-  },
-];
-
-const CAPABILITIES = [
-  ["Do it later", "Send a signed HTTPS request in 90 seconds or 7 days, retried with backoff until it lands.", "schedule_http"],
-  ["Do it every day", "Crons on a UTC schedule, with an alert when runs start failing.", "create_cron"],
-  ["Wait for a job, then act", "Poll a status URL until it says done, then send the next request itself.", "watch_http"],
-  ["Receive webhooks", "A URL for GitHub, Stripe or CI. Signatures checked, noise filtered, events into the inbox.", "create_hook"],
-  ["Hear back without a server", "Results, captured responses and alerts land in an inbox the next session reads.", "read_inbox"],
-  ["Get woken up", "When the inbox gets something, AgentLater calls the trigger that starts your agent.", "set_wake"],
+const FEATURES = [
+  ["clock", "Schedule it", "Send a signed HTTPS request later, or set up a recurring cron."],
+  ["repeat", "Watch for it", "Poll a job’s status until a condition matches or its deadline arrives."],
+  ["webhook", "Receive it", "Give external services a webhook URL, with verification and filtering."],
+  ["tray", "Pick it up", "Collect outcomes and alerts in an inbox your agent can read next time."],
 ] as const;
 
 const EXAMPLES = [
-  ["Watch a deploy", "No agent turn in between: when the deploy reports SUCCEEDED, the smoke tests start.", watchActCall],
-  ["Hear only about failed CI", "Register the URL with GitHub. Successful runs are dropped; failures reach the inbox.", hookCall],
-  ["Pick up where it left off", "The next session starts from a report, not from checking everything again.", inboxCall],
-] as const;
+  {
+    label: "Watch a deploy",
+    prompt: "Watch my deployment every 5 minutes. When it succeeds, run the smoke tests and save the result in the inbox.",
+    flow: ["Watch the status URL", "Match the completion condition", "Send the follow-on request"],
+    note: "A deadline bounds the watch. Your agent does not need to stay connected.",
+  },
+  {
+    label: "Schedule a request",
+    prompt: "Send a request to my reminder endpoint tomorrow, then save the delivery result for me.",
+    flow: ["Schedule the request", "Attempt delivery at the chosen time", "Record the outcome"],
+    note: "Retries handle transient failures. Every attempt is recorded.",
+  },
+  {
+    label: "Receive a webhook",
+    prompt: "Create a webhook URL for my CI events. Keep the events I need in the inbox for the next session.",
+    flow: ["Create a receiving URL", "Verify and filter incoming events", "Read the inbox next session"],
+    note: "Receiving webhooks and reading the inbox do not use delivery attempts.",
+  },
+];
 
-const RETRY_WAITS = ["up to 10 s", "up to 2 min", "up to 20 min", "up to 40 min"];
+const AGENT_CARD_URL = `${GATEWAY_URL}/.well-known/agent-card.json`;
 
-const GUARANTEES = [
-  ["Signed deliveries", "Every request carries an HMAC-SHA256 signature, so the destination knows it came from your project."],
-  ["Retries with backoff", "Timeouts, 429s and 5xx responses are retried with growing, jittered delays. Retry-After is respected."],
-  ["Every attempt recorded", "Each try keeps its time and HTTP status or error. “Did it happen?” has a real answer."],
-  ["Safe to repeat", "With an idempotency key, a retried call returns the same task instead of a duplicate."],
-  ["Public HTTPS only", "Destinations must be public https:// names. Private networks, IPs and localhost are refused."],
-  ["Secrets stay put", "A secret only goes to the hosts it was set for, and is never shown back, not even in responses."],
+const A2A_STEPS: [string, ReactNode][] = [
+  [
+    "Discover",
+    <>
+      The Agent Card at{" "}
+      <a href={AGENT_CARD_URL}>
+        <code>/.well-known/agent-card.json</code>
+      </a>{" "}
+      describes the delivery skill and where to register.
+    </>,
+  ],
+  ["Authenticate", "Agent Auth lets a compatible runtime register on its own, without an owner clicking Connect."],
+  [
+    "Delegate & check",
+    <>
+      Send one delivery request to <code>/a2a</code>, then read its status or cancel it.
+    </>,
+  ],
+];
+
+// Each provider's steps are the ones the quickstart documents.
+const PROVIDERS: { label: string; detail: string; app: ReactNode; command?: [string, string]; auth: ReactNode }[] = [
+  {
+    label: "Claude",
+    detail: "Claude app + Claude Code",
+    app: "In Claude Desktop or claude.ai, go to Settings → Connectors → Add custom connector and paste this MCP address.",
+    command: ["Claude Code · terminal command", mcpClaudeCode],
+    auth: "Either way, approve the connection on the page that opens.",
+  },
+  {
+    label: "OpenAI",
+    detail: "ChatGPT + Codex",
+    app: (
+      <>
+        On <a href="https://chatgpt.com/plugins">chatgpt.com/plugins</a>, choose + → Add custom MCP server. Paste this
+        address and select OAuth.
+      </>
+    ),
+    command: ["Codex · config and sign-in", mcpCodex],
+    auth: "ChatGPT availability depends on your plan and workspace permissions. Sign in when it asks.",
+  },
+  {
+    label: "Grok",
+    detail: "Grok app",
+    app: "On grok.com, open Connectors → Custom and add this MCP address.",
+    auth: "Approve the connection on the page that opens. Availability depends on your account.",
+  },
+  {
+    label: "Other clients",
+    detail: "Any remote HTTP MCP client",
+    app: "Add this address as a remote HTTP MCP server in your client, then sign in when asked.",
+    command: ["Clients that take a JSON config", mcpRemoteConfig],
+    auth: "Your client must support remote HTTP MCP with OAuth sign-in.",
+  },
+  {
+    label: "Your own code",
+    detail: "Build with the Agent Auth SDK",
+    app: (
+      <>
+        Use the <a href="https://agentauthprotocol.com">Agent Auth</a> SDK to connect directly to the gateway. Keep the
+        identity in persistent storage.
+      </>
+    ),
+    command: ["JavaScript · SDK example", sdkShort],
+    auth: "The agent makes its own keys and gets its own project. The full guide lists every capability.",
+  },
+];
+
+const FAQ = [
+  [
+    "Does my agent have to stay online?",
+    "No. AgentLater can deliver scheduled requests, watch jobs and receive webhooks after the session ends. Your agent can read the results from its inbox on a later session.",
+  ],
+  [
+    "Is this another agent or model?",
+    "No. AgentLater provides MCP tools for reliable HTTP delivery, watches and event handling. Your existing agent decides what to do.",
+  ],
+  [
+    "Can it wake my agent?",
+    "A wake endpoint can notify a trigger that starts your agent. It requires a supported external trigger; it does not automatically start every chat client.",
+  ],
+  [
+    "Does a retry guarantee success?",
+    "No. Delivery uses bounded retries. Outcomes are recorded, including failures, so your agent can inspect them and decide whether to try again.",
+  ],
 ] as const;
 
 export default function Home() {
   return (
     <>
-      <section className="wrap hero">
-        <span className="pill">Works with Claude, ChatGPT and Grok · free trial</span>
-        <h1>
-          Your agent's session ends. <em>The work doesn't.</em>
-        </h1>
-        <div className="hero-row">
-          <p className="lede">
-            AgentLater sends the request, watches the job and receives the webhook after your agent stops. The result
-            waits in an inbox for its next session.
-          </p>
+      <div className="dark">
+        <section className="wrap hero">
           <div>
+            <p className="eyebrow">MCP tools for work that happens later</p>
+            <h1>
+              Hand off the <em>waiting.</em>
+            </h1>
+            <p className="lede">
+              Your agent schedules the request. AgentLater handles delivery and keeps the result for its next session.
+            </p>
             <div className="actions">
               <a className="button primary" href="#connect">
                 Connect your agent
               </a>
               <Link className="button secondary" href="/docs">
-                Read the quickstart
+                Read the docs
               </Link>
             </div>
-            <p className="hero-note">No sign-up and no API key to paste.</p>
+            <p className="compat">Works with Claude, ChatGPT and Grok</p>
+          </div>
+
+          <figure
+            className="story"
+            aria-label="Example: an agent schedules a request; AgentLater delivers it and saves the result"
+          >
+            <figcaption>Example delivery</figcaption>
+            <p className="speech">
+              <Icon name="chat" size={28} />
+              <strong>Run this check in 30 minutes.</strong>
+            </p>
+            <span className="path" aria-hidden="true" />
+            <img className="hub" src="/icon.svg" alt="AgentLater" />
+            <span className="path" aria-hidden="true" />
+            <p className="disconnect">Your agent can disconnect</p>
+            <span className="path" aria-hidden="true" />
+            <p className="result">
+              <Icon name="check" size={30} />
+              <strong>HTTP 200 · Result saved</strong>
+            </p>
+          </figure>
+        </section>
+      </div>
+
+      <section className="band quick" aria-label="A concrete AgentLater example">
+        <div className="wrap split">
+          <div>
+            <p className="eyebrow">For example</p>
+            <h2>A reminder that outlasts the chat.</h2>
+          </div>
+          <div>
+            <p className="quick-prompt">“In 30 minutes, send a reminder to my HTTPS webhook.”</p>
+            <p>
+              Your agent schedules it. You close the chat. AgentLater attempts delivery, then saves the outcome for
+              your agent to read next session.
+            </p>
+            <p className="tag">Schedule → deliver → check the result</p>
           </div>
         </div>
+      </section>
 
-        <figure className="timeline">
-          <figcaption>
-            <span>One reminder, a day apart</span>
-            <span>Nothing runs on your side in between</span>
-          </figcaption>
-          <div className="lanes" aria-hidden="true">
-            <div className="lane">
-              <span className="seg seg-agent">your agent</span>
-              <span className="seg seg-gap">session over</span>
-              <span className="seg seg-agent">your agent</span>
-            </div>
-            <div className="lane">
-              <span className="seg seg-later">AgentLater holds it, sends it, retries it, records it</span>
-            </div>
-          </div>
-          <ol className="stops">
-            {TIMELINE.map(({ when, title, status, note, code }) => (
+      <section className="section" id="how">
+        <div className="wrap">
+          <p className="eyebrow">How it works</p>
+          <h2>
+            From connected to <em>done.</em>
+          </h2>
+          <ol className="steps">
+            {STEPS.map(([title, body], i) => (
               <li key={title}>
-                <p className="stop-when">{when}</p>
-                <h2 className="stop-title">{title}</h2>
-                {status ? <p className={`stop-status ${status[1]}`}>{status[0]}</p> : null}
-                {note ? <p className="stop-note">{note}</p> : null}
-                {code ? <Code>{code}</Code> : null}
+                <b className="number" aria-hidden="true">
+                  0{i + 1}
+                </b>
+                <div>
+                  <h3>{title}</h3>
+                  <p>{body}</p>
+                </div>
               </li>
             ))}
           </ol>
-        </figure>
-
-        <dl className="facts">
-          {FACTS.map(([number, label]) => (
-            <div key={label}>
-              <dt>{number}</dt>
-              <dd>{label}</dd>
-            </div>
-          ))}
-        </dl>
-      </section>
-
-      <section className="section">
-        <div className="wrap">
-          <p className="eyebrow">The problem</p>
-          <h2 className="statement">
-            Agents stop when the session stops. <em>Deploys, retries and webhooks don't.</em>
-          </h2>
-          <div className="compare">
-            <p className="compare-head">Without AgentLater</p>
-            <p className="compare-head">With it</p>
-            {BEFORE_AFTER.map(([before, after]) => (
-              <div className="compare-row" key={before}>
-                <p className="before">{before}</p>
-                <p className="after">{after}</p>
-              </div>
-            ))}
+          <div className="trial">
+            <strong>Start with {TRIAL_ATTEMPTS} free attempts.</strong>
+            <p>
+              {TRIAL_DAYS}-day trial. No credit card. {PACK_PRICE} for {PACK_ATTEMPTS} more.
+            </p>
+            <a className="button primary" href="#connect">
+              Get connected <Icon name="arrowRight" />
+            </a>
           </div>
         </div>
       </section>
 
-      <section className="section" id="connect">
+      <section className="section band" id="features">
         <div className="wrap">
-          <p className="eyebrow">Get started</p>
-          <h2>Connect your agent in a minute</h2>
-          <p className="intro">
-            AgentLater is a set of tools your agent calls over MCP. There is no dashboard, no sign-up and no API key to
-            paste. Each connection gets its own project with a free trial.
-          </p>
-          <div className="url-bar">
-            <span className="url-label">Server URL</span>
-            <code>{MCP_URL}</code>
-            <CopyButton text={MCP_URL} label="Copy the server URL" />
-          </div>
-          <Tabs
-            label="Where your agent runs"
-            tabs={CONNECT.map(({ label, body, code }) => ({
-              label,
-              content: (
-                <div className="panel">
-                  <p>{body}</p>
-                  <Code>{code}</Code>
-                </div>
-              ),
-            }))}
-          />
-          <div className="prompt">
+          <div className="section-top">
             <div>
-              <h3>Then just ask</h3>
-              <p>Your agent reads what each tool does. Describe the outcome and when you want it, and it picks the calls.</p>
+              <p className="eyebrow">Built for the time in between</p>
+              <h2>
+                Less waiting.
+                <br />
+                More follow-through.
+              </h2>
             </div>
-            <Code label="you, to your agent">{agentPrompt}</Code>
+            <p className="intro">
+              A small set of reliable tools for the work that outlasts a conversation. Your agent chooses the calls;
+              you stay focused on the outcome.
+            </p>
           </div>
-        </div>
-      </section>
-
-      <section className="section">
-        <div className="wrap">
-          <p className="eyebrow">What your agent can do</p>
-          <h2>Everything that has to happen while it's gone</h2>
-          <p className="intro">Each of these is a tool call. They share the same signed, retried, recorded delivery underneath.</p>
-          <div className="tool-cards">
-            {CAPABILITIES.map(([title, body, tool]) => (
-              <Link className="tool-card" href={`/docs/capabilities#${tool}`} key={tool}>
+          <div className="features">
+            {FEATURES.map(([icon, title, body]) => (
+              <article key={title}>
+                <Icon name={icon} size={30} />
                 <h3>{title}</h3>
                 <p>{body}</p>
-                <p className="tools">{tool} →</p>
-              </Link>
+              </article>
             ))}
           </div>
-          <p className="all-tools">
-            <Link href="/docs/capabilities">See every capability →</Link>
-          </p>
+          <Link className="textlink" href="/docs/capabilities">
+            Explore every capability <Icon name="arrowUpRight" size={16} />
+          </Link>
         </div>
       </section>
 
-      <section className="section">
+      <section className="section" id="examples">
         <div className="wrap">
-          <p className="eyebrow">Examples</p>
-          <h2>What it looks like</h2>
-          <p className="intro">What the agent sends. In an MCP client you ask in plain words and see these calls go by.</p>
+          <p className="eyebrow">A little less abstract</p>
+          <h2>Just ask your agent.</h2>
           <Tabs
             label="Examples"
-            tabs={EXAMPLES.map(([label, body, call]) => ({
+            tabs={EXAMPLES.map(({ label, prompt, flow, note }) => ({
               label,
               content: (
-                <div className="panel">
-                  <p>{body}</p>
-                  <Code>{call}</Code>
+                <div className="example">
+                  <div>
+                    <p className="eyebrow">You, to your agent</p>
+                    <blockquote>“{prompt}”</blockquote>
+                    <p>{note}</p>
+                  </div>
+                  <ol>
+                    {flow.map((step) => (
+                      <li key={step}>
+                        <Icon name="check" size={23} />
+                        {step}
+                      </li>
+                    ))}
+                  </ol>
                 </div>
               ),
             }))}
@@ -292,96 +290,204 @@ export default function Home() {
         </div>
       </section>
 
-      <section className="section band-dark">
-        <div className="wrap">
-          <p className="eyebrow">Delivery</p>
-          <h2>Built to be trusted with “later”</h2>
-          <p className="intro">
-            Delivery is at least once. A 2xx response means the destination accepted the request; AgentLater says so,
-            and nothing more.
-          </p>
-          <ol className="retries" aria-label="Five attempts, with the longest wait before each retry">
-            <li>
-              <span className="dot" />
-              <span>Attempt 1</span>
-            </li>
-            {RETRY_WAITS.map((wait, i) => (
-              <li key={wait}>
-                <span className="dot" />
-                <span>Attempt {i + 2}</span>
-                <span className="wait">{wait}</span>
-              </li>
-            ))}
-          </ol>
-          <div className="spec">
-            {GUARANTEES.map(([title, body]) => (
-              <div key={title}>
-                <h3>{title}</h3>
-                <p>{body}</p>
-              </div>
-            ))}
+      <section className="section band" id="a2a">
+        <div className="wrap split a2a">
+          <div>
+            <p className="eyebrow">Built for agents</p>
+            <h2>
+              MCP for clients.
+              <br />
+              <em>A2A for agents.</em>
+            </h2>
+            <p className="status">A2A 1.0 · JSON-RPC</p>
           </div>
+          <div>
+            <p className="a2a-intro">
+              An agent that speaks the Agent2Agent protocol can hand AgentLater an HTTP request to deliver, now or
+              later, and read back what happened. No person signs in.
+            </p>
+            <ol className="a2a-steps">
+              {A2A_STEPS.map(([title, body]) => (
+                <li key={title}>
+                  <strong>{title}</strong>
+                  <span>{body}</span>
+                </li>
+              ))}
+            </ol>
+            <p className="fine">
+              One message is one HTTP delivery, immediate or scheduled. Streaming, push notifications, crons and
+              watches are not part of A2A; they stay with the MCP tools. An A2A client must also implement Agent Auth.
+            </p>
+            <Link className="textlink" href="/docs/a2a">
+              Read the A2A guide <Icon name="arrowUpRight" size={16} />
+            </Link>
+          </div>
+        </div>
+      </section>
+
+      <section className="section band-raise" id="connect">
+        <div className="wrap">
+          <div className="section-top bottom">
+            <div>
+              <p className="eyebrow">Get started</p>
+              <h2>Your agent. One connection.</h2>
+            </div>
+            <p className="intro">
+              Choose your provider. Copy the address into your app, or use the command in your terminal.
+            </p>
+          </div>
+          <Tabs
+            rail
+            label="Choose your provider"
+            tabs={PROVIDERS.map(({ label, detail, app, command, auth }) => ({
+              label,
+              detail,
+              content: (
+                <div className="sheet">
+                  <div className="sheet-top">
+                    <span className="eyebrow">{label}</span>
+                    <span className="badge">Remote MCP</span>
+                  </div>
+                  <p className="field-label">MCP server address</p>
+                  <div className="copyfield">
+                    <code>{MCP_URL}</code>
+                    <CopyButton text={MCP_URL} label="Copy the server address" />
+                  </div>
+                  <p className="sheet-app">{app}</p>
+                  {command ? <Code label={command[0]}>{command[1]}</Code> : null}
+                  <p className="fine">{auth}</p>
+                  <div className="sheet-next">
+                    <Icon name="check" size={22} />
+                    <p>
+                      <strong>Connected? Just ask.</strong>
+                      <br />
+                      “Create my AgentLater project.”
+                    </p>
+                  </div>
+                  <Link href="/docs" className="textlink">
+                    Full setup guide <Icon name="arrowUpRight" size={16} />
+                  </Link>
+                </div>
+              ),
+            }))}
+          />
+        </div>
+      </section>
+
+      <section className="section" id="pricing">
+        <div className="wrap">
+          <div className="section-top">
+            <div>
+              <p className="eyebrow">Straightforward pricing</p>
+              <h2>
+                Free to start.
+                <br />
+                Pay when you need more.
+              </h2>
+            </div>
+            <p className="intro">
+              No subscription. All capabilities are included. Receiving webhooks and reading the inbox cost nothing.
+            </p>
+          </div>
+          <div className="prices">
+            <article>
+              <p className="eyebrow">Try it out</p>
+              <p className="price">
+                $0 <span>/ free trial</span>
+              </p>
+              <h3>{TRIAL_ATTEMPTS} delivery attempts</h3>
+              <p>
+                Valid for {TRIAL_DAYS} days per project. The trial starts when your agent creates a project.
+              </p>
+              <a href="#connect" className="button outline">
+                Connect your agent <Icon name="arrowRight" />
+              </a>
+            </article>
+            <article>
+              <p className="eyebrow">Keep it going</p>
+              <p className="price">
+                {PACK_PRICE} <span>/ top-up</span>
+              </p>
+              <h3>{PACK_ATTEMPTS} more attempts</h3>
+              <p>Valid for 12 months. Your agent can generate a payment link when you need more.</p>
+              <Link href="/docs" className="textlink">
+                See the documentation <Icon name="arrowUpRight" size={16} />
+              </Link>
+            </article>
+          </div>
+          <div className="split explainer">
+            <div>
+              <h3>What counts as an attempt?</h3>
+              <p>
+                One attempt is one try to deliver an HTTP request. Successes and failed tries both count against your
+                balance.
+              </p>
+            </div>
+            <div>
+              <p>
+                <strong>First try succeeds? 1 attempt.</strong>
+                <br />
+                Two failed tries, then success? 3 attempts.
+              </p>
+              <p className="fine">
+                Temporary failures may be retried with backoff. A task allows 1–{MAX_ATTEMPTS} attempts, with{" "}
+                {MAX_ATTEMPTS} by default; not every error is retried. Retries are included in your attempt balance,
+                not free extras.
+              </p>
+              <Link href="/docs/delivery#retries" className="textlink">
+                How retries work <Icon name="arrowUpRight" size={16} />
+              </Link>
+            </div>
+          </div>
+          <p className="fine">
+            A successful HTTP response means the destination accepted the request, not that downstream work is
+            complete. Scheduling the request does not guarantee delivery.
+          </p>
+        </div>
+      </section>
+
+      <section className="section band">
+        <div className="wrap trust">
+          <Icon name="shield" size={42} />
+          <div>
+            <h2>
+              “Did it happen?”
+              <br />
+              Should have an answer.
+            </h2>
+            <p>
+              Signed deliveries. Retries with backoff. A record of every attempt. AgentLater reports the outcome so
+              your agent can decide what comes next.
+            </p>
+          </div>
+          <Link className="textlink" href="/docs/delivery">
+            Read the delivery details <Icon name="arrowUpRight" size={16} />
+          </Link>
         </div>
       </section>
 
       <section className="section">
-        <div className="wrap">
-          <p className="eyebrow">Pricing</p>
-          <h2>Free to start, {PACK_PRICE} when you need more</h2>
-          <p className="intro">
-            Everything above is in the trial. Receiving webhooks and reading the inbox cost nothing.
-          </p>
-          <div className="plans">
-            <div className="plan">
-              <h3>Free trial</h3>
-              <p className="price">$0</p>
-              <ul>
-                <li>1,000 delivery attempts over 7 days, per project</li>
-                <li>
-                  Starts when your agent calls <code>create_project</code>
-                </li>
-                <li>No sign-up and no card</li>
-              </ul>
-            </div>
-            <div className="plan plan-paid">
-              <h3>More attempts</h3>
-              <p className="price">{PACK_PRICE}</p>
-              <ul>
-                <li>{PACK_ATTEMPTS} delivery attempts, valid 12 months</li>
-                <li>Your agent sends you a payment link when the trial runs out</li>
-                <li>Leftovers carry over. No account or subscription</li>
-              </ul>
-            </div>
-          </div>
-          <details className="limits">
-            <summary>Every limit</summary>
-            <div className="table-scroll">
-              <table>
-                <tbody>
-                  {LIMITS.map(([k, v]) => (
-                    <tr key={k}>
-                      <th scope="row">{k}</th>
-                      <td>{v}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <Link href="/docs/delivery">How delivery works →</Link>
-          </details>
+        <div className="wrap faq">
+          <h2>A few good questions.</h2>
+          {FAQ.map(([question, answer]) => (
+            <details key={question}>
+              <summary>{question}</summary>
+              <p>{answer}</p>
+            </details>
+          ))}
         </div>
       </section>
 
-      <section className="wrap cta cta-band">
-        <h2>Give your agent a sense of later</h2>
-        <p>Connect it from Claude, ChatGPT or Grok, and hand it the waiting.</p>
-        <div className="actions">
+      <section className="dark closing">
+        <div className="wrap">
+          <h2>
+            Leave the waiting
+            <br />
+            with AgentLater.
+          </h2>
           <a className="button primary" href="#connect">
-            Connect your agent
+            Connect your agent <Icon name="arrowRight" />
           </a>
-          <Link className="button secondary" href="/docs/capabilities">
-            See every capability
-          </Link>
         </div>
       </section>
     </>
