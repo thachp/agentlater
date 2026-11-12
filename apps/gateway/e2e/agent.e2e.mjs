@@ -1042,6 +1042,20 @@ describe("A2A at /a2a", () => {
       assert.equal(refused.status, 403, JSON.stringify(capability));
       assert.deepEqual(refused.body, CLAIM_DOES_NOT_LIST, JSON.stringify(capability));
     }
+    // A body that names two capabilities is read once, by the gateway as by the plugin: the last one is the one asked for.
+    const twoNames = async (first, last) => {
+      const res = await fetch(execute(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${await narrowed()}`, "X-Forwarded-For": address() },
+        body: `{"capability":${JSON.stringify(first)},"capability":${JSON.stringify(last)},"arguments":${JSON.stringify({ ...SCHEDULE, task_id: known.id })}}`,
+      });
+      return { status: res.status, body: await res.json() };
+    };
+    assert.deepEqual(await twoNames("get_task", "schedule_http"), { status: 403, body: CLAIM_DOES_NOT_LIST });
+    // The listed one, last, is the one that runs: get_task, which is refused the other's arguments, so nothing was scheduled.
+    const last = await twoNames("schedule_http", "get_task");
+    assert.equal(last.status, 400, JSON.stringify(last.body));
+    assert.equal(last.body.error, "invalid_request");
     await untouched("refused");
 
     // A token that lists the capability, alone or among others, runs it, and so does one with no claim: as before.
