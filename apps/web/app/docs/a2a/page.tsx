@@ -29,11 +29,11 @@ const REFUSALS: [string, string, string][] = [
 
 /** Answered as JSON-RPC errors, with HTTP 200. */
 const ERRORS: [string, string, string][] = [
-  ["-32009", "VersionNotSupportedError", "The request has no A2A-Version: 1.0 header (or ?A2A-Version=1.0). Checked before the token."],
+  ["-32009", "VersionNotSupportedError", "The request has no A2A-Version: 1.0 header (or ?A2A-Version=1.0). A patch number is ignored, so 1.0.1 is 1.0. Checked before the token."],
   ["-32700", "Parse error", "The body is not JSON."],
   ["-32600", "Invalid request", "The body is not one JSON-RPC 2.0 request. Batches are not taken."],
   ["-32601", "Method not found", "Not a method of A2A 1.0. The 0.3 names (message/send, tasks/get) are not taken."],
-  ["-32602", "Invalid params", "The request is at fault. data[0].metadata.field names the field, such as message.parts[0].data.url; metadata.code is idempotency_conflict when a key or messageId was already used for a different request."],
+  ["-32602", "Invalid params", "The request is at fault: a payload field, a message whose role is not ROLE_USER, a historyLength that is not a whole number from 0 up. data[0].metadata.field names the field, such as message.parts[0].data.url; metadata.code is idempotency_conflict when a key or messageId was already used for a different request."],
   ["-32001", "TaskNotFoundError", "No such task for this caller: it never existed, was deleted 30 days after it finished, belongs to another host, was made over another interface, or the host has no project."],
   ["-32002", "TaskNotCancelableError", "CancelTask on a task that already completed or failed."],
   ["-32003", "PushNotificationNotSupportedError", "A push notification method, or a send that carries a push notification config."],
@@ -77,7 +77,8 @@ export default function A2a() {
       <ul>
         <li>
           Protocol: <a href={SPEC}>A2A specification v1.0.1</a>, version <code>1.0</code> on the wire, JSON-RPC binding
-          only. Every request carries <code>A2A-Version: 1.0</code>.
+          only. Every request carries <code>A2A-Version: 1.0</code>; a patch number, as in <code>1.0.1</code>, is
+          ignored.
         </li>
         <li>
           Client used in the example and in AgentLater's tests: <code>@a2a-js/sdk</code> 1.3.0, with{" "}
@@ -158,7 +159,7 @@ export default function A2a() {
 
       <h2 id="send">Sending a delivery</h2>
       <p>
-        <code>SendMessage</code> takes one message with one part: a JSON data part, media type{" "}
+        <code>SendMessage</code> takes one message, role <code>ROLE_USER</code>, with one part: a JSON data part, media type{" "}
         <code>application/json</code>, as the JSON Schema at{" "}
         <code>{GATEWAY_URL}/a2a/schemas/deliver-http/v1.json</code> defines it. A text part schedules nothing and
         the error says what to send.
@@ -288,7 +289,12 @@ export default function A2a() {
       <p>
         A caller is refused in one of two ways. Anything about the credentials is an HTTP status with a JSON body of{" "}
         <code>{'{ "error": "…", "message": "…" }'}</code>, before JSON-RPC is read. Everything else is a JSON-RPC error
-        with HTTP <code>200</code>; A2A errors carry their name in <code>data[0].reason</code>.
+        with HTTP <code>200</code>; A2A errors carry their name in <code>data[0].reason</code>. An error is answered
+        with the request's <code>id</code>, and with <code>null</code> only when the id could not be read.
+      </p>
+      <p>
+        <strong>Always send an <code>id</code>.</strong> A request without one is a JSON-RPC notification, which may
+        not be answered: it gets HTTP <code>204</code> with no body, and nothing is run for it.
       </p>
       <h3 id="http-refusals">HTTP refusals</h3>
       <div className="table-scroll">

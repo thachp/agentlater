@@ -139,6 +139,28 @@ describe("SendMessage", () => {
     expect(ran).toEqual([]);
   });
 
+  it("refuses a message whose role is missing, unknown or the agent's, naming role, and makes no task", async () => {
+    const { ran, send } = adapter();
+    for (const role of [undefined, null, "", "ROLE_AGENT", "ROLE_UNSPECIFIED", "ROLE_OWNER", "user", 2]) {
+      const { body } = await send("SendMessage", message({ url: "https://dest.example.com/hook" }, { role }));
+      expect(body.result, String(role)).toBeUndefined();
+      expect(body.error, String(role)).toMatchObject({ code: -32602, data: [{ reason: "INVALID_PARAMS", metadata: { field: "message.role" } }] });
+      expect(body.error.message).toContain("ROLE_USER");
+    }
+    expect(ran).toEqual([]);
+  });
+
+  it("refuses a history length that is not a whole number from 0 up, and takes one that is", async () => {
+    const { ran, send } = adapter();
+    for (const historyLength of [-1, 2.5, "many"]) {
+      const { body } = await send("SendMessage", { ...message({ url: "https://dest.example.com/hook" }), configuration: { historyLength } });
+      expect(body.error, String(historyLength)).toMatchObject({ code: -32602, data: [{ metadata: { field: "configuration.historyLength" } }] });
+    }
+    expect(ran).toEqual([]);
+    for (const historyLength of [0, 10]) await send("SendMessage", { ...message({ url: "https://dest.example.com/hook" }), configuration: { historyLength } });
+    expect(ran).toHaveLength(2);
+  });
+
   it("answers the same key with a different payload with -32602 and says which key", async () => {
     const conflict = refuses(409, "idempotency_conflict", "idempotency_key was already used for a different request");
     const given = await adapter(ALL, conflict).send("SendMessage", message({ url: "https://dest.example.com/other", idempotency_key: "order-42" }));
@@ -375,6 +397,16 @@ describe("GetTask", () => {
     expect(bodies[2]).toEqual(bodies[0]);
   });
 
+  it("refuses a history length that is not a whole number from 0 up, naming it, and reads nothing", async () => {
+    const { ran, send } = adapter();
+    for (const historyLength of [-1, -0.5, 2.5, "many"]) {
+      const { body } = await send("GetTask", { id: TASK_ID, historyLength });
+      expect(body.error, String(historyLength)).toMatchObject({ code: -32602, data: [{ reason: "INVALID_PARAMS", metadata: { field: "historyLength" } }] });
+    }
+    expect(ran).toEqual([]);
+    expect((await send("GetTask", { id: TASK_ID, historyLength: 0 })).body.result.id).toBe(TASK_ID);
+  });
+
   it("does not call a task missing when the read was refused for another reason", async () => {
     const limited = await adapter(ALL, refuses(429, "rate_limited", "more than 300 calls in a minute")).send("GetTask", { id: TASK_ID });
     expect(limited.body.error).toEqual({ code: -32000, message: "rate_limited: more than 300 calls in a minute" });
@@ -578,6 +610,14 @@ describe("ListTasks", () => {
       const { ran, body } = await list({ historyLength });
       expect(ran).toEqual([["list_tasks", { limit: 50 }]]);
       for (const task of body.result.tasks) expect(task.history).toBeUndefined();
+    }
+  });
+
+  it("refuses a history length that is not a whole number from 0 up, by name, before anything runs", async () => {
+    for (const historyLength of [-1, 2.5]) {
+      const { ran, body } = await list({ historyLength });
+      expect(body.error, String(historyLength)).toMatchObject(refusedFor("historyLength"));
+      expect(ran).toEqual([]);
     }
   });
 
