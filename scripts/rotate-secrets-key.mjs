@@ -12,11 +12,13 @@
 // Deploy after each. Requires `gh` logged in with admin on the repo, and for `finish` wrangler
 // logged in to Cloudflare with CLOUDFLARE_ACCOUNT_ID set to the account the Workers run in (wrangler
 // won't choose one when the login reaches several, and the repo is public, so the id isn't in its
-// config). finish refuses unless the gateway's sweep has completed a pass with the
-// keys deployed now, more than an hour ago, and checked them since the last change here.
+// config). finish refuses unless the gateway's sweep has completed a pass with the keys deployed
+// now, and has checked them again an hour or more after both that pass and the last change here:
+// that verdict is lib/finish-verdict.mjs.
 
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { finishVerdict } from "./lib/finish-verdict.mjs";
 
 const REPO = "thachp/agentlater";
 const SLOTS = { 1: "SECRETS_KEY", 2: "SECRETS_KEY_2" };
@@ -40,7 +42,6 @@ const changedAt = Math.max(
   0,
   ...listed.filter((v) => v.name.startsWith("SECRETS_KEY_")).map((v) => Date.parse(v.updatedAt)),
 );
-const HOUR = 3600 * 1000;
 const secrets = new Set(JSON.parse(gh(["secret", "list", "--env", env, "--json", "name"])).map((s) => s.name));
 const current = variables.SECRETS_KEY_SLOT === "2" ? 2 : 1;
 const other = current === 1 ? 2 : 1;
@@ -71,14 +72,8 @@ if (step === "start") {
     { cwd: new URL("../apps/gateway/", import.meta.url), encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] },
   );
   const row = JSON.parse(out)[0]?.results?.[0];
-  if (!row || row.rotation === null || row.completed_at === null) fail("the sweep hasn't completed a pass yet");
-  // The slot stands in for the keys: the fingerprint can't be checked here, since the keys can't be
-  // read back. That holds while keys change only through this script and deploys only through CI:
-  // `start` is the only step that puts a new key in a slot, and it moves SECRETS_KEY_SLOT to it.
-  // Setting a slot's secret by hand, or deploying from a laptop, changes keys this can't see.
-  if (row.slot !== String(current)) fail(`the sweep last saw slot ${row.slot}, not ${current}: deploy, then wait for a new pass`);
-  if (row.checked_at <= changedAt) fail("the sweep hasn't checked the keys since the last change; deploy, then wait an hour");
-  if (Date.now() - row.completed_at < HOUR) fail("the pass completed less than an hour ago; wait for attempts in flight");
+  const verdict = finishVerdict({ row, current, changedAt });
+  if (verdict.finish !== true) fail(verdict.why);
   gh(["variable", "set", "SECRETS_KEY_ROTATING", "--env", env, "--body", "false"]);
   if (secrets.has(SLOTS[other])) gh(["secret", "delete", SLOTS[other], "--env", env]);
   console.log(
