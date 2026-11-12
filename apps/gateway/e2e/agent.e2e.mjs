@@ -970,6 +970,78 @@ describe("A2A at /a2a", () => {
     assert.deepEqual(await res.json(), { error: "invalid_request", message: `a2a is not executed; it lets an agent call ${a2a()}` });
   });
 
+  // ---- What a token's capabilities claim, and an agent's own grants, limit on the capability-execution route ----
+  //
+  // The two tests below record what the gateway does today; they are not what it is meant to do.
+  // Agent Auth (v1.0-draft §4.3, and §4.5 step 11) says that when a token carries a `capabilities`
+  // claim "the server MUST reject requests for capabilities not listed". The plugin narrows the
+  // session's grants to the claim, but its execute route, finding no grant on the session, then
+  // grants the capability from the host's own (`defaultCapabilities`) and runs it. OPEN DECISION:
+  // whether the gateway refuses these itself. When it does, each `200` below becomes a
+  // `403 capability_not_granted` and nothing is scheduled or granted.
+
+  /** The agent's grant rows for one capability. */
+  const grantRows = async (agent, capability) =>
+    (await (await gatewayDb()).prepare('SELECT status, reason FROM "agentCapabilityGrant" WHERE "agentId" = ? AND capability = ? ORDER BY "createdAt"').bind(agent.agentId, capability).all()).results;
+  /** One call to the capability-execution route with a token the caller made. */
+  const executeWith = async (token, capability, args) => {
+    const res = await agentAuth("/capability/execute", token, { capability, arguments: args });
+    return { status: res.status, body: await res.json() };
+  };
+
+  test("today a token whose capabilities claim names only get_task still runs schedule_http on the capability-execution route", async () => {
+    const agent = await withProject();
+    const known = await run(agent, "schedule_http", { url: "https://dest.example.com/claim-known", delay: "1h" });
+    assert.deepEqual((await grantRows(agent, "schedule_http")).map((g) => g.status), ["active"]);
+    const narrowed = () => agent.token(execute(), ["get_task"]);
+    const schedule = { url: "https://dest.example.com/claim-narrowed", delay: "1h" };
+
+    // The control: the token does what it names.
+    const read = await executeWith(await narrowed(), "get_task", { task_id: known.id });
+    assert.equal(read.status, 200, JSON.stringify(read.body));
+    assert.equal(read.body.data.id, known.id);
+
+    // Not narrowed: the same claim, and schedule_http runs.
+    const ran = await executeWith(await narrowed(), "schedule_http", schedule);
+    assert.equal(ran.status, 200, JSON.stringify(ran.body));
+    assert.equal(ran.body.data.status, "scheduled");
+    // Nor by a claim that names nothing at all.
+    const none = await executeWith(await agent.forge({ aud: execute(), capabilities: [] }), "schedule_http", schedule);
+    assert.equal(none.status, 200, JSON.stringify(none.body));
+
+    assert.equal((await run(agent, "list_tasks")).tasks.filter((t) => t.url === schedule.url).length, 2);
+    // Each of those calls left the agent another grant, beside the one it already held.
+    assert.deepEqual(
+      (await grantRows(agent, "schedule_http")).map((g) => [g.status, g.reason]),
+      [["active", null], ["active", "auto_granted_from_host_budget"], ["active", "auto_granted_from_host_budget"]],
+    );
+
+    // What does stop it: a grant the agent has had revoked.
+    await (await gatewayDb()).prepare('UPDATE "agentCapabilityGrant" SET status = ? WHERE "agentId" = ? AND capability = ?').bind("revoked", agent.agentId, "schedule_http").run();
+    const revoked = await executeWith(await narrowed(), "schedule_http", schedule);
+    assert.equal(revoked.status, 403, JSON.stringify(revoked.body));
+    assert.equal(revoked.body.error, "grant_revoked");
+  });
+
+  test("today an agent registered with get_task alone still runs schedule_http there, where /a2a refuses it", async () => {
+    const owner = await withProject();
+    const reader = await register(["a2a", "get_task"], owner.client);
+    assert.deepEqual(await grantRows(reader, "schedule_http"), []);
+    const schedule = { url: "https://dest.example.com/claim-reader", delay: "1h" };
+
+    const onA2a = await rpcAs(reader, "SendMessage", message(schedule));
+    assert.equal(onA2a.status, 403, JSON.stringify(onA2a.body));
+    assert.equal(onA2a.body.error, "capability_not_granted");
+
+    // The SDK will not sign for a capability the agent was not given, so the token is signed by hand.
+    const ran = await executeWith(await reader.forge({ aud: execute(), capabilities: ["schedule_http"] }), "schedule_http", schedule);
+    assert.equal(ran.status, 200, JSON.stringify(ran.body));
+    assert.deepEqual((await grantRows(reader, "schedule_http")).map((g) => [g.status, g.reason]), [["active", "auto_granted_from_host_budget"]]);
+    assert.equal((await run(owner, "list_tasks")).tasks.filter((t) => t.url === schedule.url).length, 1);
+    // /a2a reads the agent's grants, so from now on it serves this agent too.
+    assert.equal((await rpcAs(reader, "SendMessage", message(schedule))).status, 200);
+  });
+
   test("a token for one gateway domain's /a2a is refused on the other's", async () => {
     const onAlt = (url, init) => mf.dispatchFetch(url, init);
     const altA2a = `${ALT_ORIGIN}/a2a`;
