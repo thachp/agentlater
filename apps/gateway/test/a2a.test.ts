@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { Caller, serveA2a, type Refusal } from "../src/a2a";
+import { ApiError } from "../src/api";
 import worker, { type Env } from "../src/index";
 
 /** /a2a itself, without the rest of the gateway: the verifier and the capabilities are the test's. */
@@ -150,8 +151,30 @@ describe("/a2a through the gateway", () => {
       const res = await worker.fetch(post(headers), on, ctx);
       expect(res.status).toBe(200);
       const body = (await res.json()) as Json;
-      expect(body).toMatchObject({ jsonrpc: "2.0", id: null, error: { code: -32009 } });
+      expect(body).toMatchObject({ jsonrpc: "2.0", error: { code: -32009 } });
       expect(body.error.data).toEqual([{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "VERSION_NOT_SUPPORTED", domain: "a2a-protocol.org" }]);
+    }
+  });
+
+  it("answers a version it does not speak by the request's id, and by null when the id cannot be read", async () => {
+    const answerTo = async (body: string) => (await (await worker.fetch(post({ "A2A-Version": "0.3" }, body), on, ctx)).json()) as Json;
+    expect(await answerTo(rpc("GetTask"))).toMatchObject({ id: 7, error: { code: -32009 } });
+    expect(await answerTo('{"jsonrpc":"2.0","id":"abc","method":"GetTask"}')).toMatchObject({ id: "abc", error: { code: -32009 } });
+    for (const body of ["{", "", "[]", '{"id":{"a":1}}', '{"jsonrpc":"2.0","id":null,"method":"GetTask"}', JSON.stringify({ id: 7, pad: "x".repeat(200 * 1024) })]) {
+      expect(await answerTo(body), body.slice(0, 40)).toMatchObject({ id: null, error: { code: -32009 } });
+    }
+  });
+
+  it("takes a version with a patch number as 1.0, and refuses every other version", async () => {
+    // Accepted versions reach the credential check; the others never do.
+    for (const version of ["1.0.1", "1.0.7", "1.0.0"]) {
+      expect((await worker.fetch(post({ "A2A-Version": version }), on, ctx)).status, version).toBe(401);
+      expect((await worker.fetch(new Request(`https://gateway.test/a2a?A2A-Version=${version}`, { method: "POST", body: rpc("GetTask") }), on, ctx)).status, version).toBe(401);
+    }
+    for (const version of ["1.1.0", "1.1", "0.3.0", "2.0.1", "1", "1.0.1.2", "1.0.x", "1.0.", "v1.0.1"]) {
+      const res = await worker.fetch(post({ "A2A-Version": version }), on, ctx);
+      expect(res.status, version).toBe(200);
+      expect(await res.json(), version).toMatchObject({ error: { code: -32009 } });
     }
   });
 
@@ -240,9 +263,45 @@ describe("/a2a for a verified caller", () => {
   });
 
   it("answers JSON that is not a JSON-RPC request with invalid request", async () => {
-    for (const body of ["{}", "[]", "null", '"GetTask"', '{"jsonrpc":"1.0","id":1,"method":"GetTask","params":{}}', '{"jsonrpc":"2.0","id":1,"params":{}}', `[${rpc("GetTask")}]`]) {
+    for (const body of ["{}", "[]", "null", '"GetTask"', '{"jsonrpc":"1.0","method":"GetTask","params":{}}', '{"jsonrpc":"2.0","params":{}}', `[${rpc("GetTask")}]`]) {
       expect(await call(body), body).toMatchObject({ jsonrpc: "2.0", id: null, error: { code: -32600 } });
     }
+  });
+
+  it("answers every error by the request's id, and by null only when the id could not be read", async () => {
+    // Not a JSON-RPC 2.0 request, but its id can be read.
+    expect(await call('{"jsonrpc":"1.0","id":1,"method":"GetTask","params":{}}')).toMatchObject({ id: 1, error: { code: -32600 } });
+    expect(await call('{"jsonrpc":"2.0","id":"abc","params":{}}')).toMatchObject({ id: "abc", error: { code: -32600 } });
+    expect(await call('{"jsonrpc":"2.0","id":"abc","method":"Nope","params":{}}')).toMatchObject({ id: "abc", error: { code: -32601 } });
+    expect(await call('{"jsonrpc":"2.0","id":0,"method":"GetTask","params":[]}')).toMatchObject({ id: 0, error: { code: -32602 } });
+    // What the API refuses for a reason that is not the request's.
+    const refused = async () => {
+      throw new ApiError(429, { error: { code: "rate_limited", message: "slow down" } });
+    };
+    const res = await handleA2a(post(AUTH, rpc("ListTasks")), on, async () => new Caller("host_1", new Set(["a2a", "list_tasks"])), refused);
+    expect(await res.json()).toMatchObject({ id: 7, error: { code: -32000 } });
+    expect(await call("{")).toMatchObject({ id: null, error: { code: -32700 } });
+  });
+
+  it("does not answer a notification, a request with no id, and runs nothing for it", async () => {
+    const message = { messageId: "m-1", role: "ROLE_USER", parts: [{ data: { url: "https://dest.example.com/hook" }, mediaType: "application/json" }] };
+    const everything = async () => new Caller("host_1", new Set(["a2a", "queue_http", "get_task", "cancel_task"]));
+    let ran = 0;
+    const counting = async () => (ran++, {});
+    for (const [method, params] of [["SendMessage", { message }], ["CancelTask", { id: "task_1" }], ["GetTask", { id: "task_1" }], ["Nope", {}]] as const) {
+      const res = await handleA2a(post(AUTH, JSON.stringify({ jsonrpc: "2.0", method, params })), on, everything, counting);
+      expect(res.status, method).toBe(204);
+      expect(await res.text(), method).toBe("");
+    }
+    expect(ran).toBe(0);
+    // In a version that is not spoken, too.
+    const other = await handleA2a(post({ "A2A-Version": "0.3" }, JSON.stringify({ jsonrpc: "2.0", method: "GetTask", params: {} })), on, everything, counting);
+    expect(other.status).toBe(204);
+    expect(await other.text()).toBe("");
+    // A null id is an id: that request is answered.
+    expect(await call('{"jsonrpc":"2.0","id":null,"method":"Nope","params":{}}')).toMatchObject({ id: null, error: { code: -32601 } });
+    // A caller without credentials is still turned away at HTTP.
+    expect((await handleA2a(post(V1, JSON.stringify({ jsonrpc: "2.0", method: "GetTask" })), on, everything, counting)).status).toBe(401);
   });
 
   it("refuses a body over the gateway's limit", async () => {
@@ -299,6 +358,7 @@ describe("the log line of an /a2a request", () => {
     expect(await ending(post(AUTH, rpc("SubscribeToTask", { id: "task_1" })))).toEqual({ method: "SubscribeToTask", outcome: -32004, status: 200, host: "host_1" });
     expect(await ending(post(AUTH, "{"))).toEqual({ method: null, outcome: -32700, status: 200, host: "host_1" });
     expect(await ending(post({ Authorization: AUTH.Authorization }))).toEqual({ method: null, outcome: -32009, status: 200, host: null });
+    expect(await ending(post(AUTH, JSON.stringify({ jsonrpc: "2.0", method: "GetTask", params: { id: "task_1" } })))).toEqual({ method: "GetTask", outcome: "notification", status: 204, host: "host_1" });
     expect(await ending(post(V1))).toEqual({ method: null, outcome: "authentication_required", status: 401, host: null });
     expect(await ending(new Request("https://gateway.test/a2a"))).toEqual({ method: null, outcome: "method_not_allowed", status: 405, host: null });
     expect(await ending(post(AUTH, rpc("SendMessage", { pad: "x".repeat(200 * 1024) })))).toEqual({ method: null, outcome: "too_large", status: 413, host: "host_1" });

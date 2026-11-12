@@ -4,7 +4,7 @@
 // queue_http, GetTask get_task, ListTasks list_tasks and CancelTask cancel_task, so validation,
 // budget, rate limit and idempotency are the capabilities'.
 
-import { A2A_VERSION_HEADER, AgentCard, Task, TaskState, type ListTasksRequest, type ListTasksResponse, type SendMessageRequest } from "@a2a-js/sdk";
+import { A2A_VERSION_HEADER, AgentCard, Role, Task, TaskState, type ListTasksRequest, type ListTasksResponse, type SendMessageRequest } from "@a2a-js/sdk";
 import {
   A2A_ERROR_CODE,
   ContentTypeNotSupportedError,
@@ -260,6 +260,10 @@ const PAYLOAD = "message.parts[0].data";
 /** -32602, naming the request field at fault. */
 const invalid = (message: string, field?: string, code?: string) =>
   new RequestMalformedError({ message, metadata: { ...(field ? { field } : {}), ...(code ? { code } : {}) } });
+/** Refuses a history length that is not one. No history is kept, so one that is asks for nothing. */
+function checkHistoryLength(length: number | undefined, field = "historyLength"): void {
+  if (length !== undefined && !(Number.isInteger(length) && length >= 0)) throw invalid("historyLength must be a whole number, 0 or more", field);
+}
 
 /** A time as A2A writes one: ISO 8601 with its offset. */
 const TIMESTAMP = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?(Z|[+-]\d\d:\d\d)$/;
@@ -315,6 +319,7 @@ function operationsFor(env: A2aEnv, caller: Caller, run: Run, refused: (refusal:
   }
 
   async function sendMessage({ message, configuration }: SendMessageRequest): Promise<Task> {
+    checkHistoryLength(configuration?.historyLength, "configuration.historyLength");
     if (configuration?.taskPushNotificationConfig) throw new PushNotificationNotSupportedError();
     if (message?.taskId) {
       await use(RUNS.GetTask, { task_id: message.taskId });
@@ -331,6 +336,7 @@ function operationsFor(env: A2aEnv, caller: Caller, run: Run, refused: (refusal:
     if (parts.length !== 1 || typeof payload !== "object" || payload === null || Array.isArray(payload)) throw invalid(guidance, "message.parts");
     const unknown = Object.keys(payload).find((field) => !PAYLOAD_FIELDS.includes(field));
     if (unknown !== undefined) throw invalid(`unknown field ${JSON.stringify(unknown)}; the fields are ${PAYLOAD_FIELDS.join(", ")}`, `${PAYLOAD}.${unknown}`);
+    if (message!.role !== Role.ROLE_USER) throw invalid("message.role must be ROLE_USER: the message is the caller's", "message.role");
 
     const request = payload as Record<string, unknown>;
     const key = request.idempotency_key ?? (await keyFor(message!.messageId));
@@ -343,7 +349,8 @@ function operationsFor(env: A2aEnv, caller: Caller, run: Run, refused: (refusal:
    * The caller's tasks made through A2A, most recently changed first: the ledger's order, page and
    * count for a call made through A2A. No parameter is ignored: what cannot be honoured is refused by name.
    */
-  async function listTasks({ contextId, status, pageSize = 50, pageToken, statusTimestampAfter, includeArtifacts }: ListTasksRequest): Promise<ListTasksResponse> {
+  async function listTasks({ contextId, status, pageSize = 50, pageToken, statusTimestampAfter, includeArtifacts, historyLength }: ListTasksRequest): Promise<ListTasksResponse> {
+    checkHistoryLength(historyLength);
     if (contextId) throw invalid("contextId is not a filter here: each task is its own context, whose id is the task's; read it with GetTask", "contextId");
     if (status === TaskState.UNRECOGNIZED) throw invalid("status is not a task state", "status");
     if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) throw invalid("pageSize must be 1 to 100", "pageSize");
@@ -370,7 +377,10 @@ function operationsFor(env: A2aEnv, caller: Caller, run: Run, refused: (refusal:
     getAgentCard: unsupported("this operation"),
     getAuthenticatedExtendedAgentCard: unsupported("the extended Agent Card"),
     sendMessage,
-    getTask: async ({ id }) => a2aTask(await use(RUNS.GetTask, { task_id: id })),
+    getTask: async ({ id, historyLength }) => {
+      checkHistoryLength(historyLength);
+      return a2aTask(await use(RUNS.GetTask, { task_id: id }));
+    },
     listTasks,
     cancelTask: async ({ id }) => {
       const view = await use(RUNS.CancelTask, { task_id: id });
@@ -403,16 +413,31 @@ function refuse(env: A2aEnv, { status, code, message, retryAfter }: Refusal): Re
 const isRpcRequest = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value) && "jsonrpc" in value && value.jsonrpc === "2.0" && "method" in value && typeof value.method === "string";
 
+/** What a body holds as JSON, or undefined when it is not JSON or is over the limit. */
+function parsed(body: Uint8Array | null): unknown {
+  try {
+    return JSON.parse(new TextDecoder().decode(body ?? undefined));
+  } catch {
+    return undefined;
+  }
+}
+
 /** A JSON-RPC answer, as far as the transport reads one. Protocol errors travel in the body, so the HTTP status is 200. */
 type RpcAnswer = { error?: { code: number; message: string } };
-const rpcError = (problem: { code: number; message: string }) => ({ jsonrpc: "2.0", id: null, error: problem });
+/** An error, answered by the id of what was `sent` when that can be read (JSON-RPC 2.0, 5), and by null when not. */
+const rpcError = (problem: { code: number; message: string }, sent?: unknown) => ({
+  jsonrpc: "2.0",
+  id: typeof sent === "object" && sent !== null && "id" in sent && (typeof sent.id === "string" || typeof sent.id === "number") ? sent.id : null,
+  error: problem,
+});
 
 /** What a log line may carry of something a caller or a library chose: a short plain word, such as a method name, a code or a ray id. A token, a URL or a sentence is not one. */
 const word = (value: unknown) => (typeof value === "string" && /^[\w-]{1,64}$/.test(value) ? value : null);
 
 /**
- * Answers a request to /a2a: the protocol version first (a header, so nothing is read for a caller
- * that speaks another version), then credentials, refused with HTTP 401 or 403, and only then JSON-RPC.
+ * Answers a request to /a2a: the protocol version first (a header; of a caller that speaks another
+ * version only the request's id is read), then credentials, refused with HTTP 401 or 403, and only
+ * then JSON-RPC.
  */
 async function handleA2a(request: Request, env: A2aEnv, verify: Verify, run: Run): Promise<Response> {
   const started = Date.now();
@@ -430,15 +455,19 @@ async function handleA2a(request: Request, env: A2aEnv, verify: Verify, run: Run
   };
   const refused = (refusal: Refusal) => logged(refuse(env, refusal), word(refusal.code));
   const answered = (answer: RpcAnswer) => logged(json(answer), answer.error?.code ?? "ok");
+  // A request with no id is a notification, which JSON-RPC 2.0 forbids a reply to. A2A has none, and
+  // its sender could never learn what was made, so nothing is run for one either.
+  const unanswered = () => logged(new Response(null, { status: 204 }), "notification");
 
   if (request.method !== "POST") return logged(error(405, "method_not_allowed", "POST a JSON-RPC request", { Allow: "POST" }), "method_not_allowed");
 
-  // No version means 0.3 (specification 3.6), which the card does not offer.
-  const requestedVersion = request.headers.get(A2A_VERSION_HEADER) ?? new URL(request.url).searchParams.get(A2A_VERSION_HEADER) ?? undefined;
+  // No version means 0.3 (specification 3.6), which the card does not offer. A patch number is not part of the version asked for.
+  const requestedVersion = (request.headers.get(A2A_VERSION_HEADER) ?? new URL(request.url).searchParams.get(A2A_VERSION_HEADER))?.replace(/^(\d+\.\d+)\.\d+$/, "$1");
   try {
     validateVersion(new ServerCallContext({ requestedVersion }).requestedVersion, card(env), "JSONRPC");
   } catch (e) {
-    return answered(rpcError(JsonRpcTransportHandler.mapToJSONRPCError(e)));
+    const sent = parsed(await readLimited(request, MAX_BODY_BYTES));
+    return isRpcRequest(sent) && !("id" in sent) ? unanswered() : answered(rpcError(JsonRpcTransportHandler.mapToJSONRPCError(e), sent));
   }
 
   if (!/^Bearer\s+\S+$/i.test(request.headers.get("Authorization") ?? "")) {
@@ -450,15 +479,12 @@ async function handleA2a(request: Request, env: A2aEnv, verify: Verify, run: Run
 
   const body = await readLimited(request, MAX_BODY_BYTES);
   if (body === null) return logged(tooLarge(), "too_large");
-  let rpc: unknown;
-  try {
-    rpc = JSON.parse(new TextDecoder().decode(body));
-  } catch {
-    return answered(rpcError({ code: A2A_ERROR_CODE.PARSE_ERROR, message: "Invalid JSON payload" }));
-  }
+  const rpc = parsed(body);
   // The SDK's handler answers both of these with -32602; the specification (9.5) gives each its own code.
-  if (!isRpcRequest(rpc)) return answered(rpcError({ code: A2A_ERROR_CODE.INVALID_REQUEST, message: "Request payload validation error" }));
+  if (rpc === undefined) return answered(rpcError({ code: A2A_ERROR_CODE.PARSE_ERROR, message: "Invalid JSON payload" }));
+  if (!isRpcRequest(rpc)) return answered(rpcError({ code: A2A_ERROR_CODE.INVALID_REQUEST, message: "Request payload validation error" }, rpc));
   method = word(rpc.method);
+  if (!("id" in rpc)) return unanswered();
   // The SDK's dispatcher: method names, parameter and result codecs, and error codes. Always one
   // answer, never a stream: both streaming methods throw before a stream exists. It answers
   // whatever an operation throws as a JSON-RPC error, so a refusal, which is HTTP's to answer, is
