@@ -397,6 +397,18 @@ describe("GetTask", () => {
     expect(bodies[2]).toEqual(bodies[0]);
   });
 
+  it("refuses a request that names no task with -32602, naming id, and reads nothing", async () => {
+    const { ran, send } = adapter();
+    for (const params of [{}, { id: "" }, { id: null }, { historyLength: 0 }]) {
+      const { status, body } = await send("GetTask", params);
+      expect(status).toBe(200);
+      expect(body.error, JSON.stringify(params)).toMatchObject({ code: -32602, message: "id is required: the id of the task", data: [{ reason: "INVALID_PARAMS", metadata: { field: "id" } }] });
+    }
+    expect(ran).toEqual([]);
+    // An agent that may not read is told that first, as for any id.
+    expect((await adapter(["a2a"]).send("GetTask", {})).status).toBe(403);
+  });
+
   it("refuses a history length that is not a whole number from 0 up, naming it, and reads nothing", async () => {
     const { ran, send } = adapter();
     for (const historyLength of [-1, -0.5, 2.5, "many"]) {
@@ -472,6 +484,17 @@ describe("CancelTask", () => {
     expect(bodies[0]).toMatchObject({ error: { code: -32001, message: "Task not found" } });
     expect(bodies[1]).toEqual(bodies[0]);
     expect(bodies[2]).toEqual(bodies[0]);
+  });
+
+  it("refuses a request that names no task with -32602, naming id, and cancels nothing", async () => {
+    const { ran, send } = adapter();
+    for (const params of [{}, { id: "" }, { id: null }, { metadata: { why: "no id" } }]) {
+      const { status, body } = await send("CancelTask", params);
+      expect(status).toBe(200);
+      expect(body.error, JSON.stringify(params)).toMatchObject({ code: -32602, message: "id is required: the id of the task", data: [{ reason: "INVALID_PARAMS", metadata: { field: "id" } }] });
+    }
+    expect(ran).toEqual([]);
+    expect((await adapter(["a2a"]).send("CancelTask", {})).status).toBe(403);
   });
 });
 

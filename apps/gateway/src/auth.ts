@@ -61,7 +61,9 @@ function bearerClaims(headers: Headers): Record<string, unknown> | null {
   const payload = BEARER_JWT.exec(headers.get("Authorization") ?? "")?.[1]!.split(".")[1];
   if (!payload) return null;
   try {
-    const claims: unknown = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
+    // As the plugin's JWT library reads it: base64url, then UTF-8, then JSON.
+    const bytes = Uint8Array.from(atob(payload.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+    const claims: unknown = JSON.parse(new TextDecoder().decode(bytes));
     return typeof claims === "object" && claims !== null && !Array.isArray(claims) ? (claims as Record<string, unknown>) : null;
   } catch {
     return null;
@@ -92,16 +94,27 @@ export async function replayed(env: AuthEnv, request: Request): Promise<string |
   return (await authStore(env).claim(`replay:${token}`, JTI_TTL_SECS)) ? null : "this token has already been used";
 }
 
+const CLAIM_DOES_NOT_LIST = "this token's capabilities claim does not list the capability it asks to execute; sign one that lists it, or one without the claim";
+
 /**
+ * A token is good only for what it names. This hook runs after the plugin's and acts only on a
+ * token the plugin has verified; it never runs on /agent/session, which is how /a2a itself asks:
+ * there the plugin's hook answers.
+ *
  * A token signed for /a2a is good there only. The plugin accepts it on its own routes too, since
- * the a2a capability's location is an audience it allows everywhere, and its execute route then
- * runs any capability the host may grant, whatever the token names. So this hook, which runs after
- * the plugin's and acts only on a token the plugin has verified, refuses one whose audience is, or
- * includes, /a2a, and one whose audience it cannot read. It never runs on /agent/session, which is
- * how /a2a itself asks: there the plugin's hook answers.
+ * the a2a capability's location is an audience it allows everywhere. So one whose audience is, or
+ * includes, /a2a is refused here, and so is one whose audience cannot be read.
+ *
+ * A token with a `capabilities` claim executes only what the claim lists (Agent Auth 4.3). The
+ * plugin drops the agent's other grants from the session, but its execute route, finding no grant
+ * there, grants the capability again from the host's own and runs it. So one that asks to execute
+ * a capability its claim does not list, by exactly that name, is refused here, before the plugin
+ * grants anything; a claim that lists nothing executes nothing, and one that is not a list is no
+ * token to execute with. A token without the claim is the plugin's to answer: it executes whatever
+ * the agent holds or its host may grant it, which an agent's own grants do not limit on this route.
  */
-const a2aTokensStayOnA2a = (audience: string): BetterAuthPlugin => ({
-  id: "a2a-audience",
+const tokensKeepToWhatTheyName = (audience: string): BetterAuthPlugin => ({
+  id: "token-scope",
   hooks: {
     before: [
       {
@@ -114,6 +127,15 @@ const a2aTokensStayOnA2a = (audience: string): BetterAuthPlugin => ({
           if (!claims) throw agentError(401 as never, { code: "invalid_jwt", message: "this token cannot be read" });
           if ([claims.aud].flat().includes(audience)) {
             throw agentError(401 as never, { code: "invalid_jwt", message: "a token signed for /a2a is accepted only there" });
+          }
+          if (ctx.path !== "/capability/execute" || !verified.agentSession || claims.capabilities === undefined) return;
+          if (!Array.isArray(claims.capabilities)) {
+            throw agentError(401 as never, { code: "invalid_jwt", message: "this token's capabilities claim must be a list of capability names" });
+          }
+          // The body the plugin's route reads; a capability that is no string is in no list.
+          const asked = (ctx.body as { capability?: unknown } | undefined)?.capability;
+          if (typeof asked !== "string" || !claims.capabilities.includes(asked)) {
+            throw agentError(403 as never, { code: "capability_not_granted", message: CLAIM_DOES_NOT_LIST });
           }
         }),
       },
@@ -181,7 +203,7 @@ export function authOptions(input: {
         onExecute: input.onExecute,
       }) as unknown as BetterAuthPlugin,
       // After agentAuth, so that its hook runs on a token the plugin has already verified.
-      a2aTokensStayOnA2a(a2aAudience),
+      tokensKeepToWhatTheyName(a2aAudience),
     ],
   };
 }
