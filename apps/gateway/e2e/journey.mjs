@@ -1,12 +1,17 @@
 // The agent journey against a deployed (or local) stack: a fresh Agent Auth identity, a
 // project, and real deliveries to the staging receiver, checked end to end including the
 // signature, lanes, delays, callbacks, crons, watches, the inbox with captured responses,
-// wake, secrets, inbound hooks, a signing-secret rotation, and hosted MCP. Used by `staging.mjs` after each staging deploy, and by agent.e2e.mjs locally.
+// wake, secrets, inbound hooks, a signing-secret rotation, hosted MCP, and A2A. Used by `staging.mjs`
+// after each staging deploy and daily against production, and by agent.e2e.mjs locally.
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { AgentAuthClient, MemoryStorage } from "@auth/agent";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { run as runA2aClient } from "../examples/a2a-client.mjs";
 import { connectHosted } from "./oauth.mjs";
 
 const CAPABILITIES = [
@@ -393,6 +398,28 @@ export async function runJourney(c) {
     await mcp.close();
   }
   log("hosted MCP connected and delivered");
+
+  // 14. A2A, as the published example client does it: read the Agent Card, register through
+  //     Agent Auth as the card says, send one delivery through /a2a and read it with GetTask
+  //     until it ends. The client is a host of its own, so it has its own project and trial,
+  //     as hosted MCP does. Its keys are in a file only for as long as this step runs.
+  const a2aDir = await mkdtemp(join(tmpdir(), "journey-a2a-"));
+  try {
+    const viaA2a = await runA2aClient({
+      baseUrl: c.gatewayUrl,
+      state: join(a2aDir, "client.json"),
+      payload: { url: hook("a2a"), body: run },
+      waitMs: timeoutMs,
+      log: (line) => log(`a2a: ${line}`),
+    });
+    check(viaA2a.projectId !== project.id, "the A2A client shared the agent's project");
+    check(viaA2a.state === "TASK_STATE_COMPLETED", `the A2A task is ${viaA2a.state}: ${JSON.stringify(viaA2a.delivery?.attempts)}`);
+    const arrived = (await deliveries()).find((d) => d.name === "a2a");
+    check(arrived?.headers["runlater-task-id"] === viaA2a.taskId && arrived.body === run, "the receiver has no record of the A2A delivery");
+  } finally {
+    await rm(a2aDir, { recursive: true, force: true });
+  }
+  log("A2A client read the Agent Card, registered and delivered");
 
   const all = await deliveries();
   check(!all.some((d) => d.name === "later"), "a canceled task was delivered");
