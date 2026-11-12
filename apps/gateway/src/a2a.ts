@@ -300,6 +300,8 @@ function operationsFor(env: A2aEnv, caller: Caller, run: Run, refused: (refusal:
    */
   async function use<T = TaskView>(capability: string, args: Record<string, unknown>, keyField?: string): Promise<T> {
     allow(capability);
+    // An operation on a task names it: no id is the request's fault, not a task that is not there.
+    if ("task_id" in args && !args.task_id) throw invalid("id is required: the id of the task", "id");
     try {
       return (await run(caller.hostId, capability, args)) as T;
     } catch (e) {

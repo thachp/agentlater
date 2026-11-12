@@ -97,6 +97,13 @@ export default function Quickstart() {
         by name; results come back in <code>data</code>.
       </p>
       <Code label="agent.mjs">{sdkExample}</Code>
+      <p>
+        The SDK signs a new token for each call, and its <code>capabilities</code> claim lists the one capability the
+        call executes. If you sign tokens yourself (<code>signJwt</code>), a token whose claim does not list the
+        capability it asks to execute, by its exact name, is refused with <code>403 capability_not_granted</code>, and
+        a claim that lists nothing executes nothing. A token with no <code>capabilities</code> claim can execute any
+        capability the agent holds or its host can grant it.
+      </p>
 
       <h2 id="new-capabilities">When AgentLater adds a capability</h2>
       <p>

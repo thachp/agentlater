@@ -607,13 +607,16 @@ describe("A2A at /a2a", () => {
   async function register(capabilities = ["a2a", ...CAPABILITIES], client = sdkAt(address())) {
     const conn = await client.connectAgent({ provider: origin, mode: "autonomous", capabilities, name: "a2a caller" });
     const token = async (audience = a2a(), caps = ["a2a"]) => (await client.signJwt({ agentId: conn.agentId, audience, capabilities: caps ?? undefined })).token;
-    const signed = (keypair, header, claims) => {
+    /** `rewrite` changes the payload's JSON text before it is signed, for what an object cannot say, such as one key twice. */
+    const signed = (keypair, header, claims, rewrite = (json) => json) => {
       const now = Math.floor(Date.now() / 1000);
-      const part = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
-      const signing = `${part({ alg: "EdDSA", ...header })}.${part({ aud: a2a(), capabilities: ["a2a"], iat: now, exp: now + 60, jti: randomUUID(), ...claims })}`;
+      const part = (json) => Buffer.from(json).toString("base64url");
+      const payload = rewrite(JSON.stringify({ aud: a2a(), capabilities: ["a2a"], iat: now, exp: now + 60, jti: randomUUID(), ...claims }));
+      const signing = `${part(JSON.stringify({ alg: "EdDSA", ...header }))}.${part(payload)}`;
       return `${signing}.${sign(null, Buffer.from(signing), createPrivateKey({ key: keypair.privateKey, format: "jwk" })).toString("base64url")}`;
     };
-    const forge = async (claims = {}, header = {}) => signed((await client.getConnection(conn.agentId)).agentKeypair, { typ: "agent+jwt", ...header }, { sub: conn.agentId, ...claims });
+    const forge = async (claims = {}, header = {}, rewrite) =>
+      signed((await client.getConnection(conn.agentId)).agentKeypair, { typ: "agent+jwt", ...header }, { sub: conn.agentId, ...claims }, rewrite);
     /** The host's own JWT, which the SDK signs only for the issuer. */
     const hostToken = async (claims = {}) => signed((await client.storage.getHostIdentity()).keypair, { typ: "host+jwt" }, { iss: conn.hostId, sub: conn.hostId, ...claims });
     return { client, agentId: conn.agentId, hostId: conn.hostId, token, forge, hostToken };
@@ -970,6 +973,219 @@ describe("A2A at /a2a", () => {
     assert.deepEqual(await res.json(), { error: "invalid_request", message: `a2a is not executed; it lets an agent call ${a2a()}` });
   });
 
+  // ---- What a token's capabilities claim limits on the capability-execution route, and what it does not ----
+  //
+  // Agent Auth (v1.0-draft 4.3, and 4.5 step 11): when a token carries a `capabilities` claim "the
+  // server MUST reject requests for capabilities not listed". The plugin's execute route does not:
+  // finding no grant on the session, it grants the capability again from the host's own
+  // (`defaultCapabilities`) and runs it. The gateway refuses first (`tokensKeepToWhatTheyName`).
+
+  const CLAIM_DOES_NOT_LIST = {
+    error: "capability_not_granted",
+    message: "this token's capabilities claim does not list the capability it asks to execute; sign one that lists it, or one without the claim",
+  };
+  const CLAIM_NOT_A_LIST = { error: "invalid_jwt", message: "this token's capabilities claim must be a list of capability names" };
+
+  /** The agent's grant rows for one capability. */
+  const grantRows = async (agent, capability) =>
+    (await (await gatewayDb()).prepare('SELECT status, reason FROM "agentCapabilityGrant" WHERE "agentId" = ? AND capability = ? ORDER BY "createdAt"').bind(agent.agentId, capability).all()).results;
+  /** One call to the capability-execution route with a token the caller made. */
+  const executeWith = async (token, capability, args) => {
+    const res = await agentAuth("/capability/execute", token, { capability, arguments: args });
+    return { status: res.status, body: await res.json() };
+  };
+  const SCHEDULE = { url: "https://dest.example.com/claim-unlisted", delay: "1h" };
+  /**
+   * An agent that holds every capability, with a project and one task. `untouched` holds while it is
+   * refused: nothing more was scheduled, and it was granted nothing beside what it registered with.
+   */
+  async function claimant() {
+    const agent = await withProject();
+    const known = await run(agent, "schedule_http", { url: "https://dest.example.com/claim-known", delay: "1h" });
+    const untouched = async (why, scheduled = 0) => {
+      const tasks = (await run(agent, "list_tasks")).tasks;
+      assert.equal(tasks.filter((t) => t.url === SCHEDULE.url).length, scheduled, why);
+      assert.equal(tasks.length, 1 + scheduled, why);
+      for (const capability of ["schedule_http", "get_task"]) assert.deepEqual((await grantRows(agent, capability)).map((g) => [g.status, g.reason]), [["active", null]], why);
+    };
+    return { agent, known, untouched };
+  }
+  /** What a token is answered for get_task and for schedule_http: 200, or the refusal's status and body. */
+  async function answersTo(agent, known, token) {
+    const answers = [];
+    for (const [capability, args] of [["get_task", { task_id: known.id }], ["schedule_http", SCHEDULE]]) {
+      const { status, body } = await executeWith(await token(), capability, args);
+      answers.push(status === 200 ? 200 : [status, body]);
+    }
+    return answers;
+  }
+  const UNLISTED = [403, CLAIM_DOES_NOT_LIST];
+
+  test("a token whose capabilities claim lists get_task runs get_task on the capability-execution route and is refused schedule_http; nothing is scheduled or granted", async () => {
+    const { agent, known, untouched } = await claimant();
+    const narrowed = () => agent.token(execute(), ["get_task"]);
+
+    // The control: the token does what it lists.
+    const read = await executeWith(await narrowed(), "get_task", { task_id: known.id });
+    assert.equal(read.status, 200, JSON.stringify(read.body));
+    assert.equal(read.body.data.id, known.id);
+
+    // Signed for the execution route, and for the issuer, which that route takes too.
+    for (const token of [await narrowed(), await agent.token(`${origin}/api/auth`, ["get_task"])]) {
+      const refused = await executeWith(token, "schedule_http", SCHEDULE);
+      assert.equal(refused.status, 403);
+      assert.deepEqual(refused.body, CLAIM_DOES_NOT_LIST);
+    }
+    // Whatever is asked for that the claim does not list: no capability at all, one that is not executed, and no name.
+    for (const capability of ["no_such_capability", "a2a", "", 7, null, ["get_task"], undefined]) {
+      const refused = await executeWith(await narrowed(), capability, {});
+      assert.equal(refused.status, 403, JSON.stringify(capability));
+      assert.deepEqual(refused.body, CLAIM_DOES_NOT_LIST, JSON.stringify(capability));
+    }
+    // A body that names two capabilities is read once, by the gateway as by the plugin: the last one is the one asked for.
+    const twoNames = async (first, last) => {
+      const res = await fetch(execute(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${await narrowed()}`, "X-Forwarded-For": address() },
+        body: `{"capability":${JSON.stringify(first)},"capability":${JSON.stringify(last)},"arguments":${JSON.stringify({ ...SCHEDULE, task_id: known.id })}}`,
+      });
+      return { status: res.status, body: await res.json() };
+    };
+    assert.deepEqual(await twoNames("get_task", "schedule_http"), { status: 403, body: CLAIM_DOES_NOT_LIST });
+    // The listed one, last, is the one that runs: get_task, which is refused the other's arguments, so nothing was scheduled.
+    const last = await twoNames("schedule_http", "get_task");
+    assert.equal(last.status, 400, JSON.stringify(last.body));
+    assert.equal(last.body.error, "invalid_request");
+    await untouched("refused");
+
+    // A token that lists the capability, alone or among others, runs it, and so does one with no claim: as before.
+    for (const capabilities of [["schedule_http"], ["get_task", "schedule_http"], null]) {
+      const ran = await executeWith(await agent.token(execute(), capabilities), "schedule_http", SCHEDULE);
+      assert.equal(ran.status, 200, `${JSON.stringify(capabilities)} ${JSON.stringify(ran.body)}`);
+    }
+    await untouched("served", 3);
+
+    // A grant the agent has had revoked is told so only to a token that may ask.
+    await (await gatewayDb()).prepare('UPDATE "agentCapabilityGrant" SET status = ? WHERE "agentId" = ? AND capability = ?').bind("revoked", agent.agentId, "schedule_http").run();
+    assert.deepEqual((await executeWith(await narrowed(), "schedule_http", SCHEDULE)).body, CLAIM_DOES_NOT_LIST);
+    const revoked = await executeWith(await agent.forge({ aud: execute(), capabilities: ["schedule_http"] }), "schedule_http", SCHEDULE);
+    assert.equal(revoked.status, 403, JSON.stringify(revoked.body));
+    assert.equal(revoked.body.error, "grant_revoked");
+  });
+
+  test("a capabilities claim that lists nothing executes nothing, and one that is not a list is no token to execute with", async () => {
+    const { agent, known, untouched } = await claimant();
+    const withClaim = (capabilities) => () => agent.forge({ aud: execute(), capabilities });
+
+    assert.deepEqual(await answersTo(agent, known, withClaim([])), [UNLISTED, UNLISTED]);
+    // The plugin reads a claim that is not a list as no claim at all; the gateway does not guess what was meant.
+    for (const capabilities of ["get_task", "get_task schedule_http", null, 7, true, { get_task: true }]) {
+      assert.deepEqual(await answersTo(agent, known, withClaim(capabilities)), [[401, CLAIM_NOT_A_LIST], [401, CLAIM_NOT_A_LIST]], JSON.stringify(capabilities));
+    }
+    await untouched("refused");
+    // Only executing reads the claim: elsewhere such a token is the plugin's to answer, as before.
+    const status = await agentAuth(`/agent/status?agent_id=${agent.agentId}`, await agent.forge({ aud: `${origin}/api/auth`, capabilities: "get_task" }));
+    assert.equal(status.status, 200);
+  });
+
+  test("the gateway reads a token's capabilities claim as the plugin does: an entry counts only when it is exactly the capability's name", async () => {
+    const { agent, known, untouched } = await claimant();
+    const twice = (first) => (json) => json.replace(/^\{/, `{"capabilities":${JSON.stringify(first)},`);
+    const escapedKey = (json) => json.replace('"capabilities"', '"capabilit\\u0069es"');
+    const escapedEntry = (json) => json.replace(/"(get|a2a)/, (_, start) => `"\\u00${start.charCodeAt(0).toString(16)}${start.slice(1)}`);
+
+    // The plugin's own reading, where it shows: it takes /a2a as a token's audience only when the claim it
+    // reads is one entry, the a2a capability's name. Each token is signed for /a2a by the same agent.
+    const pluginReadsAsA2aAlone = async (capabilities, rewrite) => {
+      const res = await call(await agent.forge({ capabilities }, {}, rewrite));
+      const body = await res.json();
+      if (res.status === 200) return true;
+      assert.equal(res.status, 401, JSON.stringify(body));
+      return false;
+    };
+    for (const [what, capabilities, rewrite, alone] of [
+      ["the name", ["a2a"], undefined, true],
+      ["the key written with an escape", ["a2a"], escapedKey, true],
+      ["the name written with an escape", ["a2a"], escapedEntry, true],
+      ["the key twice: the last one counts", ["a2a"], twice(["get_task"]), true],
+      ["the key twice, the name first", ["get_task"], twice(["a2a"]), false],
+      ["another case", ["A2A"], undefined, false],
+      ["a space before", [" a2a"], undefined, false],
+      ["a space after", ["a2a "], undefined, false],
+      ["not a list", "a2a", undefined, false],
+      ["a list in the list", [["a2a"]], undefined, false],
+    ]) {
+      assert.equal(await pluginReadsAsA2aAlone(capabilities, rewrite), alone, what);
+    }
+
+    // The gateway's reading, on the execution route: [what get_task is answered, what schedule_http is].
+    const SERVED_GET_TASK_ONLY = [200, UNLISTED];
+    const NOTHING = [UNLISTED, UNLISTED];
+    for (const [what, capabilities, rewrite, expected] of [
+      ["the key written with an escape", ["get_task"], escapedKey, SERVED_GET_TASK_ONLY],
+      ["the name written with an escape", ["get_task"], escapedEntry, SERVED_GET_TASK_ONLY],
+      ["the key twice: the last one counts", ["get_task"], twice(["schedule_http"]), SERVED_GET_TASK_ONLY],
+      ["the name twice", ["get_task", "get_task"], undefined, SERVED_GET_TASK_ONLY],
+      ["the name among entries that are not strings", [7, null, "get_task", { schedule_http: true }, ["schedule_http"]], undefined, SERVED_GET_TASK_ONLY],
+      ["the name beside one that is not ASCII", ["gét_task", "get_task", "日本"], undefined, SERVED_GET_TASK_ONLY],
+      ["entries that are not strings", [7, null, true, { get_task: true }, ["get_task"]], undefined, NOTHING],
+      ["another case", ["Get_Task", "GET_TASK", "Schedule_Http"], undefined, NOTHING],
+      ["a space, a tab or a newline around the name", [" get_task", "get_task ", "get_task\n", "\tschedule_http"], undefined, NOTHING],
+      ["two names in one entry", ["get_task schedule_http", "get_task,schedule_http"], undefined, NOTHING],
+      ["a longer or shorter name", ["get_tasks", "get_tas", "get_task\u0000", "schedule_http_"], undefined, NOTHING],
+      ["a letter that only looks the same", ["get_tаsk", "schedule_http​"], undefined, NOTHING],
+    ]) {
+      assert.deepEqual(await answersTo(agent, known, () => agent.forge({ aud: execute(), capabilities }, {}, rewrite)), expected, what);
+    }
+    await untouched("nothing but get_task ran");
+
+    // The other way round, to show the refusals above are the claim's doing: the last key lists schedule_http.
+    assert.deepEqual(await answersTo(agent, known, () => agent.forge({ aud: execute(), capabilities: ["schedule_http"] }, {}, twice(["get_task"]))), [UNLISTED, 200]);
+    // A claim of that name anywhere but the top of the payload is no claim.
+    assert.deepEqual(await answersTo(agent, known, () => agent.forge({ aud: execute(), capabilities: undefined, nested: { capabilities: ["get_task"] } })), [200, 200]);
+    await untouched("two were scheduled", 2);
+  });
+
+  test("the claim limits a token, not an agent: one registered with get_task alone is still granted schedule_http by its host on the capability-execution route, where /a2a refuses it", async () => {
+    const owner = await withProject();
+    const reader = await register(["a2a", "get_task"], owner.client);
+    const scheduled = async () => (await run(owner, "list_tasks")).tasks.filter((t) => t.url === SCHEDULE.url).length;
+
+    const onA2a = await rpcAs(reader, "SendMessage", message(SCHEDULE));
+    assert.equal(onA2a.status, 403, JSON.stringify(onA2a.body));
+    assert.equal(onA2a.body.error, "capability_not_granted");
+    // A token that lists only what the agent holds is refused, and the agent is granted nothing.
+    const narrowed = await executeWith(await reader.token(execute(), ["get_task"]), "schedule_http", SCHEDULE);
+    assert.equal(narrowed.status, 403);
+    assert.deepEqual(narrowed.body, CLAIM_DOES_NOT_LIST);
+    assert.deepEqual(await grantRows(reader, "schedule_http"), []);
+    assert.equal(await scheduled(), 0);
+
+    // The recorded limit of the fix. A token that lists schedule_http, which the SDK will not sign for an
+    // agent that was not given it, so it is signed by hand: the plugin grants it from the host's own and runs it.
+    const ran = await executeWith(await reader.forge({ aud: execute(), capabilities: ["schedule_http"] }), "schedule_http", SCHEDULE);
+    assert.equal(ran.status, 200, JSON.stringify(ran.body));
+    assert.deepEqual((await grantRows(reader, "schedule_http")).map((g) => [g.status, g.reason]), [["active", "auto_granted_from_host_budget"]]);
+    // And so does a token with no claim, for an agent that held as little.
+    const other = await register(["a2a", "get_task"], owner.client);
+    assert.equal((await executeWith(await other.forge({ aud: execute(), capabilities: undefined }), "schedule_http", SCHEDULE)).status, 200);
+    assert.equal(await scheduled(), 2);
+    // /a2a reads the agent's grants, so from then on it serves this agent too.
+    assert.equal((await rpcAs(reader, "SendMessage", message(SCHEDULE))).status, 200);
+  });
+
+  test("the plugin's batch execution route is not served, so no token runs anything through it", async () => {
+    const { agent, untouched } = await claimant();
+    const config = await (await fetch(`${origin}/.well-known/agent-configuration`)).json();
+    assert.equal(JSON.stringify(config).includes("batch"), false, "discovery does not name it");
+    for (const capabilities of [["get_task"], ["schedule_http"], null]) {
+      const res = await agentAuth("/capability/batch-execute", await agent.token(execute(), capabilities), { requests: [{ capability: "schedule_http", arguments: SCHEDULE }] });
+      assert.equal(res.status, 404, JSON.stringify(capabilities));
+      assert.deepEqual(await res.json(), { error: "not_found", message: "no such route" });
+    }
+    await untouched("nothing ran");
+  });
+
   test("a token for one gateway domain's /a2a is refused on the other's", async () => {
     const onAlt = (url, init) => mf.dispatchFetch(url, init);
     const altA2a = `${ALT_ORIGIN}/a2a`;
@@ -1264,10 +1480,17 @@ describe("A2A at /a2a", () => {
     const never = await getAs(agent, "task_00000000000000000000");
     assert.equal(never.error.code, -32001);
     assert.deepEqual(never.error.data, [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "TASK_NOT_FOUND", domain: "a2a-protocol.org" }]);
-    for (const id of [theirs.id, scheduled.id, queued.id, "not-a-task-id", "", "task_0000000000000000000g"]) {
+    for (const id of [theirs.id, scheduled.id, queued.id, "not-a-task-id", "task_0000000000000000000g"]) {
       assert.deepEqual(await getAs(agent, id), never, id);
       await assert.rejects(client.getTask({ id }), TaskNotFoundError, id);
     }
+    // No id at all is the request's fault, and is told so by name.
+    for (const params of [{ id: "" }, {}]) {
+      const { error } = (await rpcAs(agent, "GetTask", params)).body;
+      assert.equal(error.code, -32602, JSON.stringify(params));
+      assert.equal(error.data[0].metadata.field, "id");
+    }
+    await assert.rejects(client.getTask({ id: "" }), RequestMalformedError);
     // A caller with no project at all is told the same.
     assert.deepEqual(await getAs(await register(), mine.id), never);
     // Each task is still there for whoever may read it: its own host through A2A, and the host's every task over Agent Auth.
@@ -1479,11 +1702,18 @@ describe("A2A at /a2a", () => {
     assert.equal(never.error.code, -32001);
     assert.deepEqual(never.error.data, [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "TASK_NOT_FOUND", domain: "a2a-protocol.org" }]);
     // Another host's task, waiting or finished (which its own host would be told is not cancelable), another
-    // interface's, and ids that could be no task's.
-    for (const id of [mine.id, finished.id, plain.id, "not-a-task-id", ""]) {
+    // interface's, and an id that could be no task's.
+    for (const id of [mine.id, finished.id, plain.id, "not-a-task-id"]) {
       assert.deepEqual((await rpcAs(stranger, "CancelTask", { id })).body, never, id);
       await assert.rejects(client.cancelTask(CancelTaskRequest.fromJSON({ id })), TaskNotFoundError, id);
     }
+    // No id at all is the request's fault, and is told so by name.
+    for (const params of [{ id: "" }, {}]) {
+      const { error } = (await rpcAs(stranger, "CancelTask", params)).body;
+      assert.equal(error.code, -32602, JSON.stringify(params));
+      assert.equal(error.data[0].metadata.field, "id");
+    }
+    await assert.rejects(client.cancelTask(CancelTaskRequest.fromJSON({ id: "" })), RequestMalformedError);
     assert.deepEqual((await rpcAs(await register(), "CancelTask", { id: mine.id })).body, never);
 
     // Nothing was canceled, and each is still its owner's to cancel.
