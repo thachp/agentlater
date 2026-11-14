@@ -31,7 +31,7 @@ const REFUSALS: [string, string, string][] = [
 const ERRORS: [string, string, string][] = [
   ["-32009", "VersionNotSupportedError", "The request has no A2A-Version: 1.0 header (or ?A2A-Version=1.0). A patch number is ignored, so 1.0.1 is 1.0. Checked before the token."],
   ["-32700", "Parse error", "The body is not JSON."],
-  ["-32600", "Invalid request", "The body is not one JSON-RPC 2.0 request. Batches are not taken."],
+  ["-32600", "Invalid request", "The body is not one JSON-RPC 2.0 request, or its id is not a string, a number or null. Batches are not taken."],
   ["-32601", "Method not found", "Not a method of A2A 1.0. The 0.3 names (message/send, tasks/get) are not taken."],
   ["-32602", "Invalid params", "The request is at fault: a payload field, a message whose role is not ROLE_USER, a historyLength that is not a whole number from 0 up, GetTask or CancelTask without an id. data[0].metadata.field names the field, such as message.parts[0].data.url; metadata.code is idempotency_conflict when a key or messageId was already used for a different request."],
   ["-32001", "TaskNotFoundError", "No such task for this caller: it never existed, was deleted 30 days after it finished, belongs to another host, was made over another interface, or the host has no project."],
