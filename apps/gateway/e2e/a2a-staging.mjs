@@ -11,8 +11,8 @@
 // times. It takes 30 to 60 seconds: the longest wait is the one retry of the exhausted delivery
 // (5 to 10 seconds), which max_attempts: 2 keeps from running the whole retry schedule.
 //
-// Left behind, as by journey.mjs: two hosts and their projects (their trials end after 7 days),
-// and six tasks, deleted 30 days after they finished. Unlike journey.mjs, it revokes its agents at the end.
+// Left behind: two hosts and their projects (their trials end after 7 days),
+// and six tasks, deleted 30 days after they finished. Like journey.mjs, it revokes its agents at the end.
 
 import { randomBytes } from "node:crypto";
 import { pathToFileURL } from "node:url";

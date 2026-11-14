@@ -92,9 +92,11 @@ After the smoke check, staging runs [`apps/gateway/e2e/staging.mjs`](../apps/gat
 agent registers, creates a project, and schedules deliveries to a test receiver
 ([`apps/receiver`](../apps/receiver), staging only). It checks a signed delivery verifies, a 503 is retried
 then succeeds, a 404 fails without a retry, a canceled task is never sent, and idempotent scheduling and
-validation work. Its last step runs the A2A example client ([`apps/gateway/examples/a2a-client.mjs`](../apps/gateway/examples/a2a-client.mjs)):
-it reads the Agent Card, registers through Agent Auth, sends one delivery through `/a2a` and reads it with
-GetTask until it completes. The same journey runs locally in CI (`npm run test:e2e` in `apps/gateway`).
+validation work. Its last step runs the A2A example client ([`apps/gateway/examples/a2a-client.mjs`](../apps/gateway/examples/a2a-client.mjs))
+as the journey's own agent: it reads the Agent Card, signs a token as the card says, sends one delivery
+through `/a2a` and reads it with GetTask until it completes. It does not register: the example client
+registering from nothing, as the card directs, is checked by the gateway e2e suite and by the A2A
+end-to-end run below. The same journey runs locally in CI (`npm run test:e2e` in `apps/gateway`).
 
 Once `GATEWAY_URL` is set the journey is required: a failure, or a missing `RECEIVER_URL`/`RECEIVER_TOKEN`,
 stops production from deploying. `RECEIVER_TOKEN` comes from the setup script and is passed to the
@@ -102,8 +104,12 @@ receiver at deploy time. After the first staging deploy has created the receiver
 environment variable `RECEIVER_URL` to its `*.workers.dev` URL, printed by the deploy
 (`https://runlater-receiver-staging.<account>.workers.dev`).
 
-Each run creates two agent identities (the journey's and the A2A client's) and three trial projects (Agent
-Auth, hosted MCP and A2A) in staging; they are not cleaned up.
+Each run creates one agent identity and two trial projects (the agent's, which the A2A step also uses, and
+the one a hosted MCP connection makes for itself) and one OAuth client. When it ends, passed or failed,
+it revokes its agent and withdraws its hosted MCP grant, so nothing it leaves can sign in. What stays:
+the revoked agent and its host, the two projects (their trials end after 7 days), the OAuth client, and
+the run's tasks, deleted 30 days after they finished. No capability or route deletes a project, a host
+or an OAuth client.
 
 ### A2A end-to-end run
 
@@ -115,7 +121,7 @@ node apps/gateway/e2e/a2a-staging.mjs https://gateway-staging.agentlater.io "$(g
 
 It registers a new identity, makes its project, and through the official A2A client checks an immediate and a delayed success, a 404 that fails without a retry, retries exhausted (two 503s with `max_attempts: 2`), cancellation, a duplicate submission, the list, a second host being refused, and that a failed task cannot be redriven. The report is Markdown on stdout, progress is on stderr, and the exit status is 1 if a scenario failed. It takes 30 to 60 seconds. With `RECEIVER_TOKEN` set it also checks what the receiver recorded; without it, deliveries are judged by each task's attempts. It needs the receiver's `down` reply, deployed with the staging receiver.
 
-Each run leaves two hosts and their projects (two of the day's new trials) and six finished tasks, deleted after 30 days. Unlike the journey it revokes its two agents when it ends. It is not part of the deploy workflow and is not run against production; there, and after each staging deploy, the journey's A2A step is the check.
+Each run leaves two hosts and their projects (two of the day's new trials) and six finished tasks, deleted after 30 days. Like the journey it revokes its agents when it ends. It is not part of the deploy workflow and is not run against production; there, and after each staging deploy, the journey's A2A step is the check.
 
 The same script runs against the local stack in the gateway e2e suite.
 
@@ -218,8 +224,9 @@ on 2026-10-28/29; everything after was scanners. The `harimu-*` Workers in the s
   legal pages, and that billing is configured: the paid endpoint in `/openapi.json`, and a 400 for an
   unsigned webhook. This doesn't catch a missing `STRIPE_PUBLISHABLE_KEY`, or prove a charge works.
 - Daily, and on manual dispatch: the full agent journey against production, delivering to the staging
-  receiver, with A2A as its last step. Each run leaves two agents, three trial projects (Agent Auth,
-  hosted MCP and A2A) and one OAuth client and grant in production.
+  receiver, with A2A as its last step. Each run leaves one revoked agent and its host, two trial
+  projects (Agent Auth and hosted MCP; A2A uses the agent's) and one OAuth client in production. Its
+  agent and its hosted MCP grant are revoked when it ends, passed or failed.
 
 A failed scheduled check opens a `Monitor: <check> is failing` issue (label `monitor`), which notifies
 everyone watching the repository, GitHub mobile included. The next run of that check that passes

@@ -72,3 +72,15 @@ export async function connectHosted(origin, clientName = "AgentLater journey") {
   );
   return { client_id, html, pageHeaders: page.headers, redirect: back, ...(await token.json()) };
 }
+
+/**
+ * Withdraws what `connectHosted` was granted (RFC 7009, at the token endpoint): revoking the
+ * refresh token ends the grant and its access tokens. The client's registration stays.
+ */
+export async function revokeHosted(origin, { client_id, refresh_token, access_token }) {
+  const res = await fetch(`${origin}/oauth/token`, { method: "POST", body: new URLSearchParams({ token: refresh_token, token_type_hint: "refresh_token", client_id }) });
+  if (!res.ok) throw new Error(`revoking the hosted MCP grant returned ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  // The endpoint answers 200 whether or not it revoked anything, so the access token is tried.
+  const after = await fetch(`${origin}/mcp`, { method: "POST", headers: { Authorization: `Bearer ${access_token}`, "Content-Type": "application/json" }, body: "{}" });
+  if (after.status !== 401) throw new Error(`a revoked hosted MCP token was answered ${after.status}`);
+}

@@ -65,8 +65,9 @@ jobs:
 
   # A real agent registers with production, creates a project and schedules deliveries. The
   # receiver is the staging fixture (a public workers.dev URL); its token lives in the staging
-  # environment, so this job runs there. Each run leaves behind two agents, three trial projects
-  # (Agent Auth, hosted MCP and A2A) and one OAuth client and grant.
+  # environment, so this job runs there. Each run leaves behind one revoked agent and its host, two
+  # trial projects (Agent Auth and hosted MCP; A2A uses the agent's) and one OAuth client. It revokes
+  # its agent and its hosted MCP grant when it ends, passed or failed, so nothing left can sign in.
   journey:
     needs: health
     if: github.event.schedule == '17 9 * * *' || (github.event_name == 'workflow_dispatch' && inputs.journey)
