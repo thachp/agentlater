@@ -268,6 +268,16 @@ describe("/a2a for a verified caller", () => {
     }
   });
 
+  it("answers an id that is not a string, a number or null with invalid request, by null, and runs nothing", async () => {
+    let ran = 0;
+    const holder = async () => new Caller("host_1", new Set(["a2a", "get_task"]));
+    for (const id of ['{"a":1}', "[1]", "true", "false"]) {
+      const res = await handleA2a(post(AUTH, `{"jsonrpc":"2.0","id":${id},"method":"GetTask","params":{"id":"task_1"}}`), on, holder, async () => (ran++, {}));
+      expect(await res.json(), id).toEqual({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Request payload validation error" } });
+    }
+    expect(ran).toBe(0);
+  });
+
   it("answers every error by the request's id, and by null only when the id could not be read", async () => {
     // Not a JSON-RPC 2.0 request, but its id can be read.
     expect(await call('{"jsonrpc":"1.0","id":1,"method":"GetTask","params":{}}')).toMatchObject({ id: 1, error: { code: -32600 } });
