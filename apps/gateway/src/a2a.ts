@@ -408,9 +408,10 @@ function refuse(env: A2aEnv, { status, code, message, retryAfter }: Refusal): Re
   });
 }
 
-/** A single JSON-RPC 2.0 request; batches are not part of the A2A binding. */
+/** A single JSON-RPC 2.0 request; batches are not part of the A2A binding. Its id, if it has one, is a string, a number or null (JSON-RPC 2.0, 4). */
 const isRpcRequest = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value) && "jsonrpc" in value && value.jsonrpc === "2.0" && "method" in value && typeof value.method === "string";
+  typeof value === "object" && value !== null && !Array.isArray(value) && "jsonrpc" in value && value.jsonrpc === "2.0" && "method" in value && typeof value.method === "string" &&
+  (!("id" in value) || value.id === null || typeof value.id === "string" || typeof value.id === "number");
 
 /** What a body holds as JSON, or undefined when it is not JSON or is over the limit. */
 function parsed(body: Uint8Array | null): unknown {
