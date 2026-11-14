@@ -3,7 +3,8 @@
 // docs/adr/0001-rotating-secrets-key.md). GitHub secrets can't be read back, so the key lives in two
 // slots, SECRETS_KEY and SECRETS_KEY_2, and the variable SECRETS_KEY_SLOT says which one is
 // current. While SECRETS_KEY_ROTATING is true, the deploy also hands the API the other slot as
-// SECRETS_KEY_PREVIOUS. This script only writes and deletes; nothing secret is printed.
+// SECRETS_KEY_PREVIOUS. This script only writes and deletes; nothing secret is printed. It refuses
+// a value of either variable that it does not write itself, and arguments in any other shape.
 //
 //   node scripts/rotate-secrets-key.mjs --env production start    new key in the other slot, rotating
 //   node scripts/rotate-secrets-key.mjs --env production undo     back to the old key, still rotating
@@ -14,7 +15,8 @@
 // won't choose one when the login reaches several, and the repo is public, so the id isn't in its
 // config). finish refuses unless the gateway's sweep has completed a pass with the keys deployed
 // now, and has checked them again an hour or more after both that pass and the last change here:
-// that verdict is lib/finish-verdict.mjs.
+// that verdict is lib/finish-verdict.mjs. Every step is tested against stand-ins for `gh` and
+// wrangler in apps/gateway/test/rotate-secrets-key.test.ts.
 
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -22,10 +24,8 @@ import { finishVerdict } from "./lib/finish-verdict.mjs";
 
 const REPO = "thachp/agentlater";
 const SLOTS = { 1: "SECRETS_KEY", 2: "SECRETS_KEY_2" };
-const args = process.argv.slice(2);
-const env = args[args.indexOf("--env") + 1];
-const step = args.find((a) => ["start", "undo", "finish"].includes(a));
-if (!["staging", "production"].includes(env ?? "") || !step || !args.includes("--env")) {
+const [flag, env, step, ...rest] = process.argv.slice(2);
+if (flag !== "--env" || !["staging", "production"].includes(env) || !["start", "undo", "finish"].includes(step) || rest.length) {
   console.error("usage: node scripts/rotate-secrets-key.mjs --env staging|production start|undo|finish");
   process.exit(2);
 }
@@ -43,13 +43,21 @@ const changedAt = Math.max(
   ...listed.filter((v) => v.name.startsWith("SECRETS_KEY_")).map((v) => Date.parse(v.updatedAt)),
 );
 const secrets = new Set(JSON.parse(gh(["secret", "list", "--env", env, "--json", "name"])).map((s) => s.name));
-const current = variables.SECRETS_KEY_SLOT === "2" ? 2 : 1;
-const other = current === 1 ? 2 : 1;
-const rotating = variables.SECRETS_KEY_ROTATING === "true";
 const fail = (why) => {
   console.error(`${env}: ${why}`);
   process.exit(1);
 };
+// Unset, or exactly what this script writes. The deploy reads other values its own way (GitHub's
+// `==` ignores case, so TRUE is a rotation there and its other slot a key in use), so those are
+// refused, not guessed at.
+const read = (name, ...known) => {
+  const value = variables[name] ?? known[0];
+  if (!known.includes(value)) fail(`${name} is ${JSON.stringify(value)}, not ${known.join(" or ")}; see docs/DEPLOY.md, Rotating SECRETS_KEY`);
+  return value;
+};
+const current = Number(read("SECRETS_KEY_SLOT", "1", "2"));
+const other = current === 1 ? 2 : 1;
+const rotating = read("SECRETS_KEY_ROTATING", "false", "true") === "true";
 
 if (!secrets.has(SLOTS[current])) fail(`${SLOTS[current]} (the current key) is not set; nothing to rotate`);
 if (step === "start") {

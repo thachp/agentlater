@@ -37,7 +37,11 @@ out when an attempt is claimed, and the ledger's entry code when it checks a hoo
    `SECRETS_KEY_SLOT` picks the current slot, and while `SECRETS_KEY_ROTATING` is true the deploy
    passes the other slot as `SECRETS_KEY_PREVIOUS`. `scripts/rotate-secrets-key.mjs` runs `start`,
    `undo` and `finish`, and only ever writes keys. `start` sets the rotating flag before it switches
-   the slot, so a deploy between the two still hands the API both keys. `finish` deletes a key, so
+   the slot, so a deploy between the two still hands the API both keys. The script reads the two
+   variables only as unset or as a value it writes itself (`1`, `2`; `true`, `false`) and refuses
+   anything else (added 2026-11-14): the deploy's expressions compare strings ignoring case, so a
+   `TRUE` set by hand is a rotation to the deploy, and a `start` that read it as none would replace
+   the key the deploy passes as previous. `finish` deletes a key, so
    it checks first: the sweep's row must show a pass completed for the slot the deploy reports as
    current, and the keys checked again an hour or more after both that completion and the last
    change to the slot variables. Without that, `undo` followed quickly by `finish` would read an

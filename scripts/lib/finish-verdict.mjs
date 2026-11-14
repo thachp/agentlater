@@ -4,7 +4,7 @@
 // still sealed under it, so anything this doesn't recognise is a refusal. It reads nothing itself,
 // not even a clock: the script hands it the row, the slot and the time of the last change. Plain
 // JavaScript, so `node` runs the script with no build; tested in
-// apps/gateway/test/finish-verdict.test.ts, beside the sweep that writes the row.
+// apps/gateway/test/rotate-secrets-key.test.ts, beside the sweep that writes the row.
 
 const HOUR = 3600 * 1000;
 

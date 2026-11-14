@@ -295,6 +295,16 @@ opens, so nothing is lost. The sweep starts a new pass (it reseals back under th
 waits for it before deleting the new key. After any `start` or `undo`, `finish` refuses until the sweep
 has checked the keys an hour or more later, so a deploy still in flight can't be missed.
 
+Leave `SECRETS_KEY_SLOT` and `SECRETS_KEY_ROTATING` to the script. It refuses every step when either
+holds a value it doesn't write itself (`1` or `2`; `true` or `false`; unset means `1` and `false`),
+because the deploy reads such a value its own way: `true` in any casing is a rotation, and anything
+but `2` is slot 1. If it refuses, set the variable by hand to the exact spelling of what the deploy
+has been reading (`TRUE` becomes `true`, `3` becomes `1`) and run the step again; `finish` then
+waits its hour from that change. If `start` stops part way (a `gh` call failed) and
+`SECRETS_KEY_ROTATING` is not yet `true`, run `start` again: it puts a fresh key in the slot. If it is
+`true`, only the slot is left to move, and `start` refuses; `undo` moves the slot to the new key, or
+`finish` (after the sweep) drops the new key unused. No deploy in between loses a key either way.
+
 ## Lost keys: refund the unused attempts
 
 Someone lost a project's keys or OAuth grant, or the grant expired, and attempts were bought for it. Never
