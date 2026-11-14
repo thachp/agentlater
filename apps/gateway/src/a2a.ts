@@ -289,7 +289,6 @@ const noPush = () => {
  * not hold runs nothing and stops at `refused`, which takes the refusal and does not return.
  */
 function operationsFor(env: A2aEnv, caller: Caller, run: Run, refused: (refusal: Refusal) => never): A2ARequestHandler {
-  /** Stops an operation that uses a capability the agent does not hold. */
   function allow(capability: string): void {
     if (!caller.grants.has(capability)) refused(notGranted(capability));
   }
@@ -400,14 +399,6 @@ function operationsFor(env: A2aEnv, caller: Caller, run: Run, refused: (refusal:
 
 // ---- The HTTP transport
 
-/** A refusal as HTTP. A 401 carries the Agent Auth challenge (its specification, 5.14), so a caller can find where to register. */
-function refuse(env: A2aEnv, { status, code, message, retryAfter }: Refusal): Response {
-  return error(status, code, message, {
-    ...(status === 401 ? { "WWW-Authenticate": `AgentAuth discovery="${discoveryUrl(env)}"` } : {}),
-    ...(retryAfter ? { "Retry-After": retryAfter } : {}),
-  });
-}
-
 /** A single JSON-RPC 2.0 request; batches are not part of the A2A binding. Its id, if it has one, is a string, a number or null (JSON-RPC 2.0, 4). */
 const isRpcRequest = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value) && "jsonrpc" in value && value.jsonrpc === "2.0" && "method" in value && typeof value.method === "string" &&
@@ -453,7 +444,11 @@ async function handleA2a(request: Request, env: A2aEnv, verify: Verify, run: Run
     console.log(JSON.stringify({ event: "a2a_request", method, outcome, status: response.status, ms: Date.now() - started, ray: word(request.headers.get("CF-Ray")), host }));
     return response;
   };
-  const refused = (refusal: Refusal) => logged(refuse(env, refusal), word(refusal.code));
+  /** A refusal as HTTP. A 401 carries the Agent Auth challenge (its specification, 5.14), so a caller can find where to register. */
+  const refused = ({ status, code, message, retryAfter }: Refusal) => {
+    const challenge = { ...(status === 401 ? { "WWW-Authenticate": `AgentAuth discovery="${discoveryUrl(env)}"` } : {}), ...(retryAfter ? { "Retry-After": retryAfter } : {}) };
+    return logged(error(status, code, message, challenge), word(code));
+  };
   const answered = (answer: RpcAnswer) => logged(json(answer), answer.error?.code ?? "ok");
   // A request with no id is a notification, which JSON-RPC 2.0 forbids a reply to. A2A has none, and
   // its sender could never learn what was made, so nothing is run for one either.
