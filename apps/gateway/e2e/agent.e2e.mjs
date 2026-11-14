@@ -2411,6 +2411,8 @@ describe("hosted MCP at /mcp", () => {
 });
 
 describe("staging journey, run against the local stack", () => {
+  const gatewayDb = () => mf.getD1Database("DB", "gateway");
+
   test("passes end to end through the receiver fixture", async () => {
     const result = await runJourney({
       gatewayUrl: origin,
@@ -2421,7 +2423,22 @@ describe("staging journey, run against the local stack", () => {
     });
     // ok + flaky (2) + gone + behind + delayed + its callback + one poll + its on_match action
     // + the captured task + its wake + the secret's delivery + the delivery after the rotation
-    // = 13 attempts; canceled tasks, the deleted cron, the inbox and the refused leak use none.
-    assert.equal(result.attemptsUsed, 13);
+    // + the A2A delivery, sent as the journey's own agent = 14 attempts; canceled tasks, the
+    // deleted cron, the inbox and the refused leak use none.
+    assert.equal(result.attemptsUsed, 14);
+    // It registered one agent, the A2A step none, and it is revoked now that the run has ended.
+    const agents = await (await gatewayDb()).prepare('SELECT id, status FROM "agent" WHERE "hostId" = (SELECT "hostId" FROM "agent" WHERE id = ?)').bind(result.agentId).all();
+    assert.deepEqual(agents.results, [{ id: result.agentId, status: "revoked" }]);
+  });
+
+  test("a run that fails still revokes its agent", async () => {
+    const before = new Set((await (await gatewayDb()).prepare('SELECT id FROM "agent"').all()).results.map((a) => a.id));
+    // Nothing answers at this receiver's read URL, so the first step fails after the agent is registered.
+    await assert.rejects(
+      runJourney({ gatewayUrl: origin, receiverUrl: `https://${RECEIVER_HOST}`, receiverReadUrl: `${receiverOrigin}/nowhere`, receiverToken, timeoutMs: 5_000 }),
+      /receiver read returned/,
+    );
+    const made = (await (await gatewayDb()).prepare('SELECT id, status FROM "agent"').all()).results.filter((a) => !before.has(a.id));
+    assert.deepEqual(made.map((a) => a.status), ["revoked"]);
   });
 });

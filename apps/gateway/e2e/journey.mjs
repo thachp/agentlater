@@ -3,16 +3,23 @@
 // signature, lanes, delays, callbacks, crons, watches, the inbox with captured responses,
 // wake, secrets, inbound hooks, a signing-secret rotation, hosted MCP, and A2A. Used by `staging.mjs`
 // after each staging deploy and daily against production, and by agent.e2e.mjs locally.
+//
+// Left behind by each run: one revoked agent and its host, two trial projects (the agent's, and
+// the one a hosted MCP connection makes for itself; their trials end after 7 days), one OAuth
+// client with no grant, and the run's tasks, deleted 30 days after they finished. Nothing that is
+// left can sign in: the agent is revoked and the hosted MCP grant is withdrawn when the run ends,
+// passed or failed, and the keys were only ever in this process. No capability or route deletes a
+// project, a host or an OAuth client.
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentAuthClient, MemoryStorage } from "@auth/agent";
+import { AgentAuthClient, KVStorage } from "@auth/agent";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { run as runA2aClient } from "../examples/a2a-client.mjs";
-import { connectHosted } from "./oauth.mjs";
+import { connectHosted, revokeHosted } from "./oauth.mjs";
 
 const CAPABILITIES = [
   "create_project", "get_project", "rotate_signing_secret", "schedule_http", "queue_http", "get_task", "list_tasks", "cancel_task", "redrive_task",
@@ -21,6 +28,8 @@ const CAPABILITIES = [
   "set_secret", "list_secrets", "delete_secret",
   "create_hook", "list_hooks", "update_hook", "delete_hook",
 ];
+// a2a lets the agent call /a2a, where step 14 sends a delivery. It is not a tool, so hosted MCP does not list it.
+const AGENT_CAPABILITIES = [...CAPABILITIES, "a2a"];
 
 class JourneyError extends Error {}
 const check = (ok, message) => {
@@ -38,9 +47,55 @@ const check = (ok, message) => {
  */
 export async function runJourney(c) {
   const log = c.log ?? (() => {});
+  const run = `run-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
+  log(`run ${run}`);
+  const health = await fetch(`${c.gatewayUrl}/health`);
+  check(health.ok, `gateway /health returned ${health.status}`);
+  check((await health.json()).api === "ok", "gateway cannot reach the API");
+  log("health ok");
+
+  // The identity's keys, in this process only. Step 14 hands them to the A2A example client.
+  const keys = new Map();
+  const client = new AgentAuthClient({
+    storage: new KVStorage({ get: async (key) => keys.get(key) ?? null, set: async (key, value) => void keys.set(key, value), del: async (key) => void keys.delete(key) }),
+    directoryUrl: null,
+    allowDirectDiscovery: true,
+    hostName: `AgentLater journey ${run}`,
+  });
+  const { agentId } = await client.connectAgent({
+    provider: c.gatewayUrl,
+    mode: "autonomous",
+    capabilities: AGENT_CAPABILITIES,
+    name: "journey",
+  });
+  log("agent registered");
+
+  // What the run must take back when it ends, passed or failed, so that no credential it made
+  // stays usable: the agent last, since the steps before it may still need it.
+  const cleanups = [() => client.disconnectAgent(agentId)];
+  let result;
+  let failure;
+  try {
+    result = await steps({ ...c, log, run, client, agentId, keys, cleanups });
+  } catch (e) {
+    failure = e;
+  }
+  const leftovers = [];
+  for (const cleanup of cleanups.reverse()) await cleanup().catch((e) => leftovers.push(e instanceof Error ? e.message : String(e)));
+  if (failure) {
+    for (const message of leftovers) log(`clean-up failed: ${message}`);
+    throw failure;
+  }
+  check(leftovers.length === 0, `the journey passed, but its clean-up failed: ${leftovers.join("; ")}`);
+  log("agent revoked, hosted MCP grant withdrawn");
+  return result;
+}
+
+/** The journey's steps, as the agent `c.client` registered: `c` is runJourney's, with the run's name and what it made. */
+async function steps(c) {
+  const { log, run, client, agentId } = c;
   const timeoutMs = c.timeoutMs ?? 120_000;
   const readUrl = c.receiverReadUrl ?? c.receiverUrl;
-  const run = `run-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
   const hook = (name) => `${c.receiverUrl}/hook/${run}/${name}`;
 
   const until = async (what, probe) => {
@@ -54,24 +109,6 @@ export async function runJourney(c) {
     }
   };
 
-  log(`run ${run}`);
-  const health = await fetch(`${c.gatewayUrl}/health`);
-  check(health.ok, `gateway /health returned ${health.status}`);
-  check((await health.json()).api === "ok", "gateway cannot reach the API");
-  log("health ok");
-
-  const client = new AgentAuthClient({
-    storage: new MemoryStorage(),
-    directoryUrl: null,
-    allowDirectDiscovery: true,
-    hostName: `AgentLater journey ${run}`,
-  });
-  const { agentId } = await client.connectAgent({
-    provider: c.gatewayUrl,
-    mode: "autonomous",
-    capabilities: CAPABILITIES,
-    name: "journey",
-  });
   // Agent Auth allows 60 capability calls a minute; a 429 is refused before it runs, so the
   // journey waits it out and sends the same call again.
   const exec = async (capability, args = {}) => {
@@ -85,8 +122,6 @@ export async function runJourney(c) {
       }
     }
   };
-  log("agent registered");
-
   const project = await exec("create_project");
   check(/^prj_/.test(project.id) && project.signing_secret, "create_project returned no project");
   log(`project ${project.id}`);
@@ -375,6 +410,7 @@ export async function runJourney(c) {
   // 13. Hosted MCP: a client connects through OAuth consent (its own project and trial) and
   //    schedules a delivery with the schedule_http tool.
   const tokens = await connectHosted(c.gatewayUrl);
+  c.cleanups.push(() => revokeHosted(c.gatewayUrl, tokens));
   const mcp = new Client({ name: "runlater-journey", version: "1.0.0" });
   await mcp.connect(
     new StreamableHTTPClientTransport(new URL(`${c.gatewayUrl}/mcp`), {
@@ -399,27 +435,33 @@ export async function runJourney(c) {
   }
   log("hosted MCP connected and delivered");
 
-  // 14. A2A, as the published example client does it: read the Agent Card, register through
-  //     Agent Auth as the card says, send one delivery through /a2a and read it with GetTask
-  //     until it ends. The client is a host of its own, so it has its own project and trial,
-  //     as hosted MCP does. Its keys are in a file only for as long as this step runs.
+  // 14. A2A, with the published example client: it reads the Agent Card, signs a token as the
+  //     card says, sends one delivery through /a2a and reads it with GetTask until it ends. It
+  //     runs as this journey's agent, from a state file holding this run's keys, as it does when
+  //     it is started a second time; so it registers nothing and leaves no host or project of
+  //     its own. Registering from nothing by the card is the example's own test in agent.e2e.mjs.
+  //     The keys are in the file only for as long as this step runs.
   const a2aDir = await mkdtemp(join(tmpdir(), "journey-a2a-"));
   try {
+    const state = join(a2aDir, "client.json");
+    await writeFile(state, JSON.stringify({ ...Object.fromEntries(c.keys), "agentlater:agent": agentId }), { mode: 0o600 });
     const viaA2a = await runA2aClient({
       baseUrl: c.gatewayUrl,
-      state: join(a2aDir, "client.json"),
+      state,
       payload: { url: hook("a2a"), body: run },
       waitMs: timeoutMs,
       log: (line) => log(`a2a: ${line}`),
     });
-    check(viaA2a.projectId !== project.id, "the A2A client shared the agent's project");
+    check(!viaA2a.registered && viaA2a.agentId === agentId, `the A2A client registered an agent of its own, ${viaA2a.agentId}`);
+    check(viaA2a.projectId === project.id, "the A2A client did not reach the agent's project");
     check(viaA2a.state === "TASK_STATE_COMPLETED", `the A2A task is ${viaA2a.state}: ${JSON.stringify(viaA2a.delivery?.attempts)}`);
     const arrived = (await deliveries()).find((d) => d.name === "a2a");
     check(arrived?.headers["runlater-task-id"] === viaA2a.taskId && arrived.body === run, "the receiver has no record of the A2A delivery");
+    check(verify(arrived, run, rotated.signing_secret), "the A2A delivery's RunLater-Signature does not verify with the project's signing_secret");
   } finally {
     await rm(a2aDir, { recursive: true, force: true });
   }
-  log("A2A client read the Agent Card, registered and delivered");
+  log("A2A client read the Agent Card and delivered as the journey's agent");
 
   const all = await deliveries();
   check(!all.some((d) => d.name === "later"), "a canceled task was delivered");
@@ -428,5 +470,5 @@ export async function runJourney(c) {
   check(all.filter((d) => d.name === "acted").length === 1, "a watch's match should send its action exactly once");
   const used = (await exec("get_project")).attempts_used;
   log(`done: ${used} delivery attempts used`);
-  return { run, projectId: project.id, attemptsUsed: used };
+  return { run, agentId, projectId: project.id, attemptsUsed: used };
 }
