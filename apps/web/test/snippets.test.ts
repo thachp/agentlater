@@ -206,7 +206,10 @@ describe("stated A2A facts", () => {
     expect(auth).toContain("const WEEK_SECS = 7 * 24 * 3600;");
     expect(auth).toContain("absoluteLifetime: WEEK_SECS,");
     expect(stated["Agent"]).toContain("Revoked 7 days after it is registered");
-    expect(a2a).toContain("const MAX_BODY_BYTES = 192 * 1024;");
+    // /a2a reads its body under the gateway's one limit, and that limit is what the page states.
+    expect(a2a).toMatch(/import \{[^}]*\bMAX_BODY_BYTES\b[^}]*\} from "\.\/body";/);
+    expect(a2a).toContain("await readLimited(request, MAX_BODY_BYTES);");
+    expect(src("body.ts")).toContain("export const MAX_BODY_BYTES = 192 * 1024;");
     expect(stated["Request size"]).toBe("192 KiB");
     expect(a2a).toContain("pageSize = 50,");
     expect(a2a).toContain("pageSize < 1 || pageSize > 100");

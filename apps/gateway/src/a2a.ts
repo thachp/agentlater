@@ -17,7 +17,7 @@ import {
 } from "@a2a-js/sdk/errors";
 import { JsonRpcTransportHandler, ServerCallContext, validateVersion, type A2ARequestHandler, type User } from "@a2a-js/sdk/server";
 import { ApiError } from "./api";
-import { error, json, readLimited, tooLarge } from "./body";
+import { error, json, MAX_BODY_BYTES, readLimited, tooLarge } from "./body";
 import { ArgumentError, capabilities } from "./capabilities";
 import { SITE } from "./discovery";
 
@@ -399,9 +399,6 @@ function operationsFor(env: A2aEnv, caller: Caller, run: Run, refused: (refusal:
 }
 
 // ---- The HTTP transport
-
-/** The same limit as the gateway's other JSON endpoints. */
-const MAX_BODY_BYTES = 192 * 1024;
 
 /** A refusal as HTTP. A 401 carries the Agent Auth challenge (its specification, 5.14), so a caller can find where to register. */
 function refuse(env: A2aEnv, { status, code, message, retryAfter }: Refusal): Response {
