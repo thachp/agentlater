@@ -7,6 +7,7 @@
 //   RECEIVER_TOKEN=... node apps/gateway/e2e/staging.mjs
 
 import { runJourney } from "./journey.mjs";
+import { describe } from "./net.mjs";
 
 const { GATEWAY_URL, RECEIVER_URL, RECEIVER_TOKEN } = process.env;
 if (!GATEWAY_URL || !RECEIVER_URL || !RECEIVER_TOKEN) {
@@ -23,6 +24,6 @@ try {
   });
   console.log(JSON.stringify(result));
 } catch (e) {
-  console.error(`journey failed: ${e instanceof Error ? e.message : e}`);
+  console.error(`journey failed: ${describe(e)}`);
   process.exit(1);
 }

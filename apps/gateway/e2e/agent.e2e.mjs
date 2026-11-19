@@ -28,7 +28,7 @@ import { apiWorker } from "../../api/test/api-worker.mjs";
 import { connect as connectExample, delivery as exampleDelivery, deliveryOf, ended, run as runExample } from "../examples/a2a-client.mjs";
 import { runA2aReport } from "./a2a-staging.mjs";
 import { runJourney } from "./journey.mjs";
-import { REDIRECT, connectHosted } from "./oauth.mjs";
+import { REDIRECT, connectHosted, revokeHosted } from "./oauth.mjs";
 
 const gatewayDir = fileURLToPath(new URL("..", import.meta.url));
 const receiverDir = fileURLToPath(new URL("../../receiver/", import.meta.url));
@@ -2342,6 +2342,16 @@ describe("hosted MCP at /mcp", () => {
     await client.close();
   });
 
+  test("revokeHosted waits until the access token is refused, and says so when it never is", async () => {
+    const tokens = await connect("Revoked");
+    // An unknown refresh token is answered 200 and revokes nothing, so the access token is still accepted.
+    await assert.rejects(revokeHosted(origin, { ...tokens, refresh_token: "not:a:token" }, { waitMs: 1_500, everyMs: 500 }), /still accepted \ds after revocation \(last answered 200\)/);
+    // Revoking the real one: the local KV deletes at once, so the first try is refused.
+    const start = Date.now();
+    await revokeHosted(origin, tokens, { waitMs: 1_500, everyMs: 500 });
+    assert.ok(Date.now() - start < 1_000, "the token was not refused on the first try");
+  });
+
   test("/mcp only takes POST: no standalone stream, no session to delete", async () => {
     const { access_token } = await connect("Methods");
     for (const method of ["GET", "DELETE"]) {
@@ -2440,5 +2450,19 @@ describe("staging journey, run against the local stack", () => {
     );
     const made = (await (await gatewayDb()).prepare('SELECT id, status FROM "agent"').all()).results.filter((a) => !before.has(a.id));
     assert.deepEqual(made.map((a) => a.status), ["revoked"]);
+  });
+
+  test("a request the network fails is named with its cause, not as a bare fetch failed", async () => {
+    // A port the OS just handed out and that is closed again: the journey's first request is refused.
+    const server = createServer().listen(0, "127.0.0.1");
+    await new Promise((r) => server.once("listening", r));
+    const { port } = server.address();
+    await new Promise((r) => server.close(r));
+    const env = { ...process.env, GATEWAY_URL: `http://127.0.0.1:${port}`, RECEIVER_URL: `https://${RECEIVER_HOST}`, RECEIVER_TOKEN: "unused" };
+    await assert.rejects(promisify(execFile)(process.execPath, [join(gatewayDir, "e2e/staging.mjs")], { env }), (e) => {
+      assert.equal(e.code, 1);
+      assert.match(e.stderr, new RegExp(`^journey failed: GET 127\\.0\\.0\\.1:${port}/health failed: ECONNREFUSED `, "m"));
+      return true;
+    });
   });
 });
