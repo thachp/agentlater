@@ -109,7 +109,10 @@ the one a hosted MCP connection makes for itself) and one OAuth client. When it 
 it revokes its agent and withdraws its hosted MCP grant, so nothing it leaves can sign in. What stays:
 the revoked agent and its host, the two projects (their trials end after 7 days), the OAuth client, and
 the run's tasks, deleted 30 days after they finished. No capability or route deletes a project, a host
-or an OAuth client.
+or an OAuth client. Hosted MCP tokens are kept in Workers KV, which is eventually consistent, so after
+withdrawing the grant the journey tries the access token at `/mcp` every 5 seconds for up to 90 seconds
+and fails if it is still accepted then. A request the network fails is reported with its method, host,
+path and cause (`ECONNRESET`, `ENOTFOUND`, a timeout); no step is retried.
 
 ### A2A end-to-end run
 

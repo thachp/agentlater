@@ -2,6 +2,7 @@
 // click Connect, and exchange the code. Used by journey.mjs and agent.e2e.mjs.
 
 import { createHash, randomBytes } from "node:crypto";
+import { request } from "./net.mjs";
 
 export const REDIRECT = "http://127.0.0.1:9/callback";
 const b64url = (b) => Buffer.from(b).toString("base64url");
@@ -14,7 +15,7 @@ export async function connectHosted(origin, clientName = "AgentLater journey") {
   };
   const reg = await step(
     "client registration",
-    await fetch(`${origin}/oauth/register`, {
+    await request(`${origin}/oauth/register`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -38,14 +39,14 @@ export async function connectHosted(origin, clientName = "AgentLater journey") {
     state: "journey",
     resource: `${origin}/mcp`,
   });
-  const page = await step("the consent page", await fetch(`${origin}/authorize?${query}`), 200);
+  const page = await step("the consent page", await request(`${origin}/authorize?${query}`), 200);
   const html = await page.text();
   const handle = html.match(/name="handle" value="([^"]+)"/)?.[1];
   if (!handle) throw new Error("the consent page has no form");
   const cookie = page.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
   const approve = await step(
     "approving consent",
-    await fetch(`${origin}/authorize`, {
+    await request(`${origin}/authorize`, {
       method: "POST",
       redirect: "manual",
       headers: { Cookie: cookie },
@@ -57,7 +58,7 @@ export async function connectHosted(origin, clientName = "AgentLater journey") {
   if (back.searchParams.get("state") !== "journey") throw new Error(`consent redirected to ${back}`);
   const token = await step(
     "the token exchange",
-    await fetch(`${origin}/oauth/token`, {
+    await request(`${origin}/oauth/token`, {
       method: "POST",
       body: new URLSearchParams({
         grant_type: "authorization_code",
@@ -76,11 +77,28 @@ export async function connectHosted(origin, clientName = "AgentLater journey") {
 /**
  * Withdraws what `connectHosted` was granted (RFC 7009, at the token endpoint): revoking the
  * refresh token ends the grant and its access tokens. The client's registration stays.
+ *
+ * The endpoint answers 200 whether or not it revoked anything, so the access token is then tried
+ * at /mcp until it is refused with 401. Tokens live in Workers KV, which is eventually consistent:
+ * the provider deletes the token's key, but a location that read it may serve it for up to 60
+ * seconds (the default cacheTtl of the provider's get), so the try is repeated for `waitMs`.
+ * Each try is what a real MCP client sends, a ping with its Accept header, so any answer but a
+ * 401 means the token was accepted.
  */
-export async function revokeHosted(origin, { client_id, refresh_token, access_token }) {
-  const res = await fetch(`${origin}/oauth/token`, { method: "POST", body: new URLSearchParams({ token: refresh_token, token_type_hint: "refresh_token", client_id }) });
+export async function revokeHosted(origin, { client_id, refresh_token, access_token }, { waitMs = 90_000, everyMs = 5_000 } = {}) {
+  const res = await request(`${origin}/oauth/token`, { method: "POST", body: new URLSearchParams({ token: refresh_token, token_type_hint: "refresh_token", client_id }) });
   if (!res.ok) throw new Error(`revoking the hosted MCP grant returned ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  // The endpoint answers 200 whether or not it revoked anything, so the access token is tried.
-  const after = await fetch(`${origin}/mcp`, { method: "POST", headers: { Authorization: `Bearer ${access_token}`, "Content-Type": "application/json" }, body: "{}" });
-  if (after.status !== 401) throw new Error(`a revoked hosted MCP token was answered ${after.status}`);
+  const start = Date.now();
+  for (;;) {
+    const after = await request(`${origin}/mcp`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${access_token}`, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
+    });
+    await after.body?.cancel();
+    if (after.status === 401) return;
+    const waited = Date.now() - start;
+    if (waited >= waitMs) throw new Error(`the revoked hosted MCP token was still accepted ${Math.round(waited / 1000)}s after revocation (last answered ${after.status})`);
+    await new Promise((r) => setTimeout(r, Math.min(everyMs, waitMs - waited)));
+  }
 }

@@ -10,6 +10,10 @@
 // left can sign in: the agent is revoked and the hosted MCP grant is withdrawn when the run ends,
 // passed or failed, and the keys were only ever in this process. No capability or route deletes a
 // project, a host or an OAuth client.
+//
+// Every request goes through `request` (net.mjs), so one the network fails names its method,
+// host and path and the cause. No step is retried after such a failure: one that schedules
+// something could be sent twice, and a retry would hide an outage.
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -19,6 +23,7 @@ import { AgentAuthClient, KVStorage } from "@auth/agent";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { run as runA2aClient } from "../examples/a2a-client.mjs";
+import { describe, request } from "./net.mjs";
 import { connectHosted, revokeHosted } from "./oauth.mjs";
 
 const CAPABILITIES = [
@@ -49,7 +54,7 @@ export async function runJourney(c) {
   const log = c.log ?? (() => {});
   const run = `run-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
   log(`run ${run}`);
-  const health = await fetch(`${c.gatewayUrl}/health`);
+  const health = await request(`${c.gatewayUrl}/health`);
   check(health.ok, `gateway /health returned ${health.status}`);
   check((await health.json()).api === "ok", "gateway cannot reach the API");
   log("health ok");
@@ -58,6 +63,7 @@ export async function runJourney(c) {
   const keys = new Map();
   const client = new AgentAuthClient({
     storage: new KVStorage({ get: async (key) => keys.get(key) ?? null, set: async (key, value) => void keys.set(key, value), del: async (key) => void keys.delete(key) }),
+    fetch: request,
     directoryUrl: null,
     allowDirectDiscovery: true,
     hostName: `AgentLater journey ${run}`,
@@ -81,7 +87,7 @@ export async function runJourney(c) {
     failure = e;
   }
   const leftovers = [];
-  for (const cleanup of cleanups.reverse()) await cleanup().catch((e) => leftovers.push(e instanceof Error ? e.message : String(e)));
+  for (const cleanup of cleanups.reverse()) await cleanup().catch((e) => leftovers.push(describe(e)));
   if (failure) {
     for (const message of leftovers) log(`clean-up failed: ${message}`);
     throw failure;
@@ -127,7 +133,7 @@ async function steps(c) {
   log(`project ${project.id}`);
 
   const deliveries = async () => {
-    const res = await fetch(`${readUrl}/runs/${run}`, { headers: { Authorization: `Bearer ${c.receiverToken}` } });
+    const res = await request(`${readUrl}/runs/${run}`, { headers: { Authorization: `Bearer ${c.receiverToken}` } });
     check(res.ok, `receiver read returned ${res.status}`);
     return (await res.json()).deliveries;
   };
@@ -347,7 +353,7 @@ async function steps(c) {
   check(!JSON.stringify(inbound).includes(hookSecret), "create_hook echoed the secret");
   const hookBody = JSON.stringify({ action: "completed", run });
   const toHook = (b, delivery = `journey-${run}`) =>
-    fetch(inbound.url, {
+    request(inbound.url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -366,9 +372,9 @@ async function steps(c) {
   // 200 too: if a first try was written but its answer was lost, the retry is a duplicate.
   check(firstHook.status === 202 || firstHook.status === 200, `the signed webhook got ${firstHook.status}`);
   check((await toHook(hookBody)).status === 200, "the webhook's retry was not recognized");
-  const forgedHook = await fetch(inbound.url, { method: "POST", headers: { "X-Hub-Signature-256": "sha256=00" }, body: hookBody });
+  const forgedHook = await request(inbound.url, { method: "POST", headers: { "X-Hub-Signature-256": "sha256=00" }, body: hookBody });
   check(forgedHook.status === 401, `a forged webhook got ${forgedHook.status}`);
-  check((await fetch(inbound.url)).status === 405, "the hook URL answered a GET");
+  check((await request(inbound.url)).status === 405, "the hook URL answered a GET");
   const hookPage = await exec("read_inbox", { ack: true });
   const hookEvents = hookPage.events.filter((e) => e.event === "hook.received" && e.hook === "journey");
   check(hookEvents.length === 1, `expected one hook event, got ${hookEvents.length}`);
@@ -415,6 +421,7 @@ async function steps(c) {
   await mcp.connect(
     new StreamableHTTPClientTransport(new URL(`${c.gatewayUrl}/mcp`), {
       requestInit: { headers: { Authorization: `Bearer ${tokens.access_token}` } },
+      fetch: request,
     }),
   );
   try {
@@ -448,6 +455,7 @@ async function steps(c) {
     const viaA2a = await runA2aClient({
       baseUrl: c.gatewayUrl,
       state,
+      fetch: request,
       payload: { url: hook("a2a"), body: run },
       waitMs: timeoutMs,
       log: (line) => log(`a2a: ${line}`),
