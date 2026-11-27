@@ -17,9 +17,9 @@
     "verify": "node scripts/check.mjs"
   },
   "devDependencies": {
-    "knip": "6.45.0",
+    "knip": "6.48.0",
     "typescript": "7.0.2",
-    "wrangler": "4.160.0"
+    "wrangler": "4.168.0"
   },
   "overrides": {
     "glob": "14.0.4",
